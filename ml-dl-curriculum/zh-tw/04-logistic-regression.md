@@ -1,0 +1,319 @@
+# 04 — 邏輯迴歸與分類
+
+> 第 1 部分 · 第 04 課 · 程式技術棧：numpy-from-scratch
+
+**先備知識：** [03 — 梯度下降](03-gradient-descent.md)（你應該已熟悉損失的梯度、更新規則 $\theta \leftarrow \theta - \eta \nabla J$，以及向量化的 numpy）。來自 [02 — 線性迴歸](02-linear-regression.md) 的線性迴歸 (linear regression)，正是我們接下來要扳成分類器的模型。
+
+**學完本課你能：**
+- 解釋為何線性模型的原始輸出是預測「類別」的錯誤工具，以及 **sigmoid 函數** 如何修正它。
+- 推導 **二元交叉熵 (binary cross-entropy)**（對數損失，log-loss），並說明它的梯度會塌縮成與線性迴歸相同的乾淨形式：$\frac{1}{m}X^\top(\hat{y}-y)$。
+- 用 numpy 以梯度下降從零實作邏輯迴歸 (logistic regression)。
+- 繪製並解讀 **決策邊界 (decision boundary)** 與 sigmoid 曲線。
+- 勾勒 **softmax 函數** 如何將此推廣到超過兩個類別的情況。
+
+---
+
+## 1. 直覺理解
+
+在線性迴歸中你預測的是一個「數字」：房價、由壓力讀數推得的水深、到航點 (waypoint) 的距離。現在你要預測的是一個 **類別**：這個聲納 (sonar) 回波是 **水雷** 還是 **岩石**？無人機應該 **起飛** 還是 **中止**？
+
+最直觀的取巧做法是擬合一條線再加上門檻：當線高於某個切點時就預測為類別 1。這大致行得通——但這條線本身輸出的值落在 $(-\infty, +\infty)$，而我們想要的東西要像個 **機率 (probability)**：被限制在 $(0, 1)$ 之間，在明確的情況下有把握地接近 0 或 1，在模型不確定時則徘徊在 0.5 附近。
+
+訣竅在於：保留線性部分 $z = w^\top x + b$（就是你已經知道的那個內積 (dot product)），然後將它 **擠壓** 過 **sigmoid 函數** $\sigma(z) = 1/(1+e^{-z})$。線性部分決定你落在 **邊界的哪一側** 以及 **離邊界多遠**；sigmoid 則把「多遠」轉成「多有把握」。
+
+從你的領域來打個比方：把 $z$ 想成一個 **帶號的間隔 (signed margin)**——就像一個控制誤差，或到路徑的帶號距離。一艘無人水面載具 (USV) 的橫向誤差會同時告訴你方向（左舷／右舷）與大小。sigmoid 就是一道柔性閘門，它說「離中心線愈遠，我就愈確定你在哪一側」，一旦你明顯偏向某一側，它便飽和成一個堅定的是／否。
+
+```mermaid
+flowchart LR
+    X["特徵 x<br/>(聲納頻段、<br/>風速等)"] --> Z["線性分數<br/>z = wᵀx + b"]
+    Z --> S["sigmoid<br/>σ(z) ∈ (0,1)"]
+    S --> P["P(class=1 | x)"]
+    P --> D{"≥ 0.5 ?"}
+    D -->|yes| C1["預測 1 (mine)"]
+    D -->|no| C0["預測 0 (rock)"]
+```
+
+所有滿足 $z = 0$（等同於 $\sigma(z) = 0.5$）的點所構成的集合，就是 **決策邊界**。由於 $z$ 對 $x$ 是線性的，這條邊界會是一條直線（在 2D 中）、一個平面（在 3D 中），或一般情況下的一個超平面。邏輯迴歸是一種 **線性分類器**——它的「非線性只出現在如何回報信心」，而不在邊界的形狀上。
+
+---
+
+## 2. 數學原理
+
+**符號。** $x \in \mathbb{R}^n$ 是單一範例 (sample) 的特徵向量（$n$ 個特徵）。$w \in \mathbb{R}^n$ 是權重 (weight)，$b \in \mathbb{R}$ 是偏值 (bias)。$y \in \{0, 1\}$ 是真實標籤 (label)。我們把 $m$ 個範例堆疊成一個設計矩陣 $X \in \mathbb{R}^{m \times n}$（每一列一個範例），標籤為 $y \in \{0,1\}^m$。
+
+### 模型
+
+$$z = w^\top x + b, \qquad \hat{y} = \sigma(z) = \frac{1}{1 + e^{-z}}$$
+
+$\hat{y}$ 被解讀為 $P(y=1 \mid x)$，而 $P(y=0 \mid x) = 1 - \hat{y}$。sigmoid 來自對 **對數勝率 (log-odds)**（logit）取反：如果你假設類別 1 的對數勝率對 $x$ 是線性的，
+
+$$\log\frac{P(y=1)}{P(y=0)} = z \;\;\Longrightarrow\;\; P(y=1) = \frac{1}{1+e^{-z}} = \sigma(z).$$
+
+這就是 **sigmoid 的由來**——它是唯一能把線性的對數勝率分數映射回機率的函數。
+
+一個我們會用上兩次的事實：sigmoid 的導數 (derivative) 漂亮得令人愉快，
+
+$$\sigma'(z) = \sigma(z)\,(1 - \sigma(z)).$$
+
+（快速推導：$\sigma = (1+e^{-z})^{-1}$，所以 $\sigma' = e^{-z}(1+e^{-z})^{-2} = \sigma \cdot \frac{e^{-z}}{1+e^{-z}} = \sigma(1-\sigma)$。）
+
+### 為何不直接用 MSE？
+
+你可能會想把線性迴歸的均方誤差 (mean squared error) $\frac{1}{m}\sum(\hat{y}-y)^2$ 重新拿來用。但有兩個問題：
+
+1. **它對 $w$ 是非凸的。** 把 $\hat{y}=\sigma(w^\top x + b)$ 代入 MSE，損失曲面會變得波浪起伏、出現局部極小值。梯度下降可能卡住。而交叉熵 (cross-entropy)（見下文）對邏輯迴歸是 **凸 (函數)** 的——只有一個全域最小值。
+2. **對有把握卻錯誤的預測會發生梯度消失 (vanishing gradient)。** MSE 的梯度帶有一個因子 $\sigma'(z)=\sigma(1-\sigma)$，當 $\hat{y}$ 接近 0 或 1 時它約等於 0。所以一個有把握卻 **錯誤** 的預測（譬如 $y=0$ 時卻 $\hat{y}=0.99$）會產生幾乎為零的梯度，模型幾乎學不到東西。這恰恰反了——當你有把握地犯錯時，你希望得到一記大力的推動。
+
+### 二元交叉熵（對數損失）
+
+正確的損失來自 **最大概似 (maximum likelihood)**。對單一範例而言，模型賦予 **真實** 標籤的機率是 $\hat{y}^{\,y}(1-\hat{y})^{1-y}$（當 $y=1$ 時等於 $\hat{y}$，當 $y=0$ 時等於 $1-\hat{y}$）。在所有範例上最大化對數概似，等同於最小化它的負平均值，也就是 **二元交叉熵**：
+
+$$J(w,b) = -\frac{1}{m}\sum_{i=1}^{m}\Big[\, y_i \log \hat{y}_i + (1-y_i)\log(1-\hat{y}_i)\,\Big].$$
+
+直覺：若 $y=1$，該項為 $-\log\hat{y}$——當 $\hat{y}=1$ 時為零，而當 $\hat{y}\to 0$ 時會朝 $+\infty$ 暴衝。這個損失會 **狠狠懲罰有把握卻錯誤的答案**，這正是修正上面問題 (2) 的關鍵。
+
+### 梯度（重點所在）
+
+把 $J$ 對 $z_i$ 微分。連鎖律 (chain rule) 帶來的 $\sigma'$ 會與對數項帶來的 $\frac{1}{\hat{y}(1-\hat{y})}$ **互相抵消**：
+
+$$\frac{\partial J}{\partial z_i} = \hat{y}_i - y_i.$$
+
+於是對參數的梯度為
+
+$$\boxed{\;\frac{\partial J}{\partial w} = \frac{1}{m}X^\top(\hat{y}-y), \qquad \frac{\partial J}{\partial b} = \frac{1}{m}\sum_i(\hat{y}_i - y_i).\;}$$
+
+看起來眼熟嗎？它與第 02 課的線性迴歸梯度是 **完全相同的形式**——唯一的差別是這裡 $\hat{y}=\sigma(Xw+b)$，而非 $\hat{y}=Xw+b$。這並非巧合：線性迴歸和邏輯迴歸都是 **廣義線性模型 (generalized linear models)**，而對於相匹配的損失（高斯對應 MSE，伯努利對應交叉熵），梯度永遠是「設計矩陣轉置乘以殘差」。把 $X^\top(\hat{y}-y)$ 記熟一次，兩個模型就都到手了。
+
+### 從兩類到多類：softmax（預告）
+
+對於 $K > 2$ 個類別，把單一分數替換成每個類別一個分數 $z_k = w_k^\top x + b_k$，並把 sigmoid 替換成 **softmax 函數**：
+
+$$\hat{y}_k = \frac{e^{z_k}}{\sum_{j=1}^{K} e^{z_j}}, \qquad \sum_k \hat{y}_k = 1.$$
+
+損失變成 **類別交叉熵 (categorical cross-entropy)** $-\sum_k y_k \log \hat{y}_k$（其中 $y$ 採獨熱編碼 (one-hot)），而且——美妙的是——梯度 **依然** 是 $\hat{y}-y$。sigmoid 不過是 softmax 在 $K=2$ 時的特例。當我們在 [09 — 神經網路](09-neural-networks-mlp.md) 中建構神經網路 (neural network) 時，會再次仰賴這一點；一個邏輯迴歸，字面上就是一個帶有 sigmoid 輸出的單層網路。
+
+---
+
+## 3. 程式碼
+
+我們會用 numpy 從零打造：sigmoid、損失、梯度、一個擬合迴圈，以及兩張圖。一切都是向量化的。
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+rng = np.random.default_rng(0)
+
+# ---------- core pieces ----------
+def sigmoid(z):
+    # 數值穩定的 sigmoid：避免大的負數 z 在 exp 中溢位。
+    # 當 z >= 0 用 1/(1+e^-z)；當 z < 0 用 e^z/(1+e^z)。值相同，但不會溢位。
+    out = np.empty_like(z, dtype=float)
+    pos = z >= 0
+    out[pos] = 1.0 / (1.0 + np.exp(-z[pos]))
+    ez = np.exp(z[~pos])
+    out[~pos] = ez / (1.0 + ez)
+    return out
+
+def bce_loss(y, y_hat, eps=1e-12):
+    # 二元交叉熵。裁剪以避免 log(0) -> -inf。
+    y_hat = np.clip(y_hat, eps, 1 - eps)
+    return -np.mean(y * np.log(y_hat) + (1 - y) * np.log(1 - y_hat))
+
+class LogisticRegression:
+    """以全批次梯度下降訓練的邏輯迴歸。"""
+    def __init__(self, lr=0.1, n_iters=2000):
+        self.lr = lr
+        self.n_iters = n_iters
+        self.w = None
+        self.b = 0.0
+        self.history = []          # 每次迭代的損失，供繪圖用
+
+    def fit(self, X, y):
+        m, n = X.shape
+        self.w = np.zeros(n)        # 從原點開始；損失是凸的，所以這樣沒問題
+        self.b = 0.0
+        for _ in range(self.n_iters):
+            z = X @ self.w + self.b           # 線性分數，形狀為 (m,)
+            y_hat = sigmoid(z)                # 機率，形狀為 (m,)
+            error = y_hat - y                 # 驅動一切的殘差
+            # 梯度：我們推導出的 X^T (y_hat - y) 形式。
+            grad_w = (X.T @ error) / m        # 形狀為 (n,)
+            grad_b = error.mean()             # 純量
+            self.w -= self.lr * grad_w
+            self.b -= self.lr * grad_b
+            self.history.append(bce_loss(y, y_hat))
+        return self
+
+    def predict_proba(self, X):
+        return sigmoid(X @ self.w + self.b)
+
+    def predict(self, X, threshold=0.5):
+        return (self.predict_proba(X) >= threshold).astype(int)
+
+# ---------- 一個玩具 2D 資料集：兩團我們看得見的點雲 ----------
+m = 200
+# 類別 0 集中在左下，類別 1 集中在右上，兩者有重疊。
+X0 = rng.normal(loc=[-1.5, -1.0], scale=1.0, size=(m // 2, 2))
+X1 = rng.normal(loc=[ 1.5,  1.2], scale=1.0, size=(m // 2, 2))
+X = np.vstack([X0, X1])
+y = np.hstack([np.zeros(m // 2), np.ones(m // 2)])
+
+# 標準化特徵（平均 0、標準差 1）—— GD 在縮放後的輸入上收斂得快得多。
+X_mean, X_std = X.mean(axis=0), X.std(axis=0)
+Xs = (X - X_mean) / X_std
+
+model = LogisticRegression(lr=0.5, n_iters=2000).fit(Xs, y)
+acc = (model.predict(Xs) == y).mean()
+print(f"final loss: {model.history[-1]:.3f}   train accuracy: {acc:.3f}")
+# -> 最終損失：0.098   訓練準確率：0.965
+```
+
+**圖 1 — sigmoid 本身。** 這是孤立來看的擠壓函數，讓你看清線性分數會被推過什麼。
+
+```python
+z = np.linspace(-8, 8, 200)
+plt.figure(figsize=(5, 3))
+plt.plot(z, sigmoid(z))
+plt.axhline(0.5, ls="--", c="gray"); plt.axvline(0, ls="--", c="gray")
+plt.xlabel("z = wᵀx + b"); plt.ylabel("σ(z) = P(y=1)")
+plt.title("Sigmoid: linear score → probability"); plt.tight_layout(); plt.show()
+```
+*你應該看到：* 一條平滑的 S 形曲線通過 $(0, 0.5)$，往左壓平趨向 0，往右壓平趨向 1。那兩段平坦的尾巴正是 MSE 梯度會消失之處——也正是交叉熵持續施壓之處。
+
+**圖 2 — 決策邊界。** 我們畫出資料，以及 $\hat{y}=0.5$ 的那條線。在標準化空間中，邊界為 $w_1 x_1 + w_2 x_2 + b = 0$，亦即 $x_2 = -(w_1 x_1 + b)/w_2$。
+
+```python
+plt.figure(figsize=(5, 4))
+plt.scatter(Xs[y == 0, 0], Xs[y == 0, 1], s=18, label="class 0 (rock)")
+plt.scatter(Xs[y == 1, 0], Xs[y == 1, 1], s=18, label="class 1 (mine)")
+
+# 由學到的權重繪出邊界線。
+x1 = np.linspace(Xs[:, 0].min(), Xs[:, 0].max(), 100)
+x2 = -(model.w[0] * x1 + model.b) / model.w[1]
+plt.plot(x1, x2, "k-", lw=2, label="decision boundary (p=0.5)")
+
+# 選用：為機率場上色，讓你看到柔性漸層，而不只是一條線。
+xx, yy = np.meshgrid(np.linspace(Xs[:,0].min(), Xs[:,0].max(), 200),
+                     np.linspace(Xs[:,1].min(), Xs[:,1].max(), 200))
+grid = np.c_[xx.ravel(), yy.ravel()]
+probs = model.predict_proba(grid).reshape(xx.shape)
+plt.contourf(xx, yy, probs, levels=20, cmap="coolwarm", alpha=0.25)
+
+plt.xlabel("feature 1 (std)"); plt.ylabel("feature 2 (std)")
+plt.legend(); plt.title("Logistic regression decision boundary"); plt.tight_layout(); plt.show()
+```
+*你應該看到：* 兩團點雲被一條 **筆直的** 黑線分開，且有一道平滑的藍→紅顏色漸層橫越其上。這條線是模型最不確定之處（p=0.5）；當你愈往兩側移動，信心便逐步攀升——那正是那條 S 形曲線在 2D 上的投影。
+
+**圖 3 — 損失下降。** 一個用來確認 GD 真的在學習的健全性檢查。
+
+```python
+plt.figure(figsize=(5, 3))
+plt.plot(model.history)
+plt.xlabel("iteration"); plt.ylabel("BCE loss")
+plt.title("Training loss"); plt.tight_layout(); plt.show()
+```
+*你應該看到：* 一條平滑、單調遞減並逐漸壓平的曲線——凸損失，沒有顛簸。如果你看到震盪，就是你的學習率 (learning rate) 太高了。
+
+---
+
+## 4. 實際案例
+
+### 由聲納分辨水雷與岩石——經典的 Sonar 資料集
+
+**Connectionist Bench（Sonar, Mines vs. Rocks）** 資料集（Gorman & Sejnowski, 1988；UCI 資料庫）正是這個問題的標準範例。一道聲納啁啾被打向海床上的某個物體；**回傳的能量被分箱成 60 個頻段**，每個都正規化到 $[0,1]$。標籤是 `M`（金屬圓柱＝水雷）或 `R`（岩石）。共 208 個範例、60 個特徵。
+
+這是一個真實的遙控潛水器 (ROV) ／無人水面載具 (USV) 反水雷任務的縮影：給定一道回波的頻譜特徵，決定是否要標記它。特徵向量 $x \in \mathbb{R}^{60}$ 是能量頻譜；邏輯迴歸會為每個頻段學到一個權重——實際上就是 **哪些頻率能區分金屬與石頭**——再加上一個偏值。
+
+```python
+import numpy as np
+from urllib.request import urlopen
+
+# UCI Sonar 資料集：60 個數值頻段 + 最後一欄標籤 'M' 或 'R'。
+URL = ("https://archive.ics.uci.edu/ml/machine-learning-databases/"
+       "undocumented/connectionist-bench/sonar/sonar.all-data")
+raw = urlopen(URL).read().decode().strip().splitlines()
+rows = [r.split(",") for r in raw]
+X = np.array([[float(v) for v in r[:60]] for r in rows])      # (208, 60)
+y = np.array([1 if r[60] == "M" else 0 for r in rows])         # 1 = 水雷
+
+# 標準化（每個頻段化為平均 0、標準差 1）—— 在 GD 之前不可或缺。
+X = (X - X.mean(0)) / X.std(0)
+
+# 簡單的 訓練/測試 切分（我們會在第 05 課介紹正確的 CV）。
+rng = np.random.default_rng(1)
+idx = rng.permutation(len(y))
+cut = int(0.75 * len(y))
+tr, te = idx[:cut], idx[cut:]
+
+model = LogisticRegression(lr=0.3, n_iters=3000).fit(X[tr], y[tr])
+train_acc = (model.predict(X[tr]) == y[tr]).mean()
+test_acc  = (model.predict(X[te]) == y[te]).mean()
+print(f"train acc: {train_acc:.2f}   test acc: {test_acc:.2f}")
+# -> 訓練準確率：0.97   測試準確率：0.83   （此處為決定性結果：種子與切分皆已固定）
+```
+
+注意 **訓練與測試準確率之間的落差**——這裡約有 14 個百分點（0.97 對 0.83）。156 個訓練範例上有 60 個特徵，正是 **過度擬合 (overfitting)** 的溫床，而那正是下一課的全部主題。在實際部署 (deployment) 中，這個決策也並非真的「非 0.5 不可」：對水雷偵測而言，**偽陰性 (false negative)**（漏掉的水雷）的代價遠高於 **偽陽性 (false positive)**（重新掃描一塊岩石），所以你會把門檻調低到比如 0.3，以更多誤報為代價來抓住更多水雷。邏輯迴歸交給你的是一個 **校準過的機率**，因此你可以依自己的作業風險來調整那個門檻——這是一個赤裸的是／否分類器無法提供的奢侈。
+
+### 無人機的起飛／不起飛——同一個模型，更少的特徵
+
+同一套機制可以從氣象遙測資料決定無人機是否起飛：$x = [\text{風速}, \text{陣風}, \text{能見度}, \text{降水機率}, \text{電池溫度}]$，標籤＝起飛並安全完成（1）對 中止／事故（0）。憑藉約 5 個可解讀的特徵，學到的權重便成為一條可讀的安全規則——風速上是負權重、能見度上是正權重——而機率輸出驅動一個分級反應：綠燈 > 0.8、警戒 0.5–0.8、取消 < 0.5。
+
+---
+
+## 5. 常見陷阱與技巧
+
+- **在 GD 之前，永遠要標準化你的特徵。** 聲納頻段 3 可能橫跨 $[0, 0.03]$，而頻段 50 橫跨 $[0, 0.9]$；在原始尺度上，損失曲面是一道被拉長的峽谷，梯度下降只能慢慢爬。化為平均 0／標準差 1 會讓它變得渾圓且快速。（第 06 課的樹模型不會在意這點，但每一個基於梯度的模型都會。）
+- **在 log 內部做裁剪。** $\log(0) = -\infty$。當模型變得非常有把握時，$\hat{y}$ 在浮點數中可能正好命中 0 或 1，你的損失就會變成 `nan`。請像 `bce_loss` 那樣把 $\hat{y}$ 裁剪到 $[\varepsilon, 1-\varepsilon]$。
+- **使用數值穩定的 sigmoid。** `1/(1+np.exp(-z))` 對非常負的 `z` 會溢位（巨大的 `exp`）。上面那個分支版本（或 `scipy.special.expit`）能避開警告與錯誤答案。
+- **在不平衡的資料上不要只回報準確率。** 如果 95% 的聲納回波是岩石，一個永遠說「岩石」的模型能得到 95% 的準確率，卻一顆水雷都抓不到。請改用精確率／召回率、混淆矩陣 (confusion matrix) 與 ROC-AUC——這些都在 [05 — 過度擬合與評估](05-overfitting-evaluation.md) 中介紹。
+- **0.5 門檻是一個選擇，不是一條定律。** 只有當偽陽性與偽陰性的代價相同、且類別平衡時，它才是最佳值。請把它移動到符合你的風險輪廓的位置。
+- **邏輯迴歸只能畫出一條筆直的邊界。** 如果你的類別彼此交錯（像 XOR 那樣），沒有任何一條線能分開它們，準確率便會停滯。解法不是工程化的非線性特徵（例如加入 $x_1^2$、$x_1 x_2$），就是一個具有學習而得的非線性邊界的模型——而那正是通往第 09 課神經網路的道路。
+
+---
+
+## 6. 自我檢測
+
+**Q1.** 除了凸性之外，把 MSE 換成交叉熵為何重要？想想一個有把握卻錯誤的預測。
+
+<details><summary>解答</summary>
+MSE 的梯度帶有一個因子 $\sigma'(z) = \sigma(1-\sigma)$，當 $\hat{y}$ 接近 0 或 1 時它約等於 0。因此一個有把握卻錯誤的預測（$\hat{y}=0.99$、$y=0$）會產生接近零的梯度——模型幾乎不修正。交叉熵的梯度就只是 $\hat{y}-y$，在那種情況下它恰好很大（≈1），所以模型會得到一記強力的修正推動。交叉熵會懲罰有把握的錯誤；MSE 則對它們聳聳肩而已。
+</details>
+
+**Q2.** 交叉熵對權重的梯度是 $\frac{1}{m}X^\top(\hat{y}-y)$，形式上與線性迴歸相同。sigmoid 的導數跑哪去了？
+
+<details><summary>解答</summary>
+它被抵消了。依連鎖律，對 $w$ 的梯度會帶上 $\sigma'(z)=\hat{y}(1-\hat{y})$，但對損失中的對數項微分會產生一個 $\frac{1}{\hat{y}(1-\hat{y})}$ 因子。兩者相乘為 1，剩下 $\partial J/\partial z = \hat{y}-y$。這個抵消正是 **為什麼** 交叉熵是 sigmoid（與 softmax）的「自然」損失——它是廣義線性模型中伯努利概似的相匹配損失。
+</details>
+
+**Q3.** 在一個 2D 問題中，即使 sigmoid 是彎曲的，為何決策邊界仍是一條直線？
+
+<details><summary>解答</summary>
+邊界是 $\hat{y}=0.5$ 的集合，亦即 $\sigma(z)=0.5$，亦即 $z=0$。由於 $z=w_1x_1+w_2x_2+b$ 對 $x$ 是線性的，$z=0$ 的集合便是一條直線（在更高維度中則是一個超平面）。sigmoid 只彎曲了「當你遠離這條線時信心如何變化」——它並不彎曲線本身。邏輯迴歸是一個線性分類器。
+</details>
+
+**Q4.** 你訓練了一個水雷偵測器，得到 97% 的訓練準確率／83% 的測試準確率。在部署時，你會保留 0.5 門檻嗎？為什麼會或為什麼不會？
+
+<details><summary>解答</summary>
+有兩個問題。第一，約 14 個百分點的訓練／測試落差暗示了過度擬合（60 個特徵、樣本很少）——你會想要正則化 (regularization) 與交叉驗證 (cross-validation)（第 05 課）。第二，0.5 門檻假設兩種錯誤類型的代價相同。對水雷而言，漏掉的偵測（偽陰性）是災難性的，而一次誤報只不過意味著重新掃描一塊岩石。你會把門檻 **調低**（例如 0.3）以提高對水雷的召回率，並接受更多偽陽性。邏輯迴歸校準過的機率輸出，正是讓這種調整成為可能的關鍵。
+</details>
+
+**Q5.** softmax 與 sigmoid 有何關係，梯度又有何改變？
+
+<details><summary>解答</summary>
+sigmoid 是 softmax 的兩類特例。softmax 為每個類別計算一個分數 $z_k$，並做正規化 $\hat{y}_k = e^{z_k}/\sum_j e^{z_j}$，使輸出總和為 1。搭配獨熱標籤上的類別交叉熵，對分數的梯度 **依然** 是 $\hat{y}-y$——同樣乾淨的殘差形式，只是每個類別都變成向量值。最佳化的故事沒有任何改變；你只是擁有 $K$ 個權重向量而非一個。
+</details>
+
+---
+
+## 回顧與下一步
+
+- **邏輯迴歸＝線性分數 $z=w^\top x+b$ 被 sigmoid 擠壓** 成 $(0,1)$ 中的機率；在 0.5（或你選定的風險水準）取門檻即可得到一個類別。
+- 決策邊界是 **線性的**（$z=0$）；只有 **信心** 才是非線性的。
+- **MSE 對分類是錯的**（非凸、對有把握的錯誤會梯度消失）；**二元交叉熵** 才是最大概似損失，且行為正確。
+- 它的梯度與線性迴歸一樣，是同一個漂亮的 $\frac{1}{m}X^\top(\hat{y}-y)$——兩者都是廣義線性模型。**softmax** 以同樣的梯度形式把它推廣到 $K$ 個類別。
+- 我們粗略地量了準確率，並看到一道訓練／測試落差——一個為「正確評估」埋下的懸念。
+
+接下來，我們會把那道落差變成主角：**為什麼模型會過度擬合、正則化如何駕馭它們，以及如何誠實地衡量一個分類器。**
+
+→ [05 — 過度擬合、正則化與評估](05-overfitting-evaluation.md)
