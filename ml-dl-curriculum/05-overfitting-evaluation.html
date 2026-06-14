@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Overfitting, Regularization &amp; Evaluation — Machine Learning &amp; Deep Learning</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="05-overfitting-evaluation">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 05</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL Course · 05</div>
+        <h1>Overfitting, Regularization &amp; Evaluation</h1>
+        <p>A model that scores 100% on its training data can still be useless in the field. This chapter is about the only thing that actually matters — <em>generalization</em> — and the toolkit for getting it: the bias–variance tradeoff, honest data splits, L1/L2 penalties, and the metrics that don't lie when faults are rare.</p>
+        <div class="meta"><span>⏱ ~45 min</span><span>🧠 Bias–variance</span><span>🧰 scikit-learn</span><span>📈 ROC / PR-AUC</span></div>
+      </section>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Code stack &amp; prerequisites</div>
+        <p>Part 1 · Lesson 05 · Code stack: scikit-learn (+ a little numpy). <strong>Prerequisite:</strong> <a href="04-logistic-regression.html">04 — Logistic Regression &amp; Classification</a>.</p>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎯</span> By the end you can</div>
+        <ul>
+          <li>Explain why a model that scores 100% on training data can still be useless in the field, using the <strong>bias–variance tradeoff</strong>.</li>
+          <li>Split data correctly into <strong>train / validation / test</strong> and run <strong>k-fold cross-validation</strong> without leaking information.</li>
+          <li>Apply <strong>L2 (ridge)</strong> and <strong>L1 (lasso)</strong> regularization and predict what each does to the weights.</li>
+          <li>Pick the right <strong>evaluation metric</strong> for the job — and explain why <strong>accuracy lies</strong> on imbalanced data like rare-fault detection.</li>
+          <li>Read a <strong>learning curve</strong> and an <strong>ROC curve</strong> to diagnose what is actually wrong with a model.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>Intuition</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>A model's only job is to <strong>generalize</strong>: do well on data it has <em>never seen</em>. Training accuracy is a trap, because the model can always cheat by memorizing.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> Analogy — the student who memorizes the answer key</div>
+        <p>Two students prep for an exam:</p>
+        <ul>
+          <li><strong>Student A (underfit / high bias)</strong> skims one page and concludes "the answer is always B." Wrong on practice tests, wrong on the real exam. Too simple to capture reality.</li>
+          <li><strong>Student B (overfit / high variance)</strong> memorizes every practice question word-for-word, including the typos. Perfect on practice, lost the moment a question is reworded. Memorized noise instead of the pattern.</li>
+          <li><strong>Student C (just right)</strong> learns the underlying rules. Slightly imperfect on practice, but solid on the real exam.</li>
+        </ul>
+        <p>Your model is one of these three. The whole game is keeping it near C.</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    A["Model too simple<br/>(few params)"] -->|"high bias<br/>underfit"| B["Sweet spot<br/>generalizes well"]
+    C["Model too flexible<br/>(many params)"] -->|"high variance<br/>overfit"| B
+    style B fill:#1f6f3f,color:#fff
+</div>
+
+      <div class="layer"><span class="step">④</span> Real case <small>why this matters now</small></div>
+      <p>For us on a USV: imagine fitting a model to predict drag from speed using 8 noisy log points. A straight line might underfit (the real curve is quadratic). A degree-7 polynomial will pass <em>exactly</em> through all 8 points — and then predict drag of −400 N at a speed you didn't log. It memorized the noise.</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>The Math</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive it</small></div>
+
+      <h3 id="bias-variance-decomposition">Bias–variance decomposition</h3>
+      <p>Suppose the truth is $y = f(x) + \varepsilon$, where $f$ is the real function and $\varepsilon$ is irreducible noise with variance $\sigma^2$ (sensor jitter you can never model away). We train a model $\hat{f}$ on a random dataset. The <strong>expected squared error</strong> at a test point $x_0$, averaged over all possible training sets, decomposes into three pieces:</p>
+      <div class="math-box">$$
+\mathbb{E}\big[(y - \hat{f}(x_0))^2\big] = \underbrace{\big(\,\mathbb{E}[\hat{f}(x_0)] - f(x_0)\,\big)^2}_{\text{Bias}^2} + \underbrace{\mathbb{E}\big[(\hat{f}(x_0) - \mathbb{E}[\hat{f}(x_0)])^2\big]}_{\text{Variance}} + \underbrace{\sigma^2}_{\text{Irreducible}}
+$$</div>
+      <p>Where it comes from: add and subtract $\mathbb{E}[\hat{f}(x_0)]$ inside the square and expand; the cross term vanishes in expectation, leaving exactly these three.</p>
+      <ul>
+        <li><strong>Bias</strong> = how far the <em>average</em> model is from the truth. Too-simple models have high bias (underfit).</li>
+        <li><strong>Variance</strong> = how much the model <em>wiggles</em> when you reshuffle the training data. Too-flexible models have high variance (overfit).</li>
+        <li><strong>Irreducible</strong> $\sigma^2$ = the noise floor. No model beats it.</li>
+      </ul>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The tradeoff in one line</div>
+        <p>You cannot drive both bias and variance to zero. Increasing model complexity lowers bias but raises variance. <strong>Regularization is how you buy a little bias to kill a lot of variance.</strong></p>
+      </div>
+
+      <h3 id="ridge-and-lasso">Ridge (L2) and Lasso (L1)</h3>
+      <p>Start from any loss $L(\mathbf{w})$ — say the mean squared error from <a href="02-linear-regression.html">Lesson 02</a>, where $\mathbf{w} \in \mathbb{R}^d$ is the weight vector. Regularization adds a <strong>penalty on the size of the weights</strong>:</p>
+      <div class="math-box">$$
+\text{Ridge:}\quad J(\mathbf{w}) = L(\mathbf{w}) + \alpha \sum_{j=1}^{d} w_j^2 = L(\mathbf{w}) + \alpha\,\lVert \mathbf{w} \rVert_2^2
+$$</div>
+      <div class="math-box">$$
+\text{Lasso:}\quad J(\mathbf{w}) = L(\mathbf{w}) + \alpha \sum_{j=1}^{d} |w_j| = L(\mathbf{w}) + \alpha\,\lVert \mathbf{w} \rVert_1
+$$</div>
+      <p>Here $\alpha \ge 0$ is the <strong>regularization strength</strong> (a knob you choose; $\alpha = 0$ recovers plain regression). Big weights are now expensive, so the optimizer prefers smaller, smoother solutions — less wiggle, less variance.</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Why L1 produces sparsity (zeros) and L2 does not</div>
+        <p>Think geometrically. Minimizing $L$ subject to a budget on weight size is the same as constraining $\mathbf{w}$ to a ball. The L2 ball is a <strong>circle</strong> (smooth, no corners); the L1 ball is a <strong>diamond</strong> with corners <em>on the axes</em>. The loss contours expand until they touch the constraint region — and a diamond gets touched at a <strong>corner</strong>, where some coordinates are exactly $0$.</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    subgraph L2["L2 / Ridge — round"]
+      direction TB
+      a["contour meets circle<br/>off-axis → all weights small,<br/>none exactly 0"]
+    end
+    subgraph L1["L1 / Lasso — diamond"]
+      direction TB
+      b["contour meets corner<br/>on axis → some weights = 0<br/>(feature selection)"]
+    end
+</div>
+
+      <p>So: <strong>ridge shrinks all weights toward zero; lasso shrinks and zeroes some out</strong>, effectively doing feature selection. If you suspect only a handful of your 30 IMU/sonar features matter, lasso will tell you which.</p>
+
+      <h3 id="evaluation-metrics">Evaluation metrics</h3>
+      <p><strong>Regression</strong> (predictions $\hat{y}_i$, truths $y_i$, $n$ samples):</p>
+      <div class="math-box">$$
+\text{MAE} = \frac{1}{n}\sum_i |y_i - \hat{y}_i|, \qquad
+\text{MSE} = \frac{1}{n}\sum_i (y_i - \hat{y}_i)^2, \qquad
+\text{RMSE} = \sqrt{\text{MSE}}
+$$</div>
+      <div class="math-box">$$
+R^2 = 1 - \frac{\sum_i (y_i - \hat{y}_i)^2}{\sum_i (y_i - \bar{y})^2}
+$$</div>
+      <ul>
+        <li><strong>MAE</strong> is in the original units (meters, newtons) and treats every error equally.</li>
+        <li><strong>MSE/RMSE</strong> square the errors, so they punish big mistakes harder; RMSE is back in original units. Use these when a few large errors are dangerous (a 5 m position error matters more than five 1 m errors).</li>
+        <li><strong>$R^2$</strong> compares your model to the trivial "always predict the mean $\bar{y}$" baseline. $R^2 = 1$ is perfect, $R^2 = 0$ means no better than the mean, and <strong>negative $R^2$ means you're worse than guessing the mean</strong> (yes, that happens).</li>
+      </ul>
+
+      <p><strong>Classification.</strong> Everything starts from the <strong>confusion matrix</strong>, counting True/False Positives/Negatives:</p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th></th><th>Predicted Positive</th><th>Predicted Negative</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Actual Pos</strong></td><td>TP</td><td>FN</td></tr>
+          <tr><td><strong>Actual Neg</strong></td><td>FP</td><td>TN</td></tr>
+        </tbody>
+      </table></div>
+      <div class="math-box">$$
+\text{Accuracy} = \frac{TP+TN}{TP+TN+FP+FN}, \quad
+\text{Precision} = \frac{TP}{TP+FP}, \quad
+\text{Recall} = \frac{TP}{TP+FN}
+$$</div>
+      <div class="math-box">$$
+F_1 = 2 \cdot \frac{\text{Precision} \cdot \text{Recall}}{\text{Precision} + \text{Recall}} \quad(\text{the harmonic mean — punishes lopsided scores})
+$$</div>
+      <ul>
+        <li><strong>Precision</strong> = "when I shout <em>fault!</em>, how often am I right?" (cost of false alarms).</li>
+        <li><strong>Recall</strong> = "of all real faults, how many did I catch?" (cost of misses).</li>
+        <li>These trade off: lower your decision threshold and you catch more faults (recall ↑) but cry wolf more (precision ↓). $F_1$ balances them.</li>
+      </ul>
+
+      <p><strong>ROC and AUC.</strong> A classifier outputs a <em>score</em> (probability); you pick a <strong>threshold</strong> to turn it into a yes/no. The <strong>ROC curve</strong> sweeps every threshold and plots <strong>True Positive Rate</strong> (= recall) against <strong>False Positive Rate</strong> $= FP/(FP+TN)$:</p>
+      <div class="math-box">$$
+\text{TPR} = \frac{TP}{TP+FN}, \qquad \text{FPR} = \frac{FP}{FP+TN}
+$$</div>
+      <p><strong>AUC</strong> = area under that curve $\in [0,1]$. It equals the probability that a random positive scores higher than a random negative. $\text{AUC}=0.5$ is a coin flip; $1.0$ is perfect. AUC is <strong>threshold-independent</strong> — it judges the ranking, not one operating point.</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>Code</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+
+      <h3 id="under-overfit">3.1 Under/overfit with polynomial regression</h3>
+      <div class="codeblock">
+        <div class="code-head">polyfit_under_over.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import make_pipeline
+
+rng = np.random.default_rng(0)
+
+# Ground truth is a smooth curve; we only see NOISY samples of it.
+def true_f(x):
+    return np.sin(1.5 * np.pi * x)
+
+n = 30
+X = np.sort(rng.uniform(0, 1, n)).reshape(-1, 1)   # shape (n, 1) for sklearn
+y = true_f(X).ravel() + rng.normal(0, 0.25, n)     # add sensor-like noise
+
+xs = np.linspace(0, 1, 300).reshape(-1, 1)         # dense grid for plotting
+
+plt.figure(figsize=(12, 4))
+for i, deg in enumerate([1, 4, 15]):               # underfit / good / overfit
+    model = make_pipeline(PolynomialFeatures(deg), LinearRegression())
+    model.fit(X, y)
+    plt.subplot(1, 3, i + 1)
+    plt.scatter(X, y, s=18, color="k", label="noisy data")
+    plt.plot(xs, true_f(xs), "g--", label="truth")
+    plt.plot(xs, model.predict(xs), "r", label=f"deg {deg} fit")
+    plt.ylim(-2, 2)
+    plt.title(f"degree {deg}  (train R²={model.score(X, y):.2f})")
+    plt.legend(fontsize=7)
+plt.tight_layout(); plt.show()
+# -&gt; degree 1  train R²=0.35   (underfit)
+# -&gt; degree 4  train R²=0.92   (good)
+# -&gt; degree 15 train R²=0.93   (overfit: wild swings between points)
+</code></pre>
+      </div>
+      <p>What you should SEE: the degree-1 line is too flat to follow the sine (underfit); degree-4 hugs the green truth nicely; degree-15 snakes violently to touch the noise — its training $R^2$ is barely higher than degree-4, but the curve between points is garbage. <strong>A high training score hides overfitting.</strong></p>
+
+      <h3 id="train-val-test-cv">3.2 Train / validation / test, and k-fold cross-validation</h3>
+      <div class="codeblock">
+        <div class="code-head">cross_validation.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from sklearn.model_selection import train_test_split, cross_val_score, KFold
+
+# Test set is locked in a vault. You touch it ONCE, at the very end.
+X_dev, X_test, y_dev, y_test = train_test_split(X, y, test_size=0.2, random_state=0)
+
+# k-fold CV on the dev set: rotate which fold is the validation slice.
+# Each point gets to be validation exactly once -&gt; uses all data, low-variance estimate.
+model = make_pipeline(PolynomialFeatures(4), LinearRegression())
+scores = cross_val_score(model, X_dev, y_dev, cv=KFold(5, shuffle=True, random_state=0),
+                         scoring="r2")
+print("per-fold R²:", np.round(scores, 2))
+print(f"CV R² = {scores.mean():.2f} ± {scores.std():.2f}")
+# -&gt; CV R² estimates generalization WITHOUT ever touching the locked test set.
+</code></pre>
+      </div>
+
+      <div class="mermaid">
+flowchart TB
+    D["All data"] --> TR["Train+Val (dev)"] & TE["Test (locked vault,<br/>used once)"]
+    TR --> F["5-fold CV: rotate validation fold"]
+    F --> M["pick model / α"]
+    M --> FINAL["refit on full dev → score ONCE on test"]
+</div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> The one rule</div>
+        <p><strong>Anything you use to make a decision (model choice, $\alpha$) must not be the test set.</strong> Cross-validation lets you make those decisions using only the dev data.</p>
+      </div>
+
+      <h3 id="ridge-vs-lasso">3.3 Ridge vs Lasso — watch L1 zero out weights</h3>
+      <div class="codeblock">
+        <div class="code-head">ridge_vs_lasso.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import Ridge, Lasso
+
+# 20 features, but only the FIRST 3 actually drive y. The other 17 are noise.
+nf = 20
+Xr = rng.normal(size=(80, nf))
+true_w = np.zeros(nf); true_w[:3] = [3.0, -2.0, 1.5]
+yr = Xr @ true_w + rng.normal(0, 0.5, 80)
+
+# ALWAYS scale before regularizing: the penalty treats all weights equally,
+# so features must be on the same scale or you penalize them unfairly.
+ridge = make_pipeline(StandardScaler(), Ridge(alpha=10.0)).fit(Xr, yr)
+lasso = make_pipeline(StandardScaler(), Lasso(alpha=0.1)).fit(Xr, yr)
+
+print("ridge weights exactly 0:", np.sum(np.isclose(ridge[-1].coef_, 0)))  # -&gt; 0
+print("lasso weights exactly 0:", np.sum(np.isclose(lasso[-1].coef_, 0)))  # -&gt; 16
+
+plt.figure(figsize=(9, 3))
+plt.bar(np.arange(nf) - 0.2, ridge[-1].coef_, width=0.4, label="Ridge (L2)")
+plt.bar(np.arange(nf) + 0.2, lasso[-1].coef_, width=0.4, label="Lasso (L1)")
+plt.axhline(0, color="k", lw=0.8); plt.xlabel("feature index"); plt.ylabel("weight")
+plt.legend(); plt.title("L2 shrinks everything; L1 zeroes the junk features")
+plt.tight_layout(); plt.show()
+</code></pre>
+      </div>
+      <p>What you should SEE: ridge gives 20 small non-zero bars (all shrunk but present); lasso leaves only ~3-4 tall bars (features 0,1,2) and flattens the rest to zero. <strong>Lasso did feature selection for you.</strong></p>
+
+      <h3 id="learning-curve">3.4 Learning curve — diagnose underfit vs overfit</h3>
+      <div class="codeblock">
+        <div class="code-head">learning_curve.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from sklearn.model_selection import learning_curve
+
+est = make_pipeline(PolynomialFeatures(4), LinearRegression())
+sizes, train_sc, val_sc = learning_curve(
+    est, X, y, cv=5, scoring="neg_mean_squared_error",
+    train_sizes=np.linspace(0.3, 1.0, 6))
+
+train_err = -train_sc.mean(axis=1)   # flip sign: neg_MSE -&gt; MSE
+val_err   = -val_sc.mean(axis=1)
+
+plt.plot(sizes, train_err, "o-", label="train error")
+plt.plot(sizes, val_err,  "s-", label="validation error")
+plt.xlabel("training set size"); plt.ylabel("MSE"); plt.legend()
+plt.title("Learning curve"); plt.show()
+</code></pre>
+      </div>
+      <p>How to READ it:</p>
+      <ul>
+        <li><strong>Big gap, val ≫ train</strong> that won't close → <strong>overfitting</strong> (high variance). Fix: more data, more regularization, simpler model.</li>
+        <li><strong>Both curves high and stuck together</strong> → <strong>underfitting</strong> (high bias). Fix: more complex model / better features. More data won't help.</li>
+      </ul>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>Real Case — fault detector for an ROV, where faults are rare</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>where accuracy lies</small></div>
+      <p>You log telemetry from an underwater ROV (thruster current, IMU vibration, depth-rate, voltage sag). You want to flag <strong>thruster faults</strong> before the vehicle loses station-keeping. The catch: faults are <strong>rare</strong> — maybe 12% of windows in our simulated log, and in a healthy fleet it can be 1% or less. This is the regime where <strong>accuracy lies</strong>.</p>
+
+      <div class="codeblock">
+        <div class="code-head">rov_fault_detector.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (confusion_matrix, classification_report,
+                             precision_score, recall_score, f1_score,
+                             roc_curve, roc_auc_score,
+                             precision_recall_curve, average_precision_score)
+
+# --- Simulate an imbalanced ROV telemetry log -------------------------------
+N = 4000
+Xc = rng.normal(size=(N, 6))                       # 6 telemetry features (standardized)
+logit = -3.2 + 1.4*Xc[:, 0] + 1.1*Xc[:, 1] - 0.9*Xc[:, 2]   # only 3 features signal a fault
+p = 1 / (1 + np.exp(-logit))
+yc = (rng.uniform(size=N) &lt; p).astype(int)         # 1 = thruster fault
+print("fault rate:", yc.mean().round(3))           # -&gt; ~0.118  (rare positives)
+
+X_tr, X_te, y_tr, y_te = train_test_split(Xc, yc, test_size=0.3,
+                                          stratify=yc, random_state=0)  # keep ratio in both splits
+
+# class_weight='balanced' tells the model misses on the rare class cost more.
+clf = make_pipeline(StandardScaler(),
+                    LogisticRegression(class_weight="balanced", max_iter=1000)).fit(X_tr, y_tr)
+
+proba = clf.predict_proba(X_te)[:, 1]              # P(fault) scores
+pred  = (proba &gt;= 0.5).astype(int)
+
+# --- The lie of accuracy ----------------------------------------------------
+dumb_acc = (y_te == 0).mean()                      # classifier that says "never a fault"
+print(f"'always healthy' accuracy: {dumb_acc:.3f}")        # -&gt; 0.882
+print(f"our model accuracy:        {(pred == y_te).mean():.3f}")  # -&gt; 0.772
+</code></pre>
+      </div>
+      <div class="codeblock">
+        <div class="code-head">output <span class="lang">text</span></div>
+<pre><code class="language-text">'always healthy' accuracy: 0.882   &lt;-- a USELESS model "beats" ours on accuracy!
+our model accuracy:        0.772
+</code></pre>
+      </div>
+      <p>A model that <strong>predicts no fault, ever</strong> scores 88% accuracy and would let your ROV sink. Accuracy is dominated by the majority class. Look at the metrics that count for a rare positive:</p>
+
+      <div class="codeblock">
+        <div class="code-head">rov_fault_detector.py (cont.) <span class="lang">Python</span></div>
+<pre><code class="language-python"># NOTE: sklearn sorts labels ascending [0, 1], so its output is the TRANSPOSE
+# of the Section 2 textbook table: rows/cols are ordered [Neg, Pos], giving
+# layout [[TN FP], [FN TP]] (TN top-left), not [[TP FN], [FP TN]] (TP top-left).
+print(confusion_matrix(y_te, pred))
+# -&gt; [[812 246]      812 TN, 246 FP (false alarms)
+#     [ 28 114]]      28 FN (missed faults!), 114 TP
+
+print(f"precision {precision_score(y_te, pred):.3f}  "   # -&gt; 0.317 (many false alarms)
+      f"recall {recall_score(y_te, pred):.3f}  "         # -&gt; 0.803 (caught 80% of faults)
+      f"F1 {f1_score(y_te, pred):.3f}")                  # -&gt; 0.454
+print(f"ROC-AUC {roc_auc_score(y_te, proba):.3f}  "      # -&gt; 0.866 (good ranking)
+      f"PR-AUC  {average_precision_score(y_te, proba):.3f}")  # -&gt; 0.573
+</code></pre>
+      </div>
+      <p>Now the real picture: the detector catches <strong>80% of faults (recall)</strong> but only <strong>32% of its alarms are real (precision)</strong> — lots of false alarms. For an ROV that may be the right call: a false alarm costs a check, a missed fault costs the vehicle. <strong>You choose the threshold from the cost of each error</strong>, not 0.5 by default.</p>
+
+      <div class="codeblock">
+        <div class="code-head">roc_plot.py <span class="lang">Python</span></div>
+<pre><code class="language-python">fpr, tpr, _ = roc_curve(y_te, proba)
+plt.plot(fpr, tpr, label=f"ROC (AUC={roc_auc_score(y_te, proba):.2f})")
+plt.plot([0, 1], [0, 1], "k--", label="random")
+plt.xlabel("False Positive Rate"); plt.ylabel("True Positive Rate (recall)")
+plt.title("ROV fault detector — ROC"); plt.legend(); plt.show()
+</code></pre>
+      </div>
+      <p>What you should SEE: a curve bowing up toward the top-left corner (AUC ≈ 0.87), well above the diagonal "random" line. The closer to that corner, the better the score <em>ranks</em> faults above healthy windows regardless of threshold.</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Tip for heavy imbalance</div>
+        <p>Prefer the <strong>Precision–Recall curve</strong> and its area (<strong>average precision / PR-AUC</strong>) over ROC. ROC can look flatteringly good when negatives massively outnumber positives, because a huge TN count keeps FPR tiny. PR-AUC focuses only on the positive class you care about.</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🚢</span> This pattern is everywhere in our world</div>
+        <p>It maps to any rare-event detector: obstacle-in-path alerts from sonar, GPS-spoofing detection on a USV, leak detection on an ROV. <strong>Rare positive + asymmetric cost ⇒ never trust accuracy; report recall, precision, F1, and PR-AUC, and tune the threshold to the mission.</strong></p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>Pitfalls &amp; Tips</h2>
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> The six that bite everyone</div>
+        <ul>
+          <li><strong>Touching the test set more than once.</strong> Every peek to "tune" leaks information and inflates your score. Lock it away; use cross-validation on the dev set for all decisions.</li>
+          <li><strong>Scaling before splitting (data leakage).</strong> Fit your <code>StandardScaler</code> on the <em>training fold only</em>, then apply it to validation/test. Putting the scaler in a <code>Pipeline</code> (as above) makes <code>cross_val_score</code> do this correctly and automatically. Fitting on all data first leaks test statistics into training.</li>
+          <li><strong>Forgetting to scale before L1/L2.</strong> The penalty $\sum w_j^2$ treats all weights equally, so a feature measured in millimeters gets a wildly different effective penalty than one in meters. Always standardize first.</li>
+          <li><strong>Reporting accuracy on imbalanced data.</strong> As shown, "always negative" can beat a real model. Default to precision/recall/F1 and PR-AUC for rare events.</li>
+          <li><strong><code>alpha</code> in ridge/lasso is <em>inverse</em> to <code>C</code> in <code>LogisticRegression</code>.</strong> For <code>Ridge</code>/<code>Lasso</code>, larger <code>alpha</code> = <em>more</em> regularization. For <code>LogisticRegression</code>/<code>SVC</code>, larger <code>C</code> = <em>less</em> regularization ($C \approx 1/\alpha$). This bites everyone once.</li>
+          <li><strong>Tune the decision threshold, not just the model.</strong> The model gives probabilities; 0.5 is rarely the mission-optimal cutoff. Choose it from your false-alarm vs missed-fault costs.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>Check Your Understanding</h2>
+
+      <p><strong>Q1.</strong> Your model gets train $R^2 = 0.99$ and validation $R^2 = 0.55$. What's wrong, and name two fixes.</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">A large train–val gap with high train score = <strong>overfitting / high variance</strong>. The model memorized noise. Fixes: increase regularization (raise <code>alpha</code>), use a simpler model (lower polynomial degree / fewer features, e.g. via lasso), or gather more training data. Reducing model complexity is the most direct lever.</div></details>
+
+      <p><strong>Q2.</strong> You have 50 features but believe only ~5 matter. Ridge or lasso, and why?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body"><strong>Lasso (L1)</strong>. Its diamond-shaped constraint has corners on the axes, so the optimum lands with many weights <em>exactly zero</em> — automatic feature selection that leaves the ~5 useful features. Ridge would shrink all 50 toward zero but keep them all non-zero.</div></details>
+
+      <p><strong>Q3.</strong> A leak detector reports 99.5% accuracy on a log where leaks are 0.4% of samples. Are you impressed?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">No. A model that <em>always predicts "no leak"</em> scores 99.6% — better than the reported model — while catching zero leaks. Accuracy is meaningless here. Demand <strong>recall</strong> (what fraction of leaks were caught), <strong>precision</strong>, and <strong>PR-AUC</strong>.</div></details>
+
+      <p><strong>Q4.</strong> Why is RMSE preferred over MAE when occasional large position errors are dangerous for a USV?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">RMSE squares the errors before averaging, so a single large error contributes disproportionately more than several small ones. It penalizes big, dangerous mistakes harder. MAE weights every error linearly, so it can hide a rare but catastrophic miss. (RMSE stays in the original units, unlike MSE.)</div></details>
+
+      <p><strong>Q5.</strong> Your team raises the fault-detector threshold from 0.3 to 0.7. What happens to precision and recall, and when is that the right move?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">A higher threshold means you only flag faults you're very confident about: <strong>precision goes up</strong> (fewer false alarms) and <strong>recall goes down</strong> (you miss more borderline faults). Right move when false alarms are expensive and a missed fault is tolerable. For a safety-critical ROV thruster fault it's usually the opposite — you favor recall.</div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml05-why-overfit">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">In the polynomial demo, the degree-15 fit's <em>training</em> $R^2$ (0.93) is barely above the degree-4 fit's (0.92), yet degree-15 is clearly the worse model. Why doesn't the training score reveal the problem?</div>
+        <ul class="ex-options">
+          <li data-correct="false">The training $R^2$ formula is broken for high-degree polynomials.</li>
+          <li data-correct="true">Training score measures fit to the data you already have; the degree-15 curve memorized the noise and swings wildly <em>between</em> points, which only a held-out set would expose.</li>
+          <li data-correct="false">Degree-15 has higher bias, so it underfits the sine wave.</li>
+          <li data-correct="false">The two scores are equal, so the models are equally good.</li>
+        </ul>
+        <div class="ex-explain">Overfitting is high <em>variance</em>: the flexible model nails the training points (so training score stays high) while wiggling violently elsewhere. You can only catch it by evaluating on data the model never saw — a validation/test set or cross-validation — where the degree-15 curve's between-point garbage shows up as a large train–val gap.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml05-precision" data-answer="0.317" data-tol="0.005">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">From the ROV confusion matrix — $TP = 114$, $FP = 246$, $FN = 28$, $TN = 812$ — compute the <strong>precision</strong>. (Hint: $\text{Precision} = TP/(TP+FP)$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit"> </span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$\text{Precision} = \dfrac{TP}{TP+FP} = \dfrac{114}{114+246} = \dfrac{114}{360} = 0.317$. Only ~32% of the alarms are real faults — many false alarms — which matches the printed value. For comparison, recall $= 114/(114+28) = 0.803$, so the detector catches 80% of true faults.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml05-roc-flatters">
+        <div class="ex-head"><span class="badge">Q3</span> Reasoning — why ROC flatters under heavy imbalance</div>
+        <div class="ex-q">On a log with 99% healthy windows, a fault detector shows a beautiful ROC-AUC of 0.95 but a mediocre PR-AUC. Explain why ROC looks so good here, and which curve you should report to your mission lead.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Write out $\text{FPR} = FP/(FP+TN)$ and think about how big $TN$ is when 99% of windows are negative. What happens to FPR even if you rack up a lot of false positives?</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p>ROC plots TPR against $\text{FPR} = FP/(FP+TN)$. When negatives massively outnumber positives, $TN$ is enormous, so even hundreds of false positives barely move FPR — the denominator swamps them. The ROC curve therefore hugs the top-left and AUC looks great, even though, in absolute terms, your alarms are mostly false. Precision $= TP/(TP+FP)$ has <strong>no</strong> $TN$ term, so those false positives hurt it directly; the <strong>Precision–Recall curve</strong> and its area (<strong>PR-AUC / average precision</strong>) honestly reflect how often an alarm is a real fault. <strong>Report the PR curve and PR-AUC</strong> (alongside recall and precision at your chosen threshold) for rare-event detection.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Lesson recap</div>
+        <p><strong>Generalization, not training score, is the goal.</strong> The bias–variance tradeoff says you can't minimize both; regularization trades a little bias to slash variance. <strong>Lock the test set; cross-validate on the dev set</strong> for every model and hyperparameter decision, and keep scaling inside a pipeline to avoid leakage. <strong>Ridge (L2)</strong> shrinks all weights; <strong>lasso (L1)</strong> zeroes some out, giving sparse, interpretable models. <strong>Match the metric to the mission:</strong> MAE/RMSE/$R^2$ for regression; precision/recall/F1/ROC-AUC/PR-AUC for classification — and never trust accuracy on imbalanced data. A <strong>learning curve</strong> tells you whether to add data (overfit) or add complexity (underfit); an <strong>ROC/PR curve</strong> tells you how well you rank positives across thresholds. Next we leave linear models behind for curvy, non-linear decision boundaries — distances, splits, and voting committees: <a href="06-knn-trees-ensembles.html">06 — k-NN, Decision Trees &amp; Ensembles</a>.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

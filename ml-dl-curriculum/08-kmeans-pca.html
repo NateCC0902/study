@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Unsupervised Learning: k-Means &amp; PCA — Machine Learning &amp; Deep Learning</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="08-kmeans-pca">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 08</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL Course · 08 · Unsupervised Learning</div>
+        <h1>Unsupervised Learning: k-Means &amp; PCA</h1>
+        <p>Drop the labels. With only $X$ in hand, two questions carry you a long way: <em>which points belong together?</em> (k-Means groups rows) and <em>which directions actually carry the information?</em> (PCA re-describes columns). We'll derive both from first principles and put them to work on ROV dive logs and sonar features.</p>
+        <div class="meta"><span>⏱ ~40 min</span><span>🧩 Lloyd loop</span><span>📐 Covariance eigenvectors</span><span>🤖 ROV behavior modes</span></div>
+      </section>
+
+      <p><strong>Part 2 · Lesson 08 · Code stack:</strong> scikit-learn (+ tiny numpy PCA)</p>
+      <p><strong>Prerequisites:</strong> <a href="07-svm-kernels.html">07 — Support Vector Machines &amp; Kernels</a></p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎯</span> By the end you can</div>
+        <ul>
+          <li>Explain how <strong>k-Means</strong> finds clusters via the <strong>Lloyd (assign/update) loop</strong> and what objective it minimizes.</li>
+          <li>Pick a sensible number of clusters $k$ using the <strong>elbow method</strong> and <strong>silhouette score</strong>, and name when k-Means breaks.</li>
+          <li>Derive <strong>PCA</strong> as the directions of maximum variance and connect them to <strong>eigenvectors of the covariance matrix</strong>.</li>
+          <li>Use <strong>explained-variance ratio</strong> to decide how many components to keep, and know when to reach for t-SNE/UMAP instead.</li>
+          <li>Apply both to robotics data: cluster ROV dive logs into behavior modes, and compress high-dimensional sensor features before a classifier.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>Intuition</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Every method so far needed <strong>labels</strong>: you handed the model $(x, y)$ pairs and it learned the mapping. <strong>Unsupervised learning</strong> drops the $y$. You only have $X$, and you want the algorithm to surface <em>structure</em> on its own.</p>
+
+      <p>Two structures matter constantly:</p>
+      <ul>
+        <li><strong>Clustering</strong> — "which points belong together?" Group rows. (k-Means)</li>
+        <li><strong>Dimensionality reduction</strong> — "which directions actually carry the information?" Squeeze columns. (PCA)</li>
+      </ul>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> Analogy</div>
+        <p>Picture your ROV's flight recorder dumping thousands of timestamped snapshots — depth, pitch, thruster current, altitude-above-seabed, heading rate. Nobody labeled them. <strong>k-Means</strong> is like a dock supervisor sorting those snapshots into a few buckets — "transit," "station-keeping," "descent," "bottom-survey" — purely by how similar the numbers are. <strong>PCA</strong> is like realizing that out of 12 sensors, only 3 <em>combined</em> signals (a "dive aggressiveness" axis, a "lateral drift" axis, a "power draw" axis) explain almost everything; the rest is redundancy and noise. One groups rows, the other re-describes columns.</p>
+      </div>
+
+      <div class="mermaid">
+flowchart TD
+    A["Raw data X&lt;br/&gt;(no labels y)"] --> B{What structure&lt;br/&gt;do we want?}
+    B -->|Group similar rows| C["Clustering&lt;br/&gt;k-Means"]
+    B -->|Fewer, richer columns| D["Dim. reduction&lt;br/&gt;PCA"]
+    C --> E["Cluster IDs&lt;br/&gt;(behavior modes)"]
+    D --> F["Compressed features&lt;br/&gt;(feed a classifier,&lt;br/&gt;or plot in 2D)"]
+</div>
+
+      <p>These two pair naturally: PCA first to denoise/compress, then k-Means on the compressed space — a workhorse pipeline you'll use again and again.</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>The Math</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive it</small></div>
+
+      <h3 id="kmeans-objective">k-Means: the objective</h3>
+      <p>We have $n$ points $x_i \in \mathbb{R}^d$ and want $k$ clusters. k-Means picks $k$ <strong>centroids</strong> $\mu_1, \dots, \mu_k \in \mathbb{R}^d$ and assigns each point to its nearest centroid. It minimizes the <strong>within-cluster sum of squares (WCSS)</strong>, also called <em>inertia</em>:</p>
+
+      <div class="math-box">$$
+J = \sum_{i=1}^{n} \min_{j \in \{1,\dots,k\}} \; \lVert x_i - \mu_j \rVert^2
+$$</div>
+
+      <ul>
+        <li>$x_i$ — the $i$-th data point (a $d$-dimensional vector).</li>
+        <li>$\mu_j$ — centroid of cluster $j$.</li>
+        <li>$\lVert \cdot \rVert^2$ — squared Euclidean distance; the "spread" we want small.</li>
+        <li>$J$ — total squared distance from every point to <em>its</em> centroid. Smaller $J$ = tighter clusters.</li>
+      </ul>
+
+      <p>Where it comes from: if every cluster is summarized by one prototype point, $J$ is the total squared reconstruction error of replacing each $x_i$ by its prototype. Minimizing it is exactly "make the prototypes representative."</p>
+
+      <h3 id="lloyd-loop">The Lloyd loop (why it works)</h3>
+      <p>Minimizing $J$ jointly over assignments <strong>and</strong> centroids is NP-hard, so we alternate — fixing one, optimizing the other:</p>
+
+      <p><strong>1. Assign step.</strong> Fix centroids. Put each point in the nearest cluster:</p>
+      <div class="math-box">$$
+c_i = \arg\min_{j} \; \lVert x_i - \mu_j \rVert^2
+$$</div>
+      <p>This is optimal for $J$ given the centroids — each point picks its cheapest term.</p>
+
+      <p><strong>2. Update step.</strong> Fix assignments. Set each centroid to the <strong>mean</strong> of its members:</p>
+      <div class="math-box">$$
+\mu_j = \frac{1}{|C_j|} \sum_{i \in C_j} x_i
+$$</div>
+      <p>Why the mean? For a fixed cluster $C_j$, $\sum_{i \in C_j}\lVert x_i - \mu_j\rVert^2$ is minimized by setting $\nabla_{\mu_j} = 0$, i.e. $\sum_{i\in C_j}(x_i - \mu_j)=0 \Rightarrow \mu_j = \text{mean}$. The mean <em>is</em> the least-squares center.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Convergence</div>
+        <p>Each step can only lower (or hold) $J$, and $J \ge 0$, so the loop <strong>converges</strong> — but only to a <em>local</em> minimum. Hence we run several random restarts (<code>n_init</code>) and keep the best. <strong>k-means++</strong> seeds the initial centroids spread out, which dramatically reduces bad local optima.</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    I["Init centroids&lt;br/&gt;(k-means++)"] --> A["Assign:&lt;br/&gt;point → nearest μ"]
+    A --> U["Update:&lt;br/&gt;μ = mean of members"]
+    U --> Q{Centroids&lt;br/&gt;moved?}
+    Q -->|yes| A
+    Q -->|no| Done["Done&lt;br/&gt;(local min of J)"]
+</div>
+
+      <h3 id="choosing-k">Choosing $k$</h3>
+      <ul>
+        <li><strong>Elbow method.</strong> Plot $J(k)$ vs $k$. It always decreases (more centroids → tighter), but the <em>rate</em> drops sharply at the "right" $k$ — the elbow. Pick where the curve bends from steep to flat.</li>
+        <li><strong>Silhouette score.</strong> For point $i$, let $a_i$ = mean distance to its own cluster, $b_i$ = mean distance to the <em>nearest other</em> cluster. Then
+        <div class="math-box">$$
+s_i = \frac{b_i - a_i}{\max(a_i, b_i)} \in [-1, 1]
+$$</div>
+        Near $+1$ = snugly in its cluster and far from others; near $0$ = on a boundary; negative = probably misassigned. Average $s_i$ over all points and pick the $k$ that maximizes it. Silhouette is more principled than the eyeball elbow.</li>
+      </ul>
+
+      <h3 id="pca-variance">PCA: directions of maximum variance</h3>
+      <p>Center the data: $\tilde{X} = X - \bar{x}$ (subtract the column means; PCA <em>requires</em> centering). The <strong>covariance matrix</strong> is</p>
+
+      <div class="math-box">$$
+\Sigma = \frac{1}{n-1}\, \tilde{X}^\top \tilde{X} \in \mathbb{R}^{d \times d}
+$$</div>
+
+      <ul>
+        <li>$\Sigma_{ab}$ — how feature $a$ and feature $b$ co-vary. Diagonal = per-feature variance.</li>
+      </ul>
+
+      <p>We want the unit direction $w$ ($\lVert w \rVert = 1$) along which the projected data $\tilde{X} w$ has <strong>maximum variance</strong>. The variance of the projection is</p>
+
+      <div class="math-box">$$
+\operatorname{Var}(\tilde{X} w) = w^\top \Sigma\, w
+$$</div>
+
+      <p>Maximizing $w^\top \Sigma w$ subject to $\lVert w\rVert = 1$ is a constrained problem. The Lagrangian $w^\top\Sigma w - \lambda(w^\top w - 1)$ has gradient zero when</p>
+
+      <div class="math-box">$$
+\Sigma\, w = \lambda\, w
+$$</div>
+
+      <p>That's the <strong>eigenvector equation</strong>. So the optimal directions are the <strong>eigenvectors of $\Sigma$</strong>, and the variance captured along each is its <strong>eigenvalue</strong> $\lambda$ (since $w^\top\Sigma w = \lambda$). Sort eigenvalues descending: the top eigenvector is <strong>PC1</strong> (most variance), next is <strong>PC2</strong> (most <em>remaining</em> variance, orthogonal to PC1), and so on.</p>
+
+      <p>To reduce to $p < d$ dimensions, project onto the top $p$ eigenvectors $W_p = [w_1, \dots, w_p]$:</p>
+
+      <div class="math-box">$$
+Z = \tilde{X}\, W_p \in \mathbb{R}^{n \times p}
+$$</div>
+
+      <p>The <strong>explained-variance ratio</strong> of component $j$ is</p>
+
+      <div class="math-box">$$
+\text{EVR}_j = \frac{\lambda_j}{\sum_{m=1}^{d} \lambda_m}
+$$</div>
+
+      <p>Keep enough components that the cumulative EVR clears a threshold (say 0.95 = "retain 95% of the variance").</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Practical note</div>
+        <p>In production you'd use the <strong>SVD</strong> of $\tilde{X}$ rather than forming $\Sigma$ explicitly (more numerically stable) — that's what scikit-learn does. The eigen-of-covariance view is the cleanest to <em>understand</em>; they give the same answer.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> PCA is linear</div>
+        <p>For <em>visualizing</em> tangled, nonlinear structure (e.g., MNIST digit manifolds), reach for <strong>t-SNE</strong> or <strong>UMAP</strong> — they preserve local neighborhoods for pretty 2D maps. But they distort global distances and aren't reversible, so use them for <em>looking</em>, not as features for a downstream model. PCA stays the default for compression.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>Code</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">kmeans_fit.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import make_blobs
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+
+# --- Synthetic clusters: 4 Gaussian blobs in 2D ---------------------------
+X, y_true = make_blobs(
+    n_samples=600, centers=4, cluster_std=0.90,
+    random_state=42,
+)
+
+# --- Fit k-Means -----------------------------------------------------------
+km = KMeans(
+    n_clusters=4,
+    init="k-means++",   # smart seeding -&gt; fewer bad local minima
+    n_init=10,          # 10 random restarts, keep the lowest inertia
+    random_state=42,
+)
+labels = km.fit_predict(X)
+
+print(f"inertia (WCSS J): {km.inertia_:.1f}")
+print(f"iterations to converge: {km.n_iter_}")
+# -&gt; inertia (WCSS J): 941.9
+# -&gt; iterations to converge: 2
+</code></pre>
+      </div>
+
+      <p>Note we used the true number of blobs (4). In the wild you don't know it — so let's <em>find</em> it.</p>
+
+      <div class="codeblock">
+        <div class="code-head">choose_k.py <span class="lang">Python</span></div>
+<pre><code class="language-python"># --- Choosing k: elbow (inertia) + silhouette ------------------------------
+ks = range(2, 9)
+inertias, sils = [], []
+for k in ks:
+    m = KMeans(n_clusters=k, n_init=10, random_state=42).fit(X)
+    inertias.append(m.inertia_)
+    sils.append(silhouette_score(X, m.labels_))
+
+best_k = ks[int(np.argmax(sils))]
+print(f"best k by silhouette: {best_k}")
+# -&gt; best k by silhouette: 4
+
+fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+ax[0].plot(list(ks), inertias, "o-")
+ax[0].set(xlabel="k", ylabel="inertia (WCSS J)", title="Elbow method")
+ax[1].plot(list(ks), sils, "o-", color="tab:green")
+ax[1].set(xlabel="k", ylabel="mean silhouette", title="Silhouette")
+plt.tight_layout()
+plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> What you should SEE</div>
+        <p>The elbow plot bends hard at $k=4$ (steep then flat), and the silhouette plot peaks at $k=4$. Two independent signals agreeing on the truth.</p>
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">visualize_clusters.py <span class="lang">Python</span></div>
+<pre><code class="language-python"># --- Visualize clusters + centroids ---------------------------------------
+plt.figure(figsize=(6, 5))
+plt.scatter(X[:, 0], X[:, 1], c=labels, cmap="tab10", s=18, alpha=0.7)
+plt.scatter(
+    km.cluster_centers_[:, 0], km.cluster_centers_[:, 1],
+    marker="X", s=260, c="black", edgecolor="white", linewidths=1.5,
+    label="centroids",
+)
+plt.legend(); plt.title("k-Means clusters"); plt.tight_layout(); plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> What you should SEE</div>
+        <p>Four colored point-clouds with a black <strong>X</strong> sitting at the center of mass of each — the centroids landed right in the middle of every blob.</p>
+      </div>
+
+      <h3 id="pca-scratch-vs-sklearn">PCA from scratch (numpy eig) vs scikit-learn</h3>
+
+      <div class="codeblock">
+        <div class="code-head">pca_scratch_vs_sklearn.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from sklearn.decomposition import PCA
+from sklearn.datasets import load_iris
+
+iris = load_iris()
+A = iris.data            # (150, 4): sepal/petal length &amp; width
+y = iris.target
+
+# ---- From scratch: eigen-decomposition of the covariance matrix ----------
+A_centered = A - A.mean(axis=0)                 # PCA needs centering
+cov = np.cov(A_centered, rowvar=False)          # (4, 4) covariance Σ
+eigvals, eigvecs = np.linalg.eigh(cov)          # eigh: symmetric -&gt; real, sorted ASC
+
+order = np.argsort(eigvals)[::-1]               # sort DESCENDING by variance
+eigvals, eigvecs = eigvals[order], eigvecs[:, order]
+
+evr = eigvals / eigvals.sum()                   # explained-variance ratio
+print("EVR (from scratch):", np.round(evr, 4))
+# -&gt; EVR (from scratch): [0.9246 0.0531 0.0171 0.0052]
+
+Z_scratch = A_centered @ eigvecs[:, :2]         # project onto top-2 PCs
+
+# ---- scikit-learn (uses SVD internally) ----------------------------------
+pca = PCA(n_components=2)
+Z_sklearn = pca.fit_transform(A)                # sklearn centers for you
+print("EVR (sklearn):     ", np.round(pca.explained_variance_ratio_, 4))
+# -&gt; EVR (sklearn):      [0.9246 0.0531]
+
+# Same subspace — signs of eigenvectors can flip, so compare |coords|.
+print("match:", np.allclose(np.abs(Z_scratch), np.abs(Z_sklearn), atol=1e-6))
+# -&gt; match: True
+</code></pre>
+      </div>
+
+      <p>The first two of four components already hold <strong>~98%</strong> of the variance — Iris is nearly 2D in disguise.</p>
+
+      <div class="codeblock">
+        <div class="code-head">pca_scatter.py <span class="lang">Python</span></div>
+<pre><code class="language-python"># --- Scatter the 2D projection --------------------------------------------
+plt.figure(figsize=(6, 5))
+for c, name in zip(range(3), iris.target_names):
+    plt.scatter(Z_sklearn[y == c, 0], Z_sklearn[y == c, 1], s=22, label=name)
+plt.xlabel("PC1 (92.5% var)"); plt.ylabel("PC2 (5.3% var)")
+plt.legend(); plt.title("Iris projected to 2D via PCA"); plt.tight_layout(); plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> What you should SEE</div>
+        <p>Collapsing 4D → 2D, <em>setosa</em> sits as a cleanly separated blob on the left, while <em>versicolor</em> and <em>virginica</em> form two adjacent (slightly overlapping) groups — the structure survives the squeeze.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>Real Case</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>why this matters</small></div>
+
+      <h3 id="rov-clustering">(a) Clustering ROV dive logs into behavior modes</h3>
+      <p>Your ROV streams telemetry at 5 Hz. Per timestep you compute a feature vector — depth rate, pitch, roll rate, total thruster current, altitude-above-seabed, heading-rate magnitude. You want to <em>automatically segment</em> hours of footage into behavior modes without hand-labeling.</p>
+
+      <div class="codeblock">
+        <div class="code-head">cluster_dive_logs.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from sklearn.pipeline import make_pipeline
+
+rng = np.random.default_rng(0)
+
+def mode(n, depth_rate, thruster, altitude, hdg_rate):
+    """Fake one behavior mode: [depth_rate, pitch, thruster_A, altitude_m, hdg_rate]."""
+    return np.column_stack([
+        rng.normal(depth_rate, 0.05, n),
+        rng.normal(0.0,        0.5,  n),
+        rng.normal(thruster,   0.3,  n),
+        rng.normal(altitude,   0.4,  n),
+        rng.normal(hdg_rate,   0.3,  n),
+    ])
+
+# transit: fast forward, mid altitude | descent: sinking | station-keep: hover | survey: low + steady
+X = np.vstack([
+    mode(300, depth_rate=0.0,  thruster=3.0, altitude=5.0, hdg_rate=0.2),  # transit
+    mode(300, depth_rate=0.6,  thruster=1.5, altitude=8.0, hdg_rate=0.1),  # descent
+    mode(300, depth_rate=0.0,  thruster=0.8, altitude=3.0, hdg_rate=0.0),  # station-keep
+    mode(300, depth_rate=0.0,  thruster=1.2, altitude=1.0, hdg_rate=1.5),  # bottom survey
+])
+
+# CRITICAL: standardize. Thruster current (amps) and depth_rate (m/s) live on
+# wildly different scales; without scaling, Euclidean distance is dominated by
+# whichever feature has the biggest raw numbers.
+pipe = make_pipeline(StandardScaler(), KMeans(n_clusters=4, n_init=10, random_state=0))
+modes = pipe.fit_predict(X)
+
+# Inspect cluster centers back in original units to NAME the modes.
+km = pipe.named_steps["kmeans"]
+scaler = pipe.named_steps["standardscaler"]
+centers = scaler.inverse_transform(km.cluster_centers_)
+cols = ["depth_rate", "pitch", "thruster_A", "altitude_m", "hdg_rate"]
+for i, c in enumerate(centers):
+    print(f"cluster {i}: " + ", ".join(f"{n}={v:+.2f}" for n, v in zip(cols, c)))
+# -&gt; e.g. cluster with depth_rate≈+0.6 -&gt; "descent"; altitude≈1.0 &amp; hdg_rate≈1.5 -&gt; "bottom survey"
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🤖</span> Mapping</div>
+        <p>k-Means hands you anonymous cluster IDs 0–3; <em>you</em> read the centroids (in real units, after <code>inverse_transform</code>) to attach human names. Now you can auto-tag a 3-hour dive, jump straight to "bottom-survey" segments, flag anomalous timesteps (large distance to every centroid = nothing-like-normal), and trigger different logging/control policies per mode — all unsupervised.</p>
+      </div>
+
+      <h3 id="pca-compress-classifier">(b) PCA to compress sensor features before a classifier</h3>
+      <p>Imagine a 64-bin <strong>forward-looking sonar</strong> return per ping = a 64-dimensional vector, used to classify the seabed (sand / rock / wreck). Adjacent bins are highly correlated, so the <em>intrinsic</em> dimensionality is far below 64. PCA compresses before the classifier — fewer features → faster training, less overfitting (recall <a href="05-overfitting-evaluation.html">05 — Overfitting &amp; Evaluation</a>), and a denoising effect since the dropped low-variance components are mostly noise.</p>
+
+      <div class="codeblock">
+        <div class="code-head">pca_before_classifier.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from sklearn.datasets import load_digits          # 8x8 = 64-dim, a clean stand-in for sonar bins
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.model_selection import cross_val_score
+
+digits = load_digits()
+Xs, ys = digits.data, digits.target               # (1797, 64)
+
+# Keep enough PCs to retain 90% of the variance -- let PCA pick the count.
+clf = make_pipeline(PCA(n_components=0.90), LogisticRegression(max_iter=5000))
+clf.fit(Xs, ys)
+n_kept = clf.named_steps["pca"].n_components_
+print(f"kept {n_kept} of 64 dims for 90% variance")
+# -&gt; kept 21 of 64 dims for 90% variance
+
+acc_pca  = cross_val_score(clf, Xs, ys, cv=5).mean()
+acc_full = cross_val_score(
+    make_pipeline(LogisticRegression(max_iter=5000)), Xs, ys, cv=5).mean()
+print(f"accuracy  PCA(21d): {acc_pca:.3f}   full(64d): {acc_full:.3f}")
+# -&gt; accuracy  PCA(21d): 0.893   full(64d): 0.914
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🤖</span> The payoff</div>
+        <p>We threw away <strong>two-thirds</strong> of the dimensions and kept essentially the same accuracy. On your sonar pipeline that means a lighter, faster model that fits the ROV's onboard compute budget — fit PCA once on logged data, then <code>.transform()</code> each incoming ping in real time.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>Pitfalls &amp; Tips</h2>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Always scale before k-Means and PCA</div>
+        <p>Both rely on Euclidean distance / variance. A feature in amps (0–10) will swamp one in m/s (0–1). Use <code>StandardScaler</code> unless features are already comparable. This is the #1 cause of "my clusters look random."</p>
+      </div>
+
+      <ul>
+        <li><strong>k-Means assumes spherical, equal-size, equal-density clusters.</strong> It draws straight (Voronoi) boundaries and will happily split one long ellipse in two or merge two thin ones. For elongated/nested/varying-density shapes, use <strong>GMM</strong> (elliptical) or <strong>DBSCAN</strong> (density-based, finds arbitrary shapes and outliers).</li>
+        <li><strong>It always returns $k$ clusters — even on structureless noise.</strong> k-Means can't tell you "there are no clusters." Validate with silhouette and domain sense; don't trust the IDs blindly.</li>
+        <li><strong>Run multiple restarts.</strong> Keep <code>n_init &gt;= 10</code> and <code>init="k-means++"</code>. A single bad random seed can converge to a visibly wrong local minimum of $J$.</li>
+        <li><strong>PCA needs centering and is variance-driven, not class-driven.</strong> The top PC = most variance, which is <em>not</em> always the most <em>discriminative</em> direction. If you have labels and want separation, consider <strong>LDA</strong>. PCA is unsupervised by design.</li>
+        <li><strong>Don't read meaning into t-SNE/UMAP geometry.</strong> Cluster <em>sizes</em> and <em>between-cluster distances</em> in those plots are not faithful — they preserve local neighborhoods only. Use them to look, use PCA to compute features.</li>
+      </ul>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>Check Your Understanding</h2>
+
+      <p><strong>Q1.</strong> Why does the centroid <strong>update</strong> step set $\mu_j$ to the <em>mean</em> of its assigned points, rather than, say, the median?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Because the objective $J$ uses <em>squared</em> Euclidean distance. Minimizing $\sum_{i\in C_j}\lVert x_i-\mu_j\rVert^2$ over $\mu_j$ gives $\nabla = -2\sum(x_i-\mu_j)=0 \Rightarrow \mu_j=\text{mean}$. The arithmetic mean is the least-<em>squares</em> center. (If the objective used absolute distance, the <em>median</em> would be optimal — that's k-medians.)</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> The elbow plot of inertia keeps dropping as $k$ grows and never bottoms out. Why can't you just minimize inertia to choose $k$?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Inertia $J$ is monotonically non-increasing in $k$: more centroids always fit the data tighter, reaching $J=0$ when $k=n$ (every point is its own cluster). So minimizing $J$ trivially picks $k=n$, which is useless. You want the <em>elbow</em> (diminishing returns) or to maximize a balance metric like silhouette, which penalizes both loose and over-split clusters.</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> In PCA, what exactly are the eigenvalues of the covariance matrix, and how do you use them to pick the number of components?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Each eigenvalue $\lambda_j$ is the <strong>variance of the data along</strong> its eigenvector (principal component): $w_j^\top\Sigma w_j=\lambda_j$. The explained-variance ratio is $\lambda_j/\sum_m\lambda_m$. Pick the smallest number of top components whose <strong>cumulative</strong> ratio clears your threshold (e.g. 0.95), keeping most of the signal while dropping low-variance (often noisy) directions.</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> You cluster raw ROV telemetry where thruster current ranges 0–10 A and depth-rate ranges 0–1 m/s, and the clusters look like they ignore depth entirely. What happened and what's the fix?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>k-Means uses Euclidean distance, so the feature with the largest <em>numeric</em> spread (thruster current) dominates the distance and the small-range depth-rate is effectively invisible. Fix: standardize features first (<code>StandardScaler</code>, zero mean / unit variance) so every feature contributes comparably. Wrap it in a pipeline so the scaling is learned only on training data.</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> Your colleague made a beautiful t-SNE plot where two clusters are far apart and concludes those behavior modes are "very different." Is that conclusion sound?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Not necessarily. t-SNE (and UMAP) preserve <em>local</em> neighborhoods but distort <em>global</em> distances and cluster sizes — the gap between two clusters in the plot is largely an artifact of the embedding, not a faithful distance. To claim two modes are far apart, measure it in the original (or PCA) feature space, e.g. distance between centroids. Use t-SNE for qualitative looking only.</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml08-when-kmeans-breaks">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You run k-Means on a dataset that is actually two long, parallel, cigar-shaped clusters, and the result splits each cigar across two centroids. What is the root cause?</div>
+        <ul class="ex-options">
+          <li data-correct="false">k-Means failed to converge — it needs more iterations.</li>
+          <li data-correct="false">The data wasn't standardized, so one feature dominated.</li>
+          <li data-correct="true">k-Means assumes spherical, comparable clusters and draws straight Voronoi boundaries, so it can't follow an elongated shape.</li>
+          <li data-correct="false">You used <code>k-means++</code> instead of random initialization.</li>
+        </ul>
+        <div class="ex-explain">k-Means minimizes squared distance to a single centroid per cluster, which carves space into convex Voronoi cells. That implicitly assumes roughly spherical, equal-size clusters. An elongated (high-aspect-ratio) cluster isn't well summarized by one center, so the algorithm prefers to cut it. The fix isn't more iterations or seeding — it's a model that allows elliptical or arbitrary shapes: <strong>GMM</strong> (elliptical) or <strong>DBSCAN</strong> (density-based).</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml08-cumulative-evr" data-answer="0.9777" data-tol="0.002">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">From the Iris PCA, the explained-variance ratios are $[0.9246,\ 0.0531,\ 0.0171,\ 0.0052]$. If you keep the top <strong>two</strong> principal components, what fraction of the total variance do you retain? (Give a number between 0 and 1.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">fraction</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">Cumulative EVR for the top two PCs is just the sum: $0.9246 + 0.0531 = 0.9777$, i.e. about <strong>97.8%</strong> of the variance survives a 4D → 2D squeeze. That's why Iris is "nearly 2D in disguise" — the bottom two components ($0.0171 + 0.0052 = 0.0223$) carry only ~2% and are safe to drop.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml08-mean-minimizes-wcss">
+        <div class="ex-head"><span class="badge">Q3</span> Derivation — why the mean minimizes WCSS</div>
+        <div class="ex-q">For a fixed cluster $C_j$, show that the centroid $\mu_j$ minimizing $\sum_{i\in C_j}\lVert x_i - \mu_j\rVert^2$ is the arithmetic mean of the cluster's points. State one consequence for the Lloyd loop.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Treat the sum as a smooth function of $\mu_j$, take the gradient with respect to $\mu_j$, and set it to zero. The squared-norm derivative gives you a $-2$ factor and a sum of differences.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p>Let $f(\mu) = \sum_{i\in C_j}\lVert x_i - \mu\rVert^2$. Its gradient is $\nabla_\mu f = \sum_{i\in C_j} -2\,(x_i - \mu) = -2\Big(\sum_{i\in C_j} x_i - |C_j|\,\mu\Big)$. Setting $\nabla_\mu f = 0$ gives $\sum_{i\in C_j} x_i = |C_j|\,\mu$, hence</p>
+          <div class="math-box">$$ \mu_j = \frac{1}{|C_j|}\sum_{i\in C_j} x_i. $$</div>
+          <p>Since $f$ is convex (a sum of convex paraboloids), this critical point is the global minimum. <strong>Consequence:</strong> the update step is the exact least-squares optimizer of $J$ for fixed assignments, and the assign step is exact for fixed centroids — so each Lloyd iteration can only lower (or hold) $J$. With $J \ge 0$, the loop is guaranteed to converge, though only to a <em>local</em> minimum (hence k-means++ and multiple restarts).</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Lesson recap</div>
+        <p><strong>Unsupervised learning</strong> finds structure with no labels: <strong>k-Means</strong> groups rows, <strong>PCA</strong> re-describes columns. k-Means minimizes within-cluster sum of squares via the <strong>Lloyd loop</strong> (assign → update-to-mean); it converges to a <em>local</em> min, so use k-means++ and many restarts. Choose $k$ with the <strong>elbow</strong> and <strong>silhouette</strong>, and remember it assumes spherical, comparable clusters. <strong>PCA</strong> projects onto the <strong>top eigenvectors of the covariance matrix</strong> — the directions of maximum variance — and <strong>explained-variance ratio</strong> tells you how many to keep; it's linear, so use t-SNE/UMAP only for visualization. <strong>Always scale first</strong> — both methods are distance/variance driven. In robotics: cluster dive logs into named behavior modes, and PCA-compress high-dimensional sensor features to make a downstream classifier lighter and more robust. Next, we leave classical ML and start building the engine of deep learning: <a href="09-neural-networks-mlp.html">09 — Neural Networks &amp; the Forward Pass</a>.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

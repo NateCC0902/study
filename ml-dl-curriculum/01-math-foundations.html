@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>The Math Toolbox — Machine Learning &amp; Deep Learning</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="01-math-foundations">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 01</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL Course · 01</div>
+        <h1>The Math Toolbox</h1>
+        <p>Machine learning is three kinds of math wearing a trench coat: linear algebra to <em>store and transform</em> data, calculus to <em>improve</em>, and probability to <em>handle uncertainty</em>. This lesson is the toolbox every later lesson reaches into — built from intuition up, one NumPy snippet and one picture at a time.</p>
+        <div class="meta"><span>⏱ ~40 min</span><span>🧮 numpy-from-scratch</span><span>∑ Linear algebra · calculus · probability</span><span>🛥 Robotics tie-in</span></div>
+      </section>
+
+      <p><strong>Part 0 · Lesson 01 · Code stack: numpy-from-scratch.</strong> Prerequisites: <a href="00-what-is-ml.html">00 — What Is Machine Learning?</a></p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎯</span> By the end you can</div>
+        <ul>
+          <li>Read and manipulate <strong>scalars, vectors, matrices, and tensors</strong> in NumPy, and explain what each represents.</li>
+          <li>Compute and <em>interpret</em> the <strong>dot product</strong>, matrix products, transpose, inverse, and <strong>L1/L2 norms</strong> geometrically.</li>
+          <li>Explain a <strong>derivative as slope</strong>, a <strong>gradient as the direction of steepest ascent</strong>, and use the <strong>chain rule</strong> (the seed of backprop).</li>
+          <li>Reason about <strong>random variables, distributions, mean, variance, the Gaussian, conditional probability, and Bayes' rule</strong>.</li>
+          <li>Tie it all back to robotics: represent IMU/heading readings as vectors and use the dot product to measure how aligned two headings are.</li>
+        </ul>
+      </div>
+
+      <p>This lesson is the toolbox. Every later lesson reaches into it. You don't need to memorize proofs — you need <em>fluent intuition</em> plus the few formulas that show up everywhere. We'll build each idea with a short NumPy snippet and a picture.</p>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>Intuition</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Machine learning is mostly three kinds of math wearing a trench coat:</p>
+      <ol>
+        <li><strong>Linear algebra</strong> — how we <em>store and transform</em> data. A camera frame, a lidar scan, a batch of IMU samples: all just arrays of numbers. Linear algebra is the grammar for combining them.</li>
+        <li><strong>Calculus</strong> — how we <em>improve</em>. Training a model = nudging numbers downhill on an error surface. The gradient tells us which way is downhill.</li>
+        <li><strong>Probability</strong> — how we <em>handle uncertainty</em>. Sensors are noisy, the world is partly unknown. Probability lets us say "the obstacle is <em>probably</em> 3 m ahead" instead of pretending we know exactly.</li>
+      </ol>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> One analogy to hang everything on</div>
+        <p>Think of training a model like <strong>piloting a USV toward a buoy in fog</strong>.</p>
+        <ul>
+          <li>The <strong>state</strong> (position, heading, speed) is a <em>vector</em> — linear algebra.</li>
+          <li>"Which way do I turn to reduce my distance to the buoy fastest?" is a <em>gradient</em> — calculus.</li>
+          <li>"Where is the buoy, given a noisy radar ping?" is <em>inference under uncertainty</em> — probability.</li>
+        </ul>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    A[Raw data:<br/>images, scans, IMU] -->|linear algebra| B[Vectors &amp; matrices]
+    B -->|model = function| C[Prediction]
+    C -->|error| D[Loss surface]
+    D -->|calculus: gradient| E[Update parameters]
+    E -->|repeat| B
+    F[Noisy sensors] -->|probability| C
+</div>
+
+      <p>Keep that loop in mind: <strong>represent → predict → measure error → follow the gradient downhill → repeat.</strong> Everything below is the machinery for one of those arrows.</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>The Math</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive the toolbox</small></div>
+
+      <h3 id="containers">2.1 Scalars, vectors, matrices, tensors</h3>
+      <p>These are just containers indexed by 0, 1, 2, or more axes.</p>
+      <ul>
+        <li>A <strong>scalar</strong> is a single number, e.g. $x = 3.0$. Zero axes.</li>
+        <li>A <strong>vector</strong> is an ordered list, $\mathbf{v} \in \mathbb{R}^n$. One axis. We write it as a column:</li>
+      </ul>
+      <div class="math-box">$$\mathbf{v} = \begin{bmatrix} v_1 \\ v_2 \\ \vdots \\ v_n \end{bmatrix}, \qquad v_i \in \mathbb{R}.$$</div>
+      <p>Here $\mathbb{R}^n$ means "the space of $n$ real numbers"; $v_i$ is the $i$-th <strong>component</strong>.</p>
+      <ul>
+        <li>A <strong>matrix</strong> $A \in \mathbb{R}^{m \times n}$ is a grid with $m$ rows and $n$ columns. Two axes. Entry $A_{ij}$ sits in row $i$, column $j$.</li>
+        <li>A <strong>tensor</strong> is the general term for any number of axes. A color image is a 3-axis tensor $\mathbb{R}^{H \times W \times 3}$ (height, width, color channel); a batch of images adds a 4th axis. In deep learning, "tensor" is just "n-dimensional array."</li>
+      </ul>
+      <p>Think of the axis count as the number of indices you need to point at one number.</p>
+
+      <h3 id="dot-product">2.2 Dot product — the most important operation in ML</h3>
+      <p>For two vectors $\mathbf{a}, \mathbf{b} \in \mathbb{R}^n$, the <strong>dot product</strong> is</p>
+      <div class="math-box">$$\mathbf{a} \cdot \mathbf{b} = \sum_{i=1}^{n} a_i b_i.$$</div>
+      <p>That's the algebra. The <em>geometry</em> is what matters:</p>
+      <div class="math-box">$$\mathbf{a} \cdot \mathbf{b} = \|\mathbf{a}\|\,\|\mathbf{b}\|\cos\theta,$$</div>
+      <p>where $\|\mathbf{a}\|$ is the length of $\mathbf{a}$ (defined in 2.5) and $\theta$ is the angle between the two vectors. <strong>Where this comes from:</strong> it's the law of cosines rearranged — expand $\|\mathbf{a}-\mathbf{b}\|^2$ and the cross term <em>is</em> the dot product. The takeaway:</p>
+      <ul>
+        <li>Dot product <strong>measures alignment</strong>. Same direction → large positive. Perpendicular ($\theta = 90°$) → zero. Opposite → negative.</li>
+        <li>A neuron computing $\mathbf{w}\cdot\mathbf{x}$ is literally asking "how aligned is the input with this learned pattern?" This single idea reappears in linear regression, logistic regression, attention, and convolutions.</li>
+      </ul>
+
+      <h3 id="matmul">2.3 Matrix–vector and matrix–matrix multiplication</h3>
+      <p>A matrix is a <strong>function that transforms vectors</strong>. Multiplying $A \in \mathbb{R}^{m\times n}$ by $\mathbf{x} \in \mathbb{R}^n$ gives $\mathbf{y} \in \mathbb{R}^m$:</p>
+      <div class="math-box">$$y_i = \sum_{j=1}^{n} A_{ij}\,x_j \quad\Longleftrightarrow\quad \mathbf{y} = A\mathbf{x}.$$</div>
+      <p>Read each output component $y_i$ as <strong>the dot product of row $i$ of $A$ with $\mathbf{x}$</strong>. So matrix-vector multiply is just "a stack of dot products." Geometrically, $A$ rotates / scales / shears / projects the input.</p>
+      <p>For two matrices $A \in \mathbb{R}^{m\times k}$ and $B \in \mathbb{R}^{k\times n}$:</p>
+      <div class="math-box">$$(AB)_{ij} = \sum_{p=1}^{k} A_{ip}\,B_{pj}, \qquad AB \in \mathbb{R}^{m\times n}.$$</div>
+      <p>The <strong>inner dimensions must match</strong> ($k = k$); the result takes the outer dimensions. $(AB)_{ij}$ is the dot product of row $i$ of $A$ with column $j$ of $B$. Composing matrices = composing transformations. A neural network layer is exactly this: $\mathbf{y} = W\mathbf{x} + \mathbf{b}$.</p>
+
+      <h3 id="transpose-inverse">2.4 Transpose, identity, inverse</h3>
+      <p>The <strong>transpose</strong> $A^\top$ flips rows and columns: $(A^\top)_{ij} = A_{ji}$. It turns a column vector into a row vector, which is why you'll see the dot product written $\mathbf{a}^\top\mathbf{b}$.</p>
+      <p>The <strong>identity</strong> $I$ is the "do nothing" matrix — 1s on the diagonal, 0s elsewhere — so $I\mathbf{x} = \mathbf{x}$.</p>
+      <p>The <strong>inverse</strong> $A^{-1}$ undoes $A$: $A^{-1}A = I$. Intuition: if $A$ rotates and stretches space, $A^{-1}$ rotates and stretches it back. It only exists if $A$ is square and doesn't collapse any dimension to zero (non-zero determinant). In ML we <em>rarely</em> compute inverses directly (they're expensive and numerically fragile) — we solve systems or run gradient descent instead — but the <em>concept</em> "is this transformation reversible?" matters, e.g. for the normal equations in linear regression.</p>
+
+      <h3 id="norms">2.5 Norms — measuring size</h3>
+      <p>A <strong>norm</strong> measures the length of a vector. The two you'll use constantly:</p>
+      <div class="math-box">$$\|\mathbf{v}\|_2 = \sqrt{\sum_i v_i^2} \quad(\text{L2, Euclidean}), \qquad \|\mathbf{v}\|_1 = \sum_i |v_i| \quad(\text{L1, Manhattan}).$$</div>
+      <ul>
+        <li><strong>L2</strong> is straight-line distance (Pythagoras in $n$ dimensions) — the cost of error in least-squares, and the foundation of "how far apart are these two feature vectors?"</li>
+        <li><strong>L1</strong> is total absolute travel (city blocks). It shows up in <strong>L1 regularization</strong>, which drives weights to <em>exactly zero</em> and produces sparse models (you'll see why in <a href="05-overfitting-evaluation.html">05 — Overfitting &amp; Regularization</a>).</li>
+      </ul>
+
+      <h3 id="calculus">2.6 Calculus: derivative, partials, gradient</h3>
+      <p>The <strong>derivative</strong> of a single-variable function $f$ is the slope of its tangent line — the instantaneous rate of change:</p>
+      <div class="math-box">$$f'(x) = \frac{df}{dx} = \lim_{h\to 0}\frac{f(x+h) - f(x)}{h}.$$</div>
+      <p>It answers "if I nudge $x$ a tiny bit, how much does $f$ move, and in which direction?"</p>
+      <p>When $f$ depends on many variables, $f(x_1, \dots, x_n)$, a <strong>partial derivative</strong> $\frac{\partial f}{\partial x_i}$ is the slope <em>along one axis</em>, holding the others fixed. Collect all partials into one vector and you get the <strong>gradient</strong>:</p>
+      <div class="math-box">$$\nabla f = \left[\frac{\partial f}{\partial x_1},\ \frac{\partial f}{\partial x_2},\ \dots,\ \frac{\partial f}{\partial x_n}\right]^\top.$$</div>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The gradient points uphill</div>
+        <p>The gradient points in the direction of <strong>steepest ascent</strong> — the fastest way <em>uphill</em> on the surface $f$. So $-\nabla f$ points downhill. That's the entire idea behind training: to <em>minimize</em> a loss, step against its gradient. <strong>Why it points uphill:</strong> the change in $f$ for a small step $\mathbf{u}$ is $\approx \nabla f \cdot \mathbf{u}$ (a dot product!), which — by 2.2 — is maximized when $\mathbf{u}$ aligns with $\nabla f$.</p>
+      </div>
+
+      <h3 id="chain-rule">2.7 The chain rule — the seed of backpropagation</h3>
+      <p>If you compose functions, $z = f(g(x))$, the derivative multiplies the local slopes:</p>
+      <div class="math-box">$$\frac{dz}{dx} = \frac{dz}{dg}\cdot\frac{dg}{dx}.$$</div>
+      <p>Intuition: gears. If gear A turns gear B at ratio $\frac{dg}{dx}$ and B turns C at ratio $\frac{dz}{dg}$, the overall ratio is their product. A deep network is a long chain of functions $f_L(\dots f_2(f_1(x)))$; <strong>backpropagation</strong> (<a href="10-backpropagation.html">10 — Backpropagation</a>) is just the chain rule applied layer by layer, multiplying local slopes from the output back to the input. Lock this in now and backprop will feel inevitable later.</p>
+
+      <h3 id="probability-basics">2.8 Probability: random variables, distributions, mean, variance</h3>
+      <p>A <strong>random variable</strong> $X$ is a quantity whose value is uncertain — e.g. a single noisy depth reading from a sonar. A <strong>probability distribution</strong> describes how likely each value is. For continuous $X$ we use a <strong>probability density</strong> $p(x)$ with $\int p(x)\,dx = 1$.</p>
+      <p>The <strong>mean / expectation</strong> is the long-run average — the "center of mass":</p>
+      <div class="math-box">$$\mu = \mathbb{E}[X] = \int x\,p(x)\,dx \quad\Big(\text{or } \textstyle\sum_x x\,p(x)\text{ for discrete }X\Big).$$</div>
+      <p>The <strong>variance</strong> measures spread (how noisy):</p>
+      <div class="math-box">$$\sigma^2 = \operatorname{Var}[X] = \mathbb{E}\big[(X-\mu)^2\big],$$</div>
+      <p>and $\sigma$ (the <strong>standard deviation</strong>) is in the same units as $X$.</p>
+      <p>The <strong>Gaussian (normal)</strong> distribution is the default model for sensor noise (thanks to the Central Limit Theorem — sums of many small independent errors look Gaussian):</p>
+      <div class="math-box">$$p(x) = \frac{1}{\sqrt{2\pi\sigma^2}}\exp\!\left(-\frac{(x-\mu)^2}{2\sigma^2}\right).$$</div>
+      <p>It's fully described by just $\mu$ (center) and $\sigma$ (width). About 68% of mass lies within $\pm\sigma$, 95% within $\pm 2\sigma$.</p>
+
+      <h3 id="bayes">2.9 Conditional probability and Bayes' rule</h3>
+      <p>$P(A \mid B)$ is the probability of $A$ <strong>given that</strong> $B$ happened. By definition $P(A\mid B) = \frac{P(A,B)}{P(B)}$. Rearranging the joint two ways gives <strong>Bayes' rule</strong>:</p>
+      <div class="math-box">$$P(A \mid B) = \frac{P(B \mid A)\,P(A)}{P(B)}.$$</div>
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Posterior ∝ likelihood × prior</div>
+        <p>In words: <strong>posterior</strong> $\propto$ <strong>likelihood</strong> $\times$ <strong>prior</strong>. This is how a robot fuses a noisy measurement ($B$) with what it already believed ($P(A)$) to get an updated belief ($P(A\mid B)$) — the mathematical heart of Kalman filters, particle filters, and Bayesian inference. It also underpins classifiers like Naive Bayes.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>Code</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>build the toolbox by hand</small></div>
+      <p>Pure NumPy — no ML libraries yet. We build the toolbox by hand so the operations stop being magic.</p>
+
+      <div class="codeblock">
+        <div class="code-head">containers.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+
+# ----- 3.1 Scalars, vectors, matrices, tensors -----
+scalar = np.array(3.0)              # 0 axes
+vector = np.array([1.0, 2.0, 3.0])  # 1 axis, shape (3,)
+matrix = np.array([[1.0, 2.0],
+                   [3.0, 4.0],
+                   [5.0, 6.0]])     # 2 axes, shape (3, 2)
+tensor = np.zeros((2, 3, 4))        # 3 axes, e.g. 2 RGB-ish frames
+
+# .ndim = number of axes, .shape = size along each axis
+print(scalar.ndim, vector.shape, matrix.shape, tensor.shape)
+# -&gt; 0 (3,) (3, 2) (2, 3, 4)
+</code></pre>
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">dot_product.py <span class="lang">Python</span></div>
+<pre><code class="language-python"># ----- 3.2 Dot product and its geometry -----
+a = np.array([1.0, 0.0])   # pointing east
+b = np.array([1.0, 1.0])   # pointing northeast
+
+dot = np.dot(a, b)                          # = 1*1 + 0*1 = 1
+cos_theta = dot / (np.linalg.norm(a) * np.linalg.norm(b))
+angle_deg = np.degrees(np.arccos(cos_theta))
+print(dot, round(cos_theta, 3), round(angle_deg, 1))
+# -&gt; 1.0 0.707 45.0   (the vectors are 45 degrees apart)
+
+# Perpendicular vectors have zero dot product:
+print(np.dot(np.array([1.0, 0.0]), np.array([0.0, 1.0])))
+# -&gt; 0.0
+</code></pre>
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">matmul.py <span class="lang">Python</span></div>
+<pre><code class="language-python"># ----- 3.3 Matrix-vector and matrix-matrix multiplication -----
+A = np.array([[1.0, 2.0],
+              [3.0, 4.0]])
+x = np.array([1.0, 1.0])
+
+print(A @ x)            # each output = dot(row_i, x): [1+2, 3+4]
+# -&gt; [3. 7.]
+
+B = np.array([[1.0, 0.0],
+              [0.0, 2.0]])   # scale y by 2
+print(A @ B)            # compose transforms; inner dims (2==2) match
+# -&gt; [[1. 4.]
+#     [3. 8.]]
+</code></pre>
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">transpose_inverse.py <span class="lang">Python</span></div>
+<pre><code class="language-python"># ----- 3.4 Transpose, identity, inverse -----
+print(A.T)                      # rows &lt;-&gt; columns
+# -&gt; [[1. 3.]
+#     [2. 4.]]
+
+I = np.eye(2)                   # identity
+print(np.allclose(A @ I, A))    # I does nothing
+# -&gt; True
+
+A_inv = np.linalg.inv(A)        # exists: det(A) = -2 != 0
+print(np.allclose(A_inv @ A, I))
+# -&gt; True
+</code></pre>
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">norms.py <span class="lang">Python</span></div>
+<pre><code class="language-python"># ----- 3.5 Norms -----
+v = np.array([3.0, -4.0])
+print(np.linalg.norm(v, 2))     # L2: sqrt(9 + 16) = 5
+print(np.linalg.norm(v, 1))     # L1: |3| + |-4| = 7
+# -&gt; 5.0
+# -&gt; 7.0
+</code></pre>
+      </div>
+
+      <h3 id="gradient-field">Visualizing the gradient as a vector field</h3>
+      <p>We'll take the bowl-shaped surface $f(x,y) = x^2 + y^2$. Its gradient is $\nabla f = [2x,\ 2y]$, which always points <em>outward and uphill</em>. Negating it points to the minimum at the origin — exactly the direction gradient descent travels.</p>
+      <div class="codeblock">
+        <div class="code-head">gradient_field.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+# Grid of (x, y) points
+xs = np.linspace(-3, 3, 20)
+ys = np.linspace(-3, 3, 20)
+X, Y = np.meshgrid(xs, ys)
+
+# f(x,y) = x^2 + y^2   -&gt;   grad f = [2x, 2y]
+U, V = 2 * X, 2 * Y                       # gradient components (uphill)
+
+fig, ax = plt.subplots(figsize=(6, 6))
+# Filled contours show the "height" of the bowl
+ax.contourf(X, Y, X**2 + Y**2, levels=20, alpha=0.6, cmap="viridis")
+# Arrows show the NEGATIVE gradient: the downhill direction
+ax.quiver(X, Y, -U, -V, color="white")
+ax.set_title(r"$-\nabla f$ for $f=x^2+y^2$ (arrows point downhill)")
+ax.set_xlabel("x"); ax.set_ylabel("y"); ax.set_aspect("equal")
+plt.tight_layout(); plt.show()
+</code></pre>
+      </div>
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> What you should see</div>
+        <p>Concentric contour rings (the bowl seen from above) with white arrows everywhere pointing <em>toward the center</em>. Every arrow is the direction gradient descent would step from that point — straight at the minimum.</p>
+      </div>
+
+      <h3 id="plot-gaussian">Plotting a Gaussian</h3>
+      <div class="codeblock">
+        <div class="code-head">plot_gaussian.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+def gaussian(x, mu, sigma):
+    # The normal density from section 2.8
+    coeff = 1.0 / np.sqrt(2 * np.pi * sigma**2)
+    return coeff * np.exp(-((x - mu) ** 2) / (2 * sigma**2))
+
+x = np.linspace(-6, 6, 400)
+plt.figure(figsize=(7, 4))
+for sigma in (0.5, 1.0, 2.0):
+    plt.plot(x, gaussian(x, mu=0.0, sigma=sigma), label=f"$\\sigma={sigma}$")
+plt.title("Gaussian: same center, different spreads")
+plt.xlabel("x"); plt.ylabel("p(x)"); plt.legend()
+plt.tight_layout(); plt.show()
+</code></pre>
+      </div>
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> What you should see</div>
+        <p>Three bell curves centered at 0. Smaller $\sigma$ = taller and narrower (confident, low-noise); larger $\sigma$ = shorter and wider (uncertain, high-noise). All enclose area 1.</p>
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">monte_carlo.py <span class="lang">Python</span></div>
+<pre><code class="language-python"># ----- Empirical mean &amp; variance from samples (Monte Carlo) -----
+rng = np.random.default_rng(0)
+samples = rng.normal(loc=2.0, scale=1.5, size=100_000)   # mu=2, sigma=1.5
+print(round(samples.mean(), 3), round(samples.var(), 3))
+# -&gt; 1.999 2.251    (var approx sigma^2 = 1.5^2 = 2.25)
+</code></pre>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>Real Case: IMU/heading vectors and the dot product</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>why this matters on a boat</small></div>
+      <p>You're running an autonomous <strong>USV</strong> with an <strong>IMU</strong> that reports the boat's heading, and a planner that emits a desired heading toward the next waypoint. Both headings are just <strong>unit vectors</strong> in the water-plane:</p>
+      <div class="math-box">$$\mathbf{h}_{\text{imu}} = \begin{bmatrix}\cos\psi \\ \sin\psi\end{bmatrix}, \qquad \mathbf{h}_{\text{goal}} = \begin{bmatrix}\cos\phi \\ \sin\phi\end{bmatrix},$$</div>
+      <p>where $\psi$ is the measured yaw and $\phi$ the target bearing. The <strong>dot product measures alignment</strong> — exactly the heading error a controller cares about:</p>
+      <div class="math-box">$$\mathbf{h}_{\text{imu}} \cdot \mathbf{h}_{\text{goal}} = \cos(\psi - \phi).$$</div>
+      <ul>
+        <li>Dot product near $+1$ → headings aligned, hold course.</li>
+        <li>Near $0$ → 90° off, turn hard.</li>
+        <li>Negative → pointing the wrong way, you've overshot or the waypoint is behind you.</li>
+      </ul>
+      <p>This is why the dot product is the right "alignment sensor." It also gives you the <em>sign</em> of the turn via the 2D cross product ($h_{x}g_{y} - h_{y}g_{x}$): positive = turn left, negative = turn right.</p>
+
+      <div class="codeblock">
+        <div class="code-head">heading_alignment.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+
+def heading_vec(psi_rad):
+    """Unit heading vector from a yaw angle."""
+    return np.array([np.cos(psi_rad), np.sin(psi_rad)])
+
+# IMU says we're pointing 30 deg; planner wants 80 deg.
+h_imu  = heading_vec(np.radians(30))
+h_goal = heading_vec(np.radians(80))
+
+alignment = np.dot(h_imu, h_goal)              # cos of the heading error
+error_deg = np.degrees(np.arccos(np.clip(alignment, -1, 1)))
+
+cross = h_imu[0]*h_goal[1] - h_imu[1]*h_goal[0]  # sign =&gt; turn direction
+turn = "left" if cross &gt; 0 else "right"
+
+print(round(alignment, 3), round(error_deg, 1), turn)
+# -&gt; 0.643 50.0 left   (50 deg off, steer left toward the waypoint)
+</code></pre>
+      </div>
+
+      <p>The same dot-product-as-alignment idea scales up: stack a batch of $N$ heading vectors into a matrix $H \in \mathbb{R}^{N\times 2}$ and compute alignments against a goal in one matrix-vector multiply $H\,\mathbf{h}_{\text{goal}}$ — vectorized, no Python loop. That is the exact pattern a neural network uses to score many inputs against learned weights at once.</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🛥</span> Practice dataset</div>
+        <p>For a grounded <em>classic</em> dataset to practice these primitives on, load <strong>Iris</strong> (<code>sklearn.datasets.load_iris</code>): each flower is a 4-D feature vector, and L2 distance between vectors is all you need to start clustering or doing nearest-neighbor classification (<a href="06-knn-trees-ensembles.html">06 — k-NN</a>).</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls"><span class="sec-no">5</span>Pitfalls &amp; Tips</h2>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> The traps that bite everyone</div>
+        <ul>
+          <li><strong>Shape mismatches are the #1 NumPy bug.</strong> Print <code>.shape</code> constantly. For $AB$, the inner dimensions must match: $(m\times k)(k\times n)$. A <code>ValueError: matmul: ... mismatch</code> almost always means a transpose is missing.</li>
+          <li><strong>Broadcasting is a feature <em>and</em> a trap.</strong> <code>np.array([1,2,3]) + np.array([[1],[2]])</code> silently produces a $2\times3$ result. Convenient, but it hides bugs — assert the output shape you expect.</li>
+          <li><strong>Don't invert matrices.</strong> <code>np.linalg.inv(A) @ b</code> is slower and less stable than <code>np.linalg.solve(A, b)</code>. Inverses are a <em>concept</em> for understanding, not usually a computation you run.</li>
+          <li><strong>Row vector vs column vector.</strong> A 1-D NumPy array of shape <code>(n,)</code> is neither; <code>A @ x</code> and <code>x @ A</code> both "work" by auto-orienting it, which can mask a logic error. When it matters, be explicit with <code>x.reshape(-1, 1)</code>.</li>
+          <li><strong>Gradient points <em>uphill</em>.</strong> To <em>minimize</em> a loss you step along $-\nabla f$. Flipping this sign is a classic training bug — your loss will <em>grow</em>.</li>
+          <li><strong>Variance is in squared units.</strong> A depth sensor with $\sigma = 0.1\,\text{m}$ has variance $0.01\,\text{m}^2$. Report $\sigma$ (meters) to humans, but algorithms often carry $\sigma^2$.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>Check Your Understanding</h2>
+
+      <p><strong>Q1.</strong> Two heading vectors give a dot product of exactly $0$. What's the angle between them, and what should a USV controller do?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">$\cos\theta = 0 \Rightarrow \theta = 90°$. The boat is pointed perpendicular to the desired heading — a large error. The controller should command a hard turn; the 2D cross-product sign tells it left vs. right.</div></details>
+
+      <p><strong>Q2.</strong> You have $A \in \mathbb{R}^{4\times 3}$ and $\mathbf{x} \in \mathbb{R}^{3}$. What is the shape of $A\mathbf{x}$, and what is each output component?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">$A\mathbf{x} \in \mathbb{R}^{4}$. Output component $i$ is the dot product of row $i$ of $A$ (length 3) with $\mathbf{x}$ (length 3): $y_i = \sum_{j=1}^{3} A_{ij}x_j$.</div></details>
+
+      <p><strong>Q3.</strong> For $f(x, y) = x^2 + y^2$, compute $\nabla f$ at the point $(1, 2)$. Which direction reduces $f$ fastest?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">$\nabla f = [2x, 2y] = [2, 4]$ at $(1,2)$. That's the steepest-<em>ascent</em> direction. To reduce $f$ fastest, step along $-\nabla f = [-2, -4]$ — back toward the origin (the minimum).</div></details>
+
+      <p><strong>Q4.</strong> Why is the chain rule called "the seed of backpropagation"?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">A neural network is a composition of many functions (layers). The chain rule says the derivative of a composition is the product of the local derivatives. Backprop computes the loss gradient w.r.t. every parameter by multiplying these local derivatives from the output layer back to the input — the chain rule applied repeatedly and efficiently.</div></details>
+
+      <p><strong>Q5.</strong> A sonar's depth reading is modeled as Gaussian with $\mu = 5.0\,\text{m}$, $\sigma = 0.2\,\text{m}$. Roughly what range contains 95% of readings? Using Bayes' rule, what would you combine this measurement with to estimate true depth?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">About $\mu \pm 2\sigma = 5.0 \pm 0.4$, i.e. $[4.6, 5.4]\,\text{m}$. Bayes: combine the <strong>likelihood</strong> $P(\text{reading}\mid\text{depth})$ (this Gaussian) with a <strong>prior</strong> belief $P(\text{depth})$ (e.g. from a chart or the previous estimate) to get the <strong>posterior</strong> $P(\text{depth}\mid\text{reading})$ — exactly what a Kalman filter does.</div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml01-gradient-sign">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You wrote a training loop and your loss <em>grows</em> every step instead of shrinking. From this lesson, what is the most likely single-line bug?</div>
+        <ul class="ex-options">
+          <li data-correct="false">You used L2 norm where you should have used L1 norm.</li>
+          <li data-correct="true">You stepped along $+\nabla f$ instead of $-\nabla f$ — climbing the loss surface instead of descending it.</li>
+          <li data-correct="false">You forgot to transpose a matrix, so the shapes don't match.</li>
+          <li data-correct="false">You reported variance in the wrong units.</li>
+        </ul>
+        <div class="ex-explain">The gradient points in the direction of <em>steepest ascent</em>. To minimize a loss you must step against it, along $-\nabla f$. Forgetting the minus sign makes every update climb uphill, so the loss rises monotonically — a classic, single-character training bug. A shape mismatch would raise a <code>ValueError</code> rather than train-and-grow.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml01-heading-alignment" data-answer="0.643" data-tol="0.01">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">An IMU heading vector points at $\psi = 30°$ and the goal bearing is $\phi = 80°$. Both are unit vectors, so their dot product equals $\cos(\psi-\phi)$. What is the dot product (the alignment) to three decimals? (Hint: $\cos(\psi-\phi)=\cos(-50°)=\cos 50°$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">(unitless)</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">Since both vectors are unit length, $\mathbf{h}_{\text{imu}}\cdot\mathbf{h}_{\text{goal}} = \cos(\psi-\phi) = \cos(30°-80°) = \cos(-50°) = \cos 50° \approx 0.643$. That matches the worked code output: alignment $= 0.643$, an error of $50°$, steer left. Near $+1$ means aligned; near $0$ means turn hard.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml01-matmul-as-dots">
+        <div class="ex-head"><span class="badge">Q3</span> Derivation — matrix-vector multiply as a stack of dot products</div>
+        <div class="ex-q">Take $A=\begin{bmatrix}1&amp;2\\3&amp;4\end{bmatrix}$ and $\mathbf{x}=\begin{bmatrix}1\\1\end{bmatrix}$. Using the rule $y_i = \sum_j A_{ij}x_j$, show that $A\mathbf{x}$ is "a stack of dot products," and state what would happen to the shapes if $\mathbf{x}$ had length 3 instead.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Each output component $y_i$ is the dot product of <em>row $i$ of $A$</em> with the whole vector $\mathbf{x}$. Compute $y_1$ from row 1, $y_2$ from row 2. For the shape question, recall the inner dimensions of a product must match.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p>Row 1 is $[1,2]$: $y_1 = 1\cdot1 + 2\cdot1 = 3$. Row 2 is $[3,4]$: $y_2 = 3\cdot1 + 4\cdot1 = 7$. So $A\mathbf{x} = \begin{bmatrix}3\\7\end{bmatrix}$ — exactly <code>dot(row_1, x)</code> stacked on <code>dot(row_2, x)</code>, matching the code output <code>[3. 7.]</code>. The whole multiply is just one dot product per row.</p>
+          <p>If $\mathbf{x}$ had length 3 while $A$ stayed $2\times2$, the <strong>inner dimensions wouldn't match</strong> ($2 \neq 3$) and NumPy would raise <code>ValueError: matmul: ... mismatch</code>. For $A\mathbf{x}$ to be valid, $A$ must have as many columns as $\mathbf{x}$ has entries: a $2\times3$ matrix times a length-3 vector gives a length-2 result.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Lesson recap</div>
+        <p><strong>Linear algebra = representation:</strong> data is vectors/matrices/tensors; the <strong>dot product measures alignment</strong> and is the atom of nearly every ML operation; matrices are transformations you compose. <strong>Norms measure size/distance</strong> — L2 (Euclidean) for least-squares and similarity, L1 (Manhattan) for sparsity. <strong>Calculus = improvement:</strong> derivative = slope, <strong>gradient = steepest-ascent direction</strong>, so $-\nabla f$ is downhill; the <strong>chain rule</strong> chains local slopes — backprop in embryo. <strong>Probability = uncertainty:</strong> random variables have distributions summarized by <strong>mean and variance</strong>; the <strong>Gaussian</strong> models sensor noise; <strong>Bayes' rule</strong> updates belief = likelihood × prior. You connected it to robotics by treating IMU/heading readings as vectors and using the dot product as an alignment sensor. Next we put the whole loop — represent, predict, measure error, follow the gradient — to work on a real model: <a href="02-linear-regression.html">02 — Linear Regression</a>.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

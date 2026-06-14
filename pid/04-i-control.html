@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>I Control: The Trim Tab — PID Control for a USV</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-pid" data-course="pid" data-track="main" data-chapter="04-i-control">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> PID&nbsp;·&nbsp;USV</a>
+  <span class="spacer"></span>
+  <span class="track-pill">PID · Ch 04</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">PID Course · Chapter 04 · The Integral Term</div>
+        <h1>I Control: The Trim Tab</h1>
+        <p>Your PD controller holds course beautifully — and lies about it. It sits a couple of degrees off the setpoint and calls it done, because that offset is the only way P can keep the rudder pushed against the current. This chapter is about the one term that fixes that: the integral, the part of the controller that <em>learns</em> the disturbance and trims it out so the error can finally go to zero.</p>
+        <div class="meta"><span>⏱ ~30 min</span><span>🧭 Case 4</span><span>⚡ Live sim</span><span>∑ Integral term</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="the-leftover"><span class="sec-no">1</span>The leftover problem: PD holds course by staying wrong</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>where we left off</small></div>
+      <p>We've built a good PD controller: $k_p=2$ gets us there, $k_d=3$ glides us in without overshoot. It's the parking-valet controller from Chapter 03. But it has a defect that only shows up when a <strong>persistent</strong> disturbance is present — a current, a steady crosswind, a trim imbalance. Recall the boat: the model says the current acts exactly like a <strong>4° stuck rudder</strong> pushing the bow.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The trim-tab analogy</div>
+        <p>On a real boat or a sailplane there's a small <strong>trim tab</strong> — a tiny secondary surface you set once so the main control surface can rest at neutral while still holding against a steady force. The integral term <em>is</em> the trim tab the autopilot adjusts for itself. It quietly winds in exactly enough bias to cancel the current, so the proportional term no longer has to fight it.</p>
+      </div>
+
+      <p>To hold a steady heading, the net yaw moment must be zero. The current is a constant $+4°$ of equivalent rudder, so <em>something</em> in the controller has to hold a steady $-4°$ to cancel it. A pure P controller can only output $k_p e$ — and the only way it produces $-4°$ of rudder is to <strong>sit at a non-zero error</strong>:</p>
+
+      <div class="math-box">$$ k_p\,e_{ss} = -4° \quad\Longrightarrow\quad e_{ss} = \frac{-4°}{k_p} $$</div>
+
+      <p>At $k_p=2$ that's $e_{ss}=-2°$: the boat settles at $92°$ when you asked for $90°$. D doesn't help — once you're sitting still, the derivative is zero, so D contributes nothing. <strong>PD holds course by staying wrong.</strong> That isn't a tuning failure; it's structural. At zero error a PD controller outputs zero rudder, and zero rudder loses to the current.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> You can't just crank $k_p$</div>
+        <p>The tempting fix — shrink the offset by raising $k_p$ — runs straight into Chapter 01–02's wall: this boat goes unstable near $k_p\approx5$ (the ultimate gain $K_u$). With usable gains the offset is permanent. We need a fundamentally different mechanism, not a bigger spring.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="what-integral-is-for"><span class="sec-no">2</span>What the integral is actually for</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the controller grows a memory</small></div>
+      <p>The proportional term reacts to <em>where you are right now</em>. The derivative term reacts to <em>where you're going</em>. Neither has any memory of the past. The integral term is the controller's memory: it accumulates error over time. If a small error <strong>lingers</strong>, the integral keeps growing, leaning harder and harder, until it has built up enough output to push the error to zero — and then it <em>stays there</em>, holding the bias even when the error is gone.</p>
+
+      <div class="mermaid">
+flowchart LR
+    E["error e = psi_set - psi"] --> P["P: kp e (now)"]
+    E --> D["D: kd de/dt (trend)"]
+    E -->|"sum e*dt over time"| I["I: ki integral (history)"]
+    P --> U["rudder u"]
+    D --> U
+    I --> U
+    U --> B["boat"]
+    C["current d = +4 deg"] --> B
+    B -->|"heading psi"| E
+</div>
+
+      <div class="layer"><span class="step">②</span> Math <small>why this forces zero error</small></div>
+      <p>Here is the argument that the integral makes steady-state error <em>exactly</em> zero, not just small. Suppose the closed loop settles — every signal goes constant. The integral term is $i = k_i \int_0^t e\,d\tau$. For $i$ to be constant, its rate of change must be zero:</p>
+
+      <div class="math-box">$$ \frac{di}{dt} = k_i\, e(t) = 0 \quad\Longrightarrow\quad e(t)=0 $$</div>
+
+      <p>That's the whole trick. <strong>The only way the integral can stop growing is if the error is zero.</strong> So as long as <em>any</em> error persists, the integral keeps moving the rudder; it can only come to rest when it has driven the error to nothing. And crucially, when it comes to rest it doesn't unwind — it holds whatever bias it has accumulated. That held value <em>is</em> the trim that cancels the current.</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Where the trim ends up</div>
+        <p>At the new steady state the boat is back on $90°$, so $e=0$ and therefore $P=0$ and $D=0$. The current still pushes with $+4°$, so the rudder must still hold $-4°$ — and the <em>only</em> term left to supply it is I. The integral has ramped to exactly $k_i\,\text{integral} = -4°$ and parked there. The integral has <strong>learned the current</strong>.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="watch-it-live"><span class="sec-no">3</span>Watch it learn the current</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>Case 4, live</small></div>
+      <p>This is Case 4 from the notes, running for real. The boat starts already settled on $90°$. At <strong>$t=20$ s the current switches on</strong> — a step disturbance equal to that $4°$ stuck rudder. Watch the heading panel and the rudder panel together.</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>🧭</span> PID — disturbance switches on at t=20 s, I trims it out</div>
+        <canvas id="sim-i"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What to drag, what to watch</div>
+        <p>Set $k_p=2$, $k_d=3$ and start with <strong>$k_i=0$</strong> (pure PD). At $t=20$ s the current kicks in and the boat bends to about $92°$ and <em>stays</em> there — that's the structural offset from §1. Now bring $k_i$ up to $0.2$ and re-run: after the kick the heading dips to roughly $91.7°$, then crawls back to exactly $90.0°$ over about $30$ s. In the rudder panel you can literally watch the steady rudder bias slide down to $-4°$ — that's the integral filling in the trim while the proportional contribution relaxes back to zero.</p>
+      </div>
+
+      <p>Two numbers to read straight off the plot once $k_i=0.2$:</p>
+      <ul>
+        <li><strong>The recovery is slow on purpose</strong> — about $30$ s. The integral is supposed to respond to things that <em>persist</em>, not to every passing wave. Slow is correct here.</li>
+        <li><strong>The PD trace never recovers</strong> — it just sits at $92°$ forever. Same boat, same disturbance; the only difference is whether there is a memory term carrying the trim.</li>
+      </ul>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Now turn $k_i$ up too far</div>
+        <p>Crank $k_i$ to $2$ and re-run. The boat overshoots the recovery and weaves slowly back and forth across $90°$ for ages before it settles. That's the integral drawing <em>jumpy conclusions from a short memory</em> — it builds bias faster than the slow hull can respond, overshoots, then has to unwind. This previews §4: $k_i$ must be the slowest thing in the loop.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="why-ki-small"><span class="sec-no">4</span>Why $k_i$ must be small — the slowest thing in the loop</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>memory vs. reflex</small></div>
+      <p>Think of the three terms as three different timescales of decision-making. P is a reflex — instant reaction to the present. D is anticipation — reaction to the immediate trend. I is judgment — a conclusion drawn from accumulated evidence. Judgment should be the <em>last</em> to change its mind, not the first. A controller whose memory term twitches as fast as its reflex is a controller that panics over noise and short transients.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The integral should be the slowest thing in the loop</div>
+        <p>Big $k_i$ = jumpy conclusions from short memory = overshoot and slow weaving. Small $k_i$ = patient, only leans on errors that truly <em>persist</em>. The integral's whole value is that it ignores the transient and learns the steady bias. Make it fast and you destroy the one property you added it for.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>the integral adds lag</small></div>
+      <p>There's a hard reason behind the rule of thumb, not just taste. The integral introduces <strong>phase lag</strong>: its output trails the error, because it's an accumulation of the past. In the frequency view, an integrator contributes $-90°$ of phase. Phase lag is exactly what eats your stability margin — it's the same mechanism that makes high $k_p$ oscillate (the servo's lag, Chapter 02). So the integral is, by construction, a destabilizing term. You buy zero steady-state error and you pay in phase margin. Keep $k_i$ small and you keep the bill small.</p>
+
+      <div class="math-box">$$ G_I(j\omega) = \frac{k_i}{j\omega} \quad\Rightarrow\quad \angle G_I = -90°,\qquad |G_I| \propto \frac{1}{\omega} $$</div>
+
+      <p>Notice the magnitude: $|G_I|\propto 1/\omega$. The integrator has <em>huge</em> gain at low frequency (which is why it crushes the constant offset) and <em>small</em> gain at high frequency (which is why it sensibly ignores fast wave-chop). That low-frequency authority is the feature; the $-90°$ of phase is the price. The tuning recipe — "add the smallest $k_i$ that removes the offset in reasonable time" — is just balancing those two.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>$k_i$</th><th>Behaviour after the $t=20$ s kick</th><th>Verdict</th></tr></thead>
+        <tbody>
+          <tr><td>0</td><td>permanent $2°$ offset, never recovers</td><td>this is the bug</td></tr>
+          <tr><td>0.2</td><td>recovers to $90.0°$ in ~$30$ s, no weave</td><td>the chosen gain</td></tr>
+          <tr><td>2</td><td>overshoots, slow weaving for tens of seconds</td><td>too hot — memory too jumpy</td></tr>
+        </tbody>
+      </table></div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="in-code"><span class="sec-no">5</span>The integral in code</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>The integral term is two lines, but both lines matter. The accumulator <strong>persists across calls</strong> — that's what makes it a memory and not a formula. And the gain $k_i$ multiplies the <em>whole accumulated sum</em>, not the current error.</p>
+
+      <div class="codeblock">
+        <div class="code-head">control step (per dt) <span class="lang">Python</span></div>
+<pre><code class="language-python">error      = wrap(setpoint - heading)        # rad, ALWAYS wrapped (Ch 07)
+integral  += error * dt                       # rad*s, PERSISTS across calls
+derivative = (error - prev_error) / dt        # rad/s
+
+p = kp * error
+i = ki * integral                             # &lt;- the trim tab: learns the bias
+d = kd * derivative
+
+u = p + i + d                                  # rad of rudder
+u = clamp(u, -RUDDER_MAX, +RUDDER_MAX)
+prev_error = error
+</code></pre>
+      </div>
+
+      <p>Trace what happens to those three contributions across the Case 4 experiment. Before $t=20$ s the boat is on $90°$, error is zero: P=0, I=0 (nothing accumulated), D=0, rudder rests at $0°$. The current switches on; the bow drifts, error grows, P pushes back and arrests it at $\approx92°$. Now <code>integral += error*dt</code> starts ticking up every step because the error is non-zero and <em>staying</em> non-zero. As the integral grows, $i = k_i\,\text{integral}$ takes over the load, the rudder bias slides toward $-4°$, the error shrinks back toward zero, P fades out — and the integral, finding $e=0$, stops growing exactly where it is. Handover complete.</p>
+
+      <div class="codeblock">
+        <div class="code-head">pid_controller.py <span class="lang">Python</span></div>
+<pre><code class="language-python">class PID:
+    def __init__(self, kp, ki, kd, output_limits=(-1.0, 1.0)):
+        self.kp, self.ki, self.kd = kp, ki, kd
+        self.out_min, self.out_max = output_limits
+        self.integral = 0.0
+        self.prev_error = None
+
+    def reset(self):
+        """Call when re-engaging: a stale integral is a windup bug (Ch 05)."""
+        self.integral = 0.0
+        self.prev_error = None
+
+    def update(self, error, dt):
+        p = self.kp * error
+        self.integral += error * dt                 # the memory grows here
+        i = self.ki * self.integral
+        d = 0.0 if self.prev_error is None else self.kd * (error - self.prev_error) / dt
+        self.prev_error = error
+        u = p + i + d
+        return max(self.out_min, min(self.out_max, u))   # clamp
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> The clamp hides a trap</div>
+        <p>Notice the integral keeps accumulating even when the output is clamped to the rudder stop. For the gentle Case 4 disturbance that's harmless — the rudder never saturates. But for a big maneuver it is exactly how <strong>integral windup</strong> (Chapter 05) is born: the memory fills up against a wall it can't see. We'll meet that bug head-on next chapter. For now, savour the integral doing its honest job.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="by-hand"><span class="sec-no">6</span>One trim-tab timestep by hand</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>numbers, no hand-waving</small></div>
+      <p>Take a snapshot a few seconds after the current has switched on, while the integral is still learning. Gains $k_p=2,\ k_i=0.2,\ k_d=3$. The boat has been bent to $91.5°$ (setpoint $90°$), it's nearly stationary, and the integral has so far accumulated $-0.20$ rad·s of negative error. One step:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Step</th><th>Computation</th><th>Result</th></tr></thead>
+        <tbody>
+          <tr><td>error</td><td>wrap(90° − 91.5°) = −1.5°</td><td>−0.0262 rad</td></tr>
+          <tr><td>P</td><td>2 × (−0.0262)</td><td><strong>−0.0524 rad</strong> (−3.0°)</td></tr>
+          <tr><td>integral</td><td>−0.20 + (−0.0262)×0.05</td><td>−0.2013 rad·s</td></tr>
+          <tr><td>I</td><td>0.2 × (−0.2013)</td><td><strong>−0.0403 rad</strong> (−2.3°)</td></tr>
+          <tr><td>derivative</td><td>≈ 0 (boat nearly still)</td><td>≈ 0 rad/s</td></tr>
+          <tr><td>D</td><td>3 × 0</td><td><strong>≈ 0 rad</strong></td></tr>
+          <tr><td>sum</td><td>−0.0524 − 0.0403 + 0</td><td>−0.0927 rad = <strong>−5.3°</strong></td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Read the handover in progress</div>
+        <p>Right now P is still doing most of the work ($-3.0°$) and I has only built up $-2.3°$. But every step the integral grows a little more negative while P shrinks as the error closes. Fast-forward to steady state: error $\to0$ so P $\to0$ and D $\to0$, while the integral has ramped until $k_i\,\text{integral} = -4°$ all on its own. The total rudder stays near $-4°$ throughout — the <em>composition</em> just shifts from P-supplied to I-supplied. That shift is the trim tab taking the load off your hands.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="pid04-why-zero">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">Why does adding the integral term drive the steady-state heading error to <em>exactly</em> zero, rather than merely shrinking it like a bigger $k_p$ would?</div>
+        <ul class="ex-options">
+          <li data-correct="false">Because $k_i$ is larger than $k_p$, so it dominates the output.</li>
+          <li data-correct="true">At steady state the integral stops changing only if the error is zero, so the loop can rest only when $e=0$.</li>
+          <li data-correct="false">Because the integral cancels the derivative term once the boat stops moving.</li>
+          <li data-correct="false">Because the current disturbance fades away on its own after a while.</li>
+        </ul>
+        <div class="ex-explain">A constant integral requires $\tfrac{di}{dt}=k_i e=0$, which forces $e=0$. The held integral value then supplies the $-4°$ trim that cancels the current, while P and D both go to zero. A bigger $k_p$ only divides the offset by $k_p$ ($e_{ss}=-4°/k_p$) — it never reaches zero, and you run out of usable $k_p$ before it gets close.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="pid04-pd-offset" data-answer="2" data-tol="0.1">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">With a pure PD controller ($k_i=0$), $k_p=2$, and a current equal to a $4°$ stuck rudder, what is the magnitude of the steady-state heading offset, in <strong>degrees</strong>? (Hint: $k_p e_{ss}=-4°$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">°</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$e_{ss} = -4°/k_p = -4°/2 = -2°$, so the boat settles $2°$ off — at $92°$ when commanded to $90°$. To get $-4°$ of rudder out of a P term, you must sit at a $-2°$ error. Adding $k_i$ removes it because the integral, not the error, ends up carrying the trim.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="pid04-why-slow">
+        <div class="ex-head"><span class="badge">Q3</span> Reasoning — why slow is the feature</div>
+        <div class="ex-q">In the sim with $k_i=0.2$, recovery after the $t=20$ s kick takes about $30$ s. Raising $k_i$ to $2$ makes it overshoot and weave. Explain, in terms of what the integral represents, why the slow version is the <em>correct</em> design — and what physical reason makes $k_i=2$ misbehave.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">The integral is a memory of accumulated error. What kinds of error <em>should</em> it respond to, and what kinds should it ignore? And recall that an integrator adds $-90°$ of phase lag to the loop.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p>The integral exists to cancel disturbances that <strong>persist</strong> — a steady current, a trim imbalance — not transient ones like a single wave. A slow integral averages over time and only leans on errors that stay non-zero, which is exactly what a current is. That patience is the property we added it for.</p>
+          <p>Crank $k_i$ to $2$ and two things break. First, the memory now reacts to short transients it should ignore, so it builds bias before the slow hull (time constant $T=2.5$ s) can respond — it overshoots the trim, then has to unwind, producing the slow weave. Second, the integrator contributes $-90°$ of phase lag; pump up $k_i$ and you spend stability margin, pushing the loop toward oscillation. The cure is the recipe: add the <em>smallest</em> $k_i$ that removes the offset in acceptable time, then stop. The integral should be the slowest thing in the loop.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>A PD controller holds course by <em>staying wrong</em>: to push $-4°$ of rudder against the current, P must sit at $e_{ss}=-4°/k_p$, a structural offset you can't tune away with usable gains. The integral fixes it by becoming the controller's memory — it accumulates error and can only stop growing when $e=0$, so it drives the steady-state error to exactly zero and parks at the $-4°$ trim the current demands. In the sim, the disturbance steps on at $t=20$ s; PD bends and stays bent, PID dips and recovers in ~$30$ s. That slowness is the feature, and it's why $k_i$ must be the smallest, slowest term in the loop — every bit of integral you add buys low-frequency authority but spends phase margin. Next: what happens when that ever-growing memory hits a saturated rudder — integral windup, the integral's dark side.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+<script src="../assets/pid-sim.js"></script>
+<script>EM.pidSim("sim-i", EM.pidPresets.pid());</script>
+</body>
+</html>

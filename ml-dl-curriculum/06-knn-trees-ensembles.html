@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>k-NN, Decision Trees &amp; Ensembles — Machine Learning &amp; Deep Learning</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="06-knn-trees-ensembles">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 06</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL Course · 06</div>
+        <h1>k-NN, Decision Trees &amp; Ensembles</h1>
+        <p>Three model families that throw out the "learn a weight vector" playbook: one that learns <em>nothing</em> and just votes among neighbors, one that asks a flowchart of yes/no questions, and the committees of trees that turn a twitchy overfitter into the most reliable baseline you own. They eat raw tabular sensor features, demand almost no tuning, and tell you which channel actually drives the decision.</p>
+        <div class="meta"><span>⏱ ~40 min</span><span>🧠 k-NN · Trees · RF · GBDT</span><span>🐍 scikit-learn</span><span>🌊 Seabed classification</span></div>
+      </section>
+
+      <p><strong>Part 2 · Lesson 06 · Code stack:</strong> scikit-learn</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🧭</span> Prerequisites &amp; goals</div>
+        <p><strong>Prerequisites:</strong> <a href="05-overfitting-evaluation.html">05 — Overfitting, Regularization &amp; Evaluation</a> (you should already know train/test splits, cross-validation, and the bias–variance trade-off). Also helpful: <a href="04-logistic-regression.html">04 — Logistic Regression &amp; Classification</a> for the classification framing.</p>
+        <p><strong>By the end you can:</strong></p>
+        <ul>
+          <li>Explain how <strong>k-Nearest Neighbors</strong> classifies by distance, choose $k$ sensibly, and say <em>why</em> it falls apart in high dimensions.</li>
+          <li>Describe how a <strong>decision tree</strong> picks splits using <strong>Gini impurity</strong> / <strong>entropy</strong> and <strong>information gain</strong>, and why deep trees overfit.</li>
+          <li>Distinguish <strong>bagging</strong> (Random Forests — variance reduction by averaging) from <strong>boosting</strong> (Gradient Boosting / XGBoost — sequentially fixing errors).</li>
+          <li>Train and compare all four in scikit-learn, plot decision boundaries, and read a <strong>feature-importance</strong> chart.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>Intuition</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Until now (lessons 02–05) every model was <strong>parametric</strong>: linear and logistic regression learn a fixed vector of weights $\mathbf{w}$ and then <em>throw the training data away</em>. This lesson is about models that work differently.</p>
+
+      <p><strong>k-NN is the laziest possible model.</strong> It learns <em>nothing</em> at training time — it just memorizes the data. To classify a new point, it looks at the $k$ closest stored examples and takes a vote. Analogy: dropped into an unfamiliar town and asked "is this a safe street?", you'd glance at the nearest few houses and judge by them. No theory, just neighbors.</p>
+
+      <p><strong>A decision tree is a flowchart of yes/no questions.</strong> "Is petal length &lt; 2.5 cm? → if yes, <em>setosa</em>; if no, is petal width &lt; 1.8 cm? ...". Each question slices the feature space with an axis-aligned cut. It's exactly how a marine surveyor might reason: <em>"Backscatter strong? Then rock or gravel. Slope steep too? Rock."</em></p>
+
+      <p><strong>Ensembles</strong> are the punchline: one tree is twitchy and overfits, but a <em>committee</em> of trees is powerful. Two recipes:</p>
+      <ul>
+        <li><strong>Bagging / Random Forest</strong> — grow many trees on bootstrap resamples and <em>average</em> them. Averaging cancels the noise → lower variance.</li>
+        <li><strong>Boosting</strong> — grow trees <em>one at a time</em>, each one focused on the mistakes of the previous ones. This drives down bias, building a strong learner from weak ones.</li>
+      </ul>
+
+      <div class="mermaid">
+flowchart TD
+    A[Supervised models] --> B[Parametric: fixed weights<br/>linear / logistic]
+    A --> C[Non-parametric: keep data / grow structure]
+    C --> D[k-NN: vote among neighbors]
+    C --> E[Decision Tree: axis-aligned splits]
+    E --> F[Bagging / Random Forest<br/>parallel trees, average → ↓variance]
+    E --> G[Boosting / GBDT / XGBoost<br/>sequential trees, fix errors → ↓bias]
+</div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🌊</span> Why care for autonomous vehicles?</div>
+        <p>These models eat <strong>heterogeneous tabular sensor features</strong> (sonar backscatter, IMU variance, lidar return intensity, camera color stats) without needing them on the same scale (trees) or any training at all (k-NN). They're fast, interpretable baselines you reach for <em>before</em> a neural net.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>The Math</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive each model</small></div>
+
+      <h3 id="knn-math">2.1 k-Nearest Neighbors</h3>
+      <p>No training objective — prediction <em>is</em> the algorithm. For a query point $\mathbf{x}$, find the index set $N_k(\mathbf{x})$ of the $k$ training points with smallest distance, then vote:</p>
+
+      <div class="math-box">$$\hat{y}(\mathbf{x}) = \operatorname*{arg\,max}_{c}\sum_{i \in N_k(\mathbf{x})} \mathbb{1}[\,y_i = c\,]$$</div>
+
+      <p>where $c$ ranges over class labels, $y_i$ is the label of training point $i$, and $\mathbb{1}[\cdot]$ is 1 when the condition holds, else 0. For regression you'd average the neighbors' values instead of voting.</p>
+
+      <p><strong>Distance metrics.</strong> The whole model hinges on what "close" means. The general <strong>Minkowski</strong> distance between points $\mathbf{x}, \mathbf{z} \in \mathbb{R}^d$ is</p>
+
+      <div class="math-box">$$d_p(\mathbf{x},\mathbf{z}) = \left(\sum_{j=1}^{d} |x_j - z_j|^p\right)^{1/p}$$</div>
+
+      <ul>
+        <li>$p=2$ → <strong>Euclidean</strong> (straight-line). The default.</li>
+        <li>$p=1$ → <strong>Manhattan</strong> (city-block); more robust to outliers in single coordinates.</li>
+        <li>For directional data (e.g. heading vectors) <strong>cosine</strong> distance $1 - \frac{\mathbf{x}\cdot\mathbf{z}}{\lVert\mathbf{x}\rVert\,\lVert\mathbf{z}\rVert}$ is often better.</li>
+      </ul>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Why you MUST scale features</div>
+        <p>Distance sums over coordinates, so a feature measured in <em>metres</em> (range 0–1000) drowns out one in <em>radians</em> (range 0–6). Standardize first: $x_j \leftarrow (x_j - \mu_j)/\sigma_j$, with $\mu_j,\sigma_j$ the training mean and std of feature $j$. (This is exactly the <code>StandardScaler</code> from lesson 05.)</p>
+      </div>
+
+      <p><strong>Choosing $k$.</strong> This is the bias–variance knob:</p>
+      <ul>
+        <li>$k=1$ → zero training error, jagged boundary, <strong>high variance</strong> (memorizes noise).</li>
+        <li>$k$ large → smooth boundary, <strong>high bias</strong> (washes out real structure); at $k=N$ it just predicts the majority class.</li>
+      </ul>
+      <p>Pick $k$ by cross-validation. A common rule of thumb is $k \approx \sqrt{N}$, and odd $k$ avoids ties in binary problems.</p>
+
+      <p><strong>The curse of dimensionality.</strong> Here's the killer. In high dimensions, <em>all</em> points become roughly equidistant, so "nearest" loses meaning. One way to see it: the contrast between the farthest and nearest neighbor shrinks,</p>
+
+      <div class="math-box">$$\frac{\mathbb{E}[\,d_{\max} - d_{\min}\,]}{\mathbb{E}[\,d_{\min}\,]} \to 0 \quad \text{as } d \to \infty.$$</div>
+
+      <p>Intuitively, volume explodes exponentially with $d$, so any fixed sample becomes sparse — your "neighbors" are no longer near. We'll <em>measure</em> this collapse in code below.</p>
+
+      <h3 id="trees-math">2.2 Decision Trees — how a split is chosen</h3>
+      <p>A tree recursively partitions the data. At each node it searches over <strong>(feature $j$, threshold $t$)</strong> pairs and picks the split that most "purifies" the children. Purity of a node with class proportions $p_c$ (fraction of samples in class $c$) is measured two ways:</p>
+
+      <div class="math-box">$$\underbrace{G = 1 - \sum_{c} p_c^2}_{\text{Gini impurity}}, \qquad \underbrace{H = -\sum_{c} p_c \log_2 p_c}_{\text{entropy}}$$</div>
+
+      <p>Both are <strong>0 when the node is pure</strong> (one class) and <strong>maximal when classes are balanced</strong> (for 2 classes: $G=0.5$, $H=1$ bit). Gini is the default in scikit-learn — it's cheaper (no log) and behaves almost identically.</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Where do these come from?</div>
+        <p>Gini is the probability you'd misclassify a random sample if you labeled it by drawing from the node's class distribution: $\sum_c p_c(1-p_c) = 1-\sum_c p_c^2$. Entropy is Shannon's information content — bits needed to encode the label.</p>
+      </div>
+
+      <p>A candidate split sends a fraction $\frac{N_L}{N}$ of samples left and $\frac{N_R}{N}$ right. <strong>Information gain</strong> is the impurity <em>removed</em>:</p>
+
+      <div class="math-box">$$\text{IG} = I(\text{parent}) - \left(\frac{N_L}{N}\,I(\text{left}) + \frac{N_R}{N}\,I(\text{right})\right)$$</div>
+
+      <p>where $I$ is Gini or entropy, $N$ is the parent count, $N_L, N_R$ the child counts. The tree <strong>greedily picks the split with the largest IG</strong>, then recurses. It stops when a node is pure, hits <code>max_depth</code>, or falls below <code>min_samples_leaf</code>.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Why deep trees overfit</div>
+        <p>With no depth limit a tree keeps splitting until every leaf has one sample — training error 0, but the boundary is a maze of slivers fit to noise. That's the <strong>high-variance</strong> end of lesson 05's trade-off. The cures: limit depth, require more samples per leaf, prune — or, better, <em>ensemble</em> them.</p>
+      </div>
+
+      <h3 id="ensembles-math">2.3 Ensembles — why a committee beats one tree</h3>
+      <p><strong>Bagging (Bootstrap AGGregatING).</strong> Train $B$ trees, each on a bootstrap resample (sample $N$ points <em>with replacement</em>) of the data, and average their predictions (vote for classification). Key fact: if the $B$ predictors each have variance $\sigma^2$ and pairwise correlation $\rho$, the average has variance</p>
+
+      <div class="math-box">$$\operatorname{Var}\!\left(\tfrac{1}{B}\sum_{b} f_b\right) = \rho\,\sigma^2 + \frac{1-\rho}{B}\,\sigma^2.$$</div>
+
+      <p>As $B\to\infty$ the second term vanishes; what's left is $\rho\sigma^2$. So <strong>the lower the correlation between trees, the more variance you kill.</strong> A <strong>Random Forest</strong> is bagging plus one trick: at each split consider only a <em>random subset</em> of features (typically $\sqrt{d}$). That decorrelates the trees (no single strong feature dominates every tree), shrinking $\rho$ and squeezing more out of the average. Bias stays about the same as a single deep tree; variance drops hard.</p>
+
+      <p><strong>Boosting.</strong> Instead of independent trees, build them <strong>sequentially</strong>, each correcting the running model's residual errors. <strong>Gradient boosting</strong> frames this as gradient descent in function space: the ensemble is</p>
+
+      <div class="math-box">$$F_M(\mathbf{x}) = \sum_{m=1}^{M} \nu\, h_m(\mathbf{x}),$$</div>
+
+      <p>and each new weak tree $h_m$ is fit to the <strong>negative gradient</strong> of the loss w.r.t. the current prediction (for squared loss, that's literally the residual $y_i - F_{m-1}(\mathbf{x}_i)$):</p>
+
+      <div class="math-box">$$h_m \approx -\left.\frac{\partial L}{\partial F}\right|_{F = F_{m-1}}, \qquad F_m = F_{m-1} + \nu\, h_m.$$</div>
+
+      <p>The <strong>learning rate</strong> $\nu \in (0,1]$ shrinks each tree's contribution — smaller $\nu$ needs more trees but generalizes better. <strong>XGBoost / LightGBM</strong> are the industrial-strength versions: same idea, plus a regularized objective, second-order (Newton) updates, and clever histogram-based split finding. Boosting attacks <strong>bias</strong> (turns shallow "stumps" into a strong learner) but can overfit if you use too many trees with no regularization — the opposite failure mode from a forest.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th></th><th>trees built</th><th>reduces mainly</th><th>overfits when</th><th>parallel?</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Random Forest</strong></td><td>independently</td><td><strong>variance</strong></td><td>almost never with more trees</td><td>yes</td></tr>
+          <tr><td><strong>Gradient Boosting</strong></td><td>sequentially</td><td><strong>bias</strong></td><td>too many trees / large $\nu$</td><td>no</td></tr>
+        </tbody>
+      </table></div>
+
+      <p><strong>Feature importance.</strong> Trees give it nearly free: for each feature, sum the (sample-weighted) impurity decrease over every split that used it, across all trees, then normalize to sum to 1. Caveat: this <em>impurity-based</em> importance is biased toward high-cardinality / continuous features. <strong>Permutation importance</strong> (shuffle one feature, measure the drop in validation score) is more trustworthy.</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>Code</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>We'll compare all four models on <strong>Iris</strong> (the classic), then visualize boundaries and importances. Everything below runs in one script.</p>
+
+      <div class="codeblock">
+        <div class="code-head">compare_models.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import load_iris
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.metrics import accuracy_score
+
+# --- data -------------------------------------------------------------
+iris = load_iris()
+X, y = iris.data, iris.target          # 150 samples, 4 features, 3 classes
+feat = iris.feature_names
+
+# stratify=y keeps class proportions equal in train and test (lesson 05)
+X_tr, X_te, y_tr, y_te = train_test_split(
+    X, y, test_size=0.25, random_state=42, stratify=y)
+
+# --- four models, one interface --------------------------------------
+# NOTE: k-NN is wrapped in a pipeline so the SAME scaler fit on train is
+#       reused on test. Trees are scale-invariant, so they need no scaler.
+models = {
+    "k-NN (k=5)":        make_pipeline(StandardScaler(),
+                                       KNeighborsClassifier(n_neighbors=5)),
+    "Decision Tree":     DecisionTreeClassifier(max_depth=3, random_state=0),
+    "Random Forest":     RandomForestClassifier(n_estimators=200, random_state=0),
+    "Gradient Boosting": GradientBoostingClassifier(n_estimators=200,
+                                                    learning_rate=0.1,
+                                                    random_state=0),
+}
+
+for name, m in models.items():
+    m.fit(X_tr, y_tr)                              # fit on training split
+    acc = accuracy_score(y_te, m.predict(X_te))    # held-out accuracy
+    cv  = cross_val_score(m, X, y, cv=5).mean()    # 5-fold CV on all data
+    print(f"{name:20s}  test acc {acc:.3f}   cv acc {cv:.3f}")
+
+# -&gt; k-NN (k=5)            test acc 0.921   cv acc 0.960
+# -&gt; Decision Tree         test acc 0.895   cv acc 0.960
+# -&gt; Random Forest         test acc 0.895   cv acc 0.960
+# -&gt; Gradient Boosting     test acc 0.974   cv acc 0.960
+</code></pre>
+      </div>
+
+      <p>All four land around 95–96% CV accuracy — Iris is easy, so don't read too much into the single-split differences (they're a couple of flowers). The point is the <strong>uniform scikit-learn API</strong>: <code>fit</code> / <code>predict</code> / <code>cross_val_score</code> work identically across wildly different model families.</p>
+
+      <h3 id="curse-code">Feel the curse of dimensionality</h3>
+
+      <div class="codeblock">
+        <div class="code-head">curse_of_dimensionality.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from scipy.spatial.distance import pdist
+rng = np.random.default_rng(0)
+print("dim   contrast = (max-min)/min pairwise distance")
+for d in [2, 10, 100, 1000]:
+    P = rng.random((200, d))               # 200 uniform points in [0,1]^d
+    dist = pdist(P)                        # all pairwise distances
+    contrast = (dist.max() - dist.min()) / dist.min()
+    print(f"{d:5d}   {contrast:.3f}")
+
+# -&gt; 2      533.858     &lt;- nearest is ~500x closer than farthest: meaningful
+# -&gt; 10     4.928
+# -&gt; 100    0.618
+# -&gt; 1000   0.169       &lt;- everything is ~equidistant: "nearest" is noise
+</code></pre>
+      </div>
+
+      <p>As $d$ grows, the gap between nearest and farthest neighbor collapses toward zero — this is <em>why</em> k-NN needs dimensionality reduction (lesson 08, PCA) or feature selection before it works on high-dimensional data like raw pixels.</p>
+
+      <h3 id="boundaries-code">Decision boundaries (2-D so we can see them)</h3>
+
+      <div class="codeblock">
+        <div class="code-head">decision_boundaries.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from sklearn.inspection import DecisionBoundaryDisplay
+
+X2 = iris.data[:, 2:4]   # petal length &amp; width only — most informative pair
+clfs = {
+    "k-NN (k=15)":    KNeighborsClassifier(n_neighbors=15),
+    "Tree (depth=4)": DecisionTreeClassifier(max_depth=4, random_state=0),
+    "Random Forest":  RandomForestClassifier(n_estimators=200, random_state=0),
+}
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+for ax, (name, clf) in zip(axes, clfs.items()):
+    clf.fit(X2, y)
+    DecisionBoundaryDisplay.from_estimator(
+        clf, X2, ax=ax, alpha=0.3, response_method="predict")
+    ax.scatter(X2[:, 0], X2[:, 1], c=y, edgecolor="k", s=20)
+    ax.set_title(name)
+    ax.set_xlabel("petal length (cm)"); ax.set_ylabel("petal width (cm)")
+plt.tight_layout()
+plt.savefig("boundaries.png", dpi=110)
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What you should SEE</div>
+        <p>k-NN draws a <em>smooth, curved</em> boundary that follows the data cloud. The single tree's boundary is made of strictly <strong>horizontal and vertical steps</strong> (axis-aligned splits) — blocky and a bit over-confident in the corners. The Random Forest is also stair-stepped (it's still trees) but <em>smoother and softer</em> at the edges because it averages 200 of them — that smoothing is variance reduction made visible.</p>
+      </div>
+
+      <h3 id="importance-code">Feature importance bar chart</h3>
+
+      <div class="codeblock">
+        <div class="code-head">feature_importance.py <span class="lang">Python</span></div>
+<pre><code class="language-python">rf = RandomForestClassifier(n_estimators=300, random_state=0).fit(X, y)
+order = np.argsort(rf.feature_importances_)[::-1]   # high → low
+
+plt.figure(figsize=(6, 3.5))
+plt.barh([feat[i] for i in order][::-1],
+         rf.feature_importances_[order][::-1])
+plt.xlabel("Mean impurity decrease (importance)")
+plt.title("Random Forest feature importance — Iris")
+plt.tight_layout()
+plt.savefig("importance.png", dpi=110)
+
+for i in order:
+    print(f"  {feat[i]:22s} {rf.feature_importances_[i]:.3f}")
+# -&gt;   petal length (cm)      0.440
+# -&gt;   petal width (cm)       0.420
+# -&gt;   sepal length (cm)      0.113
+# -&gt;   sepal width (cm)       0.027
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">📊</span> What you should SEE</div>
+        <p>Two long bars (the two petal features) and two stubs. The forest <em>discovered</em> that petals separate the species and sepals barely matter — without you telling it. That's the kind of insight you'd want from a sensor-fusion model: <em>which channels actually drive the decision?</em></p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Trustworthy importance</div>
+        <p>For a trustworthy version, swap in <code>from sklearn.inspection import permutation_importance</code> and run it on a held-out set — it isn't fooled by high-cardinality features.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>Real Case — Seabed / Terrain Classification from Multi-Sensor Features</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>why this matters</small></div>
+      <p>You're running a survey USV with a <strong>multibeam sonar</strong> and want to auto-label the seabed as <strong>mud / sand / gravel / rock</strong> (a real hydrographic task that feeds safe-navigation charts). You don't feed raw waveforms to a tree — you engineer a tabular feature vector per ping or per grid cell:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>feature</th><th>sensor</th><th>why it helps</th></tr></thead>
+        <tbody>
+          <tr><td>mean backscatter intensity</td><td>sonar</td><td>rock reflects strongly, mud absorbs</td></tr>
+          <tr><td>backscatter std / texture (GLCM)</td><td>sonar</td><td>gravel is "rough", mud is smooth</td></tr>
+          <tr><td>local depth gradient / slope</td><td>bathymetry</td><td>rock outcrops are steep</td></tr>
+          <tr><td>depth</td><td>bathymetry</td><td>facies correlate with depth zones</td></tr>
+          <tr><td>return-pulse width</td><td>sonar</td><td>hard vs. soft bottom</td></tr>
+        </tbody>
+      </table></div>
+
+      <p>This is a textbook fit for tree ensembles, and here's the engineering reasoning:</p>
+
+      <ul>
+        <li><strong>No scaling needed.</strong> Backscatter (dB), slope (degrees), and depth (m) live on totally different scales. Trees split on thresholds per-feature, so they're <strong>invariant to monotonic rescaling</strong> — you skip the <code>StandardScaler</code> headache that k-NN demands. (If you <em>did</em> use k-NN here, unscaled depth in metres would dominate the distance and wreck it.)</li>
+        <li><strong>Mixed feature types &amp; missing data.</strong> Real surveys have dropouts; tree ensembles tolerate them far better than distance-based methods.</li>
+        <li><strong>Random Forest first.</strong> It's the no-tune baseline: robust, hard to overfit, and the <strong>feature-importance chart tells the surveyor which sensor channel is carrying the classification</strong> — maybe texture matters more than absolute intensity, which informs sensor calibration.</li>
+        <li><strong>Then Gradient Boosting (XGBoost/LightGBM)</strong> when you need to squeeze out the last few accuracy points for the final chart product — at the cost of tuning <code>n_estimators</code>, <code>learning_rate</code>, and <code>max_depth</code>.</li>
+      </ul>
+
+      <p>Mapped onto the math: each tree asks questions like <em>"backscatter &gt; -18 dB? and slope &gt; 12°? → rock"</em>, exactly the axis-aligned splits from §2.2, chosen by Gini gain. The forest averages hundreds of such flowcharts so a single noisy ping doesn't flip the label. The same recipe transfers directly to <strong>UAV terrain classification</strong> (NDVI + elevation + texture → vegetation/soil/water) and <strong>ROV pipeline inspection</strong> (feature vectors → corrosion/clean/anomaly). If you prefer a public stand-in to practice on, the <strong>UCI "Sonar, Mines vs. Rocks"</strong> dataset (60 sonar-band energies → metal cylinder vs. rock) is the spiritual ancestor of this exact problem.</p>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>Pitfalls &amp; Tips</h2>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Common ways to shoot yourself in the foot</div>
+        <ul>
+          <li><strong>k-NN without scaling is broken.</strong> Distance is dominated by large-range features. Always <code>StandardScaler</code> (or <code>MinMaxScaler</code>) <em>inside a pipeline</em> so the scaler is fit on train only — never on the full data, or you leak test info (lesson 05).</li>
+          <li><strong>Don't trust k-NN in high dimensions.</strong> Past ~10–20 features the curse kicks in. Reduce dimensions (PCA, lesson 08) or select features first. Tree ensembles handle wide feature sets far better.</li>
+          <li><strong>A single un-pruned tree almost always overfits.</strong> Set <code>max_depth</code> / <code>min_samples_leaf</code>, validate with CV — or just use a Random Forest and stop worrying.</li>
+          <li><strong>More trees never hurt a forest, but plateau.</strong> Going from 100→1000 trees mostly costs compute. With <em>boosting</em> the opposite is true: too many trees overfit, so tune <code>n_estimators</code> against a validation curve and use early stopping.</li>
+          <li><strong>Impurity-based feature importance is biased</strong> toward continuous / high-cardinality features and can be misled by correlated features (importance gets split between them). Prefer <code>permutation_importance</code> on held-out data when the answer matters.</li>
+          <li><strong>Trees can't extrapolate.</strong> A regression tree predicts a constant outside the training range — fine for classification, dangerous if you're regressing a trajectory beyond observed conditions. Know this before trusting a tree to predict, say, drag at an unseen speed.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>Check Your Understanding</h2>
+
+      <p><strong>Q1.</strong> You train k-NN on lidar features where range is in metres (0–120) and intensity is 0–1. Accuracy is terrible. What's the single most likely cause and fix?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Unscaled features. The Euclidean distance is dominated by <code>range</code> (spans ~120) while <code>intensity</code> (spans ~1) is invisible, so "nearest neighbor" is effectively decided by range alone. Fix: standardize features (<code>StandardScaler</code>) inside a pipeline. Trees wouldn't have this problem because they split per-feature.</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> A node has 80 samples of class A and 20 of class B. Compute its Gini impurity. Is this a good or bad split target?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>$p_A = 0.8,\ p_B = 0.2$, so $G = 1 - (0.8^2 + 0.2^2) = 1 - (0.64 + 0.04) = 0.32$. It's fairly impure (max for 2 classes is 0.5). The tree will keep trying to split this node to drive $G$ toward 0 — a pure node has $G=0$.</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> Both Random Forests and Gradient Boosting are made of trees. In one sentence each, what does adding <em>more trees</em> do to each, and which mainly fights variance vs. bias?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p><strong>Random Forest:</strong> trees are independent and averaged, so more trees keeps reducing variance and then plateaus — it (almost) never overfits from more trees; it mainly fights <strong>variance</strong>. <strong>Gradient Boosting:</strong> trees are sequential and additive, so more trees keeps reducing training error and <em>can</em> overfit; it mainly fights <strong>bias</strong>. (RF parallel, GB sequential.)</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> Why does a Random Forest restrict each split to a random subset of features, instead of always considering all of them like a single tree does?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>To <strong>decorrelate</strong> the trees. If one feature is very predictive, every tree would split on it first and the trees would look alike — averaging correlated predictors barely reduces variance (recall $\rho\sigma^2$ stays). Forcing a random feature subset per split lowers $\rho$, so the average kills much more variance.</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> Your boundary plot shows the single decision tree's regions are all rectangles with horizontal/vertical edges, but k-NN's boundary is a smooth curve. Why the difference?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>A decision tree splits on one feature at a time with a threshold ("$x_j &lt; t$"), which is an <strong>axis-aligned</strong> cut — composing them yields only rectangular regions. k-NN's boundary follows local point density (the set of points equidistant between class clusters), which is generally curved. To get oblique boundaries from trees you'd need an ensemble (smoother) or a different model entirely (e.g. SVM with a kernel — next lesson).</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml06-bagging-decorrelate">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">From the bagging variance formula $\operatorname{Var}=\rho\sigma^2 + \frac{1-\rho}{B}\sigma^2$, why does a Random Forest add the "random feature subset per split" trick on top of plain bagging?</div>
+        <ul class="ex-options">
+          <li data-correct="false">It makes each individual tree more accurate, lowering $\sigma^2$.</li>
+          <li data-correct="true">It lowers the inter-tree correlation $\rho$, so the floor term $\rho\sigma^2$ that survives as $B\to\infty$ is smaller.</li>
+          <li data-correct="false">It lets you use fewer trees $B$ to reach the same accuracy by shrinking $\sigma^2$.</li>
+          <li data-correct="false">It removes the bias of each tree, which bagging cannot do.</li>
+        </ul>
+        <div class="ex-explain">Averaging only drives the $\frac{1-\rho}{B}\sigma^2$ term to zero; the irreducible $\rho\sigma^2$ floor remains. Plain bagging leaves $\rho$ high because every tree splits on the same dominant feature first. Restricting each split to a random feature subset <em>decorrelates</em> the trees (smaller $\rho$), lowering that floor — that's the extra variance reduction a forest buys over bagging. It does not change individual-tree bias or accuracy meaningfully.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml06-info-gain" data-answer="0.125" data-tol="0.005">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">A parent node has 100 samples that are 50% class A / 50% class B, so its Gini is $G_{\text{parent}} = 1-(0.5^2+0.5^2) = 0.5$. A candidate split sends 50 samples left that are 75% A / 25% B, and 50 right that are 25% A / 75% B. Using the formula $\text{IG} = I(\text{parent}) - \big(\tfrac{N_L}{N}I(\text{left}) + \tfrac{N_R}{N}I(\text{right})\big)$ with Gini for $I$, what is the <strong>information gain</strong> of this split? Give your answer to 3 decimals.</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">IG</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">Each child has Gini $G = 1-(0.75^2+0.25^2) = 1-(0.5625+0.0625) = 0.375$. The weighted child impurity is $\frac{50}{100}(0.375)+\frac{50}{100}(0.375) = 0.375$. So $\text{IG} = G_{\text{parent}} - 0.375 = 0.5 - 0.375 = \mathbf{0.125}$. The split removes some impurity but not all — a perfectly pure split (each child one class) would have given $\text{IG} = 0.5$, the maximum here.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml06-gradient-residual">
+        <div class="ex-head"><span class="badge">Q3</span> Derivation — boosting fits the residual</div>
+        <div class="ex-q">Gradient boosting says each new tree $h_m$ is fit to the <em>negative gradient</em> $-\frac{\partial L}{\partial F}$ of the loss at the current model $F_{m-1}$. Show that for squared-error loss $L = \tfrac{1}{2}\big(y - F(\mathbf{x})\big)^2$ this negative gradient is exactly the residual $y - F_{m-1}(\mathbf{x})$, and say in one line why that makes "boosting = fitting the leftover error."</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Differentiate $L=\tfrac12(y-F)^2$ with respect to $F$ (treat $y$ as a constant), then take the negative and evaluate at $F = F_{m-1}$.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p>$\dfrac{\partial L}{\partial F} = \dfrac{\partial}{\partial F}\,\tfrac{1}{2}(y-F)^2 = (y-F)\cdot(-1) = -(y-F)$. The negative gradient is therefore $-\dfrac{\partial L}{\partial F} = (y - F)$, and evaluated at the current ensemble that's $y - F_{m-1}(\mathbf{x})$ — precisely the <strong>residual</strong>, the part of $y$ the model hasn't explained yet. So fitting $h_m$ to the negative gradient literally means <strong>fitting the next tree to the leftover error</strong>; adding $\nu\,h_m$ then nudges $F$ toward $y$, which is gradient descent in function space. For other losses (logistic, Huber) the negative gradient is a different "pseudo-residual," but the recipe is identical.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Lesson recap</div>
+        <p><strong>k-NN</strong> is lazy: memorize, then vote among the $k$ nearest neighbors. Scale your features, choose $k$ by CV, and beware the <strong>curse of dimensionality</strong>. <strong>Decision trees</strong> greedily pick axis-aligned splits that maximize <strong>information gain</strong> (drop in <strong>Gini</strong> / <strong>entropy</strong>); alone they overfit, so control depth or ensemble them. <strong>Random Forests</strong> = bagging + random features → average many decorrelated trees → <strong>variance</strong> down (the no-tune robust baseline). <strong>Gradient Boosting / XGBoost</strong> = sequential trees fixing residual errors → <strong>bias</strong> down (more powerful, more tuning, can overfit). <strong>Feature importance</strong> falls out of trees for free — but prefer permutation importance when it matters. Next: <a href="07-svm-kernels.html">07 — Support Vector Machines &amp; Kernels</a>, the model that draws the single best margin between classes.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

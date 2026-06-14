@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Derivative Kick &amp; Sensor Noise — PID Control for a USV</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-pid" data-course="pid" data-track="main" data-chapter="06-derivative-noise">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> PID&nbsp;·&nbsp;USV</a>
+  <span class="spacer"></span>
+  <span class="track-pill">PID · Ch 06</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">PID Course · Chapter 06 · The derivative term, weaponised against you</div>
+        <h1>Derivative Kick &amp; Sensor Noise</h1>
+        <p>The D term is the most useful and the most fragile part of the loop. Two everyday events turn it into a liability: <strong>moving the setpoint</strong> (a ~600° rudder spike that achieves nothing) and <strong>compass noise</strong> (a servo grinding itself to death). Both have one-line fixes — but only if you understand what the derivative is actually differentiating.</p>
+        <div class="meta"><span>⏱ ~30 min</span><span>🧭 Derivative-on-measurement</span><span>🔇 Low-pass filter</span><span>⚡ Live sim</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="what-d-differentiates"><span class="sec-no">1</span>What the derivative is actually differentiating</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>name the input before you blame the output</small></div>
+      <p>The textbook D term is $k_d\,\dfrac{de}{dt}$ — the rate of change of the <em>error</em>. That phrasing hides a trap. Error is $e = \psi_\text{set} - \psi$, so the error can change for two completely different reasons: the boat moved ($\psi$ changed), or <em>you</em> moved the goalposts ($\psi_\text{set}$ changed). The derivative can't tell these apart; it just sees $e$ jump and reacts.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The whole chapter in one line</div>
+        <p>D was hired to oppose the boat's <em>swing</em>. Differentiating the error makes it also react to <em>your commands</em> and to <em>sensor lies</em>. The fixes both come down to: differentiate the right signal, and don't trust it too literally.</p>
+      </div>
+
+      <p>When the setpoint sits still, $\dot e = -\dot\psi$ and the two formulations are identical — D opposes the boat's turning rate, exactly as designed (re-read Chapter 03's worked example: P and D cancelling on the approach <em>is</em> damping). The trouble starts the instant the setpoint moves or the measurement gets noisy. We meet both failures, then fix both.</p>
+
+      <div class="mermaid">
+flowchart LR
+    SP["setpoint psi_set<br/>you move it"] --> E["error e = psi_set - psi"]
+    PSI["heading psi<br/>noisy compass"] --> E
+    E -->|"d(e)/dt"| DA["D-on-error<br/>kicks on BOTH inputs"]
+    PSI -->|"-d(psi)/dt"| DB["D-on-measurement<br/>ignores setpoint jumps"]
+</div>
+
+      <div class="layer"><span class="step">②</span> Math <small>two signals, one sign flip apart</small></div>
+      <p>Write the discrete derivative both ways and the relationship is exact:</p>
+      <div class="math-box">$$ \underbrace{\frac{e_n - e_{n-1}}{dt}}_{\text{D-on-error}} \;=\; \frac{(\psi_{\text{set},n}-\psi_n)-(\psi_{\text{set},n-1}-\psi_{n-1})}{dt} \;=\; \underbrace{-\frac{\psi_n - \psi_{n-1}}{dt}}_{\text{D-on-measurement}} \;+\; \frac{\Delta\psi_\text{set}}{dt} $$</div>
+      <p>They differ by exactly one term: $\Delta\psi_\text{set}/dt$, the rate of change of your <em>command</em>. Hold the setpoint constant and that term is zero — the two are identical. Step the setpoint and that term explodes, because $dt = 0.05$ s is tiny and a step is, by definition, an instantaneous change. <strong>That extra term is the derivative kick.</strong></p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="derivative-kick"><span class="sec-no">2</span>Case 6 — the derivative kick</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>a new waypoint arrives</small></div>
+      <p>The boat is cruising happily at 90°. A new waypoint comes in and your mission code does the obvious thing: <code>setpoint = 100</code>. The heading hasn't moved a millimetre — but the <em>error</em> just jumped 10° in a single 0.05 s sample. The derivative-of-error sees that as a screaming turn rate:</p>
+
+      <div class="math-box">$$ \dot e = \frac{10°}{0.05\text{ s}} = 200\ \tfrac{\circ}{\text{s}} = 3.49\ \tfrac{\text{rad}}{\text{s}}, \qquad D = k_d\,\dot e = 3 \times 3.49 \approx 10.5\text{ rad} \approx \mathbf{600°\ of\ rudder} $$</div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 600° of commanded rudder on a ±35° actuator</div>
+        <p>For one sample the command pegs hard against the +35° stop, then collapses back to normal the next sample (the kick lasts exactly one step — after that $\Delta\psi_\text{set}=0$ again). The boat barely notices a one-sample twitch, but the servo gets slammed rail-to-rail for nothing. <strong>The boat didn't start swinging — your setpoint moved.</strong> D reacted to a command as if it were a disturbance.</p>
+      </div>
+
+      <p>This is not a contrived edge case. Every waypoint hand-off, every operator nudge of the heading dial, every mission-planner segment transition steps the setpoint. With D-on-error you get a rudder spike on <em>every single one</em>.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>the one-line fix</small></div>
+      <p>Differentiate the <strong>measurement</strong> instead of the error. From the §1 identity, when the setpoint is constant the two signals are numerically equal — so you lose nothing in normal operation — but the measurement simply does not contain the setpoint step, so the kick can never appear.</p>
+
+      <div class="codeblock">
+        <div class="code-head">pid_controller.py — inside update() <span class="lang">Python</span></div>
+<pre><code class="language-python"># BEFORE — derivative of error: kicks when the setpoint moves
+derivative = (error - self.prev_error) / dt
+
+# AFTER — derivative of measurement: blind to setpoint steps
+# d(e)/dt = -d(psi)/dt when setpoint is constant, so flip the sign
+derivative = -(measurement - self.prev_measurement) / dt
+self.prev_measurement = measurement      # remember psi, not e
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> The sign flip is not optional</div>
+        <p>$e = \psi_\text{set} - \psi$, so $\dfrac{de}{dt} = -\dfrac{d\psi}{dt}$ when $\psi_\text{set}$ is constant. Forget the minus sign and D becomes <em>positive</em> feedback on the swing — it pushes the boat <em>toward</em> the way it's already turning. That's not a soft bug; it's an oscillator. Keep the negative.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="live-sim"><span class="sec-no">3</span>See both failures live</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>break it, then fix it, with your thumb</small></div>
+      <p>This is the same boat from Chapter 01 (Nomoto, $K=0.6$, $T=2.5$ s), running the tuned gains $k_p=2,\ k_i=0.2,\ k_d=3$. At $t=30$ s the setpoint bumps to a new heading, and you can dial compass noise up and down. Two toggles let you turn each fix on and off independently — so you can watch the bug, then watch it disappear.</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>🧭</span> Setpoint bump at t=30 s + adjustable noise; toggle D-on-measurement and D low-pass</div>
+        <canvas id="sim-dn"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What to drag, and what to look for</div>
+        <p><strong>1. The kick.</strong> Set noise to 0. With <em>D-on-measurement OFF</em>, watch the rudder panel at $t=30$ s — the command spikes to the +35° rail for one sample on the setpoint bump. Toggle <em>D-on-measurement ON</em>: the spike vanishes, while the heading response to the bump is unchanged. That's Case 6.</p>
+        <p><strong>2. The chatter.</strong> Now crank the <em>noise</em> slider up (toward σ = 0.5°). With the <em>D low-pass OFF</em>, the rudder command turns into white-noise hash slamming the stops, and the servo trace grinds at its slew limit. Toggle the <em>low-pass ON</em> (α ≈ 0.85): the hash collapses to a fraction of its size. Look closely and the heading damps a hair more sluggishly — that's the lag the filter costs you. That's Case 7.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="noise"><span class="sec-no">4</span>Case 7 — noise, the derivative's other dark side</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>a real compass, not a perfect one</small></div>
+      <p>You fixed the kick. Now you swap the perfect simulator heading for a real magnetometer, which reads with about $\sigma = 0.5°$ of noise per sample. The boat is dead steady on course — but D is differentiating, and the derivative of noise is brutal. Two adjacent independent readings differ by about $\sigma\sqrt2$ on average, divided by the tiny timestep:</p>
+
+      <div class="math-box">$$ \text{derivative noise} \approx \frac{\sigma\sqrt2}{dt} = \frac{0.5°\times 1.414}{0.05\text{ s}} \approx 14\ \tfrac{\circ}{\text{s}} \quad\Longrightarrow\quad k_d \times 14\tfrac{\circ}{\text{s}} = 3 \times 14 \approx \mathbf{42°\ of\ rudder\ garbage} $$</div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> The boat is fine. Your hardware is dying.</div>
+        <p>Here's the cruel part: the command panel is white noise slamming the ±35° stops, the servo grinds nonstop at its 25 °/s slew limit — and the <em>heading holds course just fine</em>. The plant low-passes the garbage (it's a sluggish hull; ±42° of 10 Hz hash averages out). So the loop "works." Meanwhile your servo wears out in a week and your battery drains in an hour. This is a bug you find with an ammeter, not a heading plot.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>why differentiation amplifies high frequencies</small></div>
+      <p>It's not bad luck — it's what differentiation <em>does</em>. A sinusoid $\sin(\omega t)$ differentiated becomes $\omega\cos(\omega t)$: the amplitude is multiplied by the frequency $\omega$. Slow signals (the boat's actual swing, fractions of a Hz) barely change; fast signals (sensor noise, near the Nyquist frequency of 10 Hz) get multiplied by a huge $\omega$. The derivative is a high-pass filter, and noise lives precisely up where the gain is highest. That's structural — you can't tune it away with $k_d$ without also gutting your damping.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>low-pass the derivative</small></div>
+      <p>The fix is to put a first-order low-pass (an exponential moving average) on the derivative <em>after</em> you compute it. Each step blends mostly the old filtered value with a little of the new raw one:</p>
+
+      <div class="codeblock">
+        <div class="code-head">pid_controller.py — filtered derivative-on-measurement <span class="lang">Python</span></div>
+<pre><code class="language-python">ALPHA = 0.85     # 0 = no filter (raw), 1 = frozen (infinite lag)
+
+# raw derivative of the MEASUREMENT (Case 6 fix already applied)
+d_raw = -(measurement - self.prev_measurement) / dt
+self.prev_measurement = measurement
+
+# Case 7 fix: exponential low-pass on the derivative
+self.d_filt = ALPHA * self.d_filt + (1.0 - ALPHA) * d_raw
+derivative  = self.d_filt           # feed THIS into k_d, not d_raw
+</code></pre>
+      </div>
+
+      <p>With $\alpha = 0.85$ each new noisy sample contributes only $1-\alpha = 0.15$ of its value, and uncorrelated noise averages toward zero across the blend. The math, for white noise of standard deviation $\sigma_d$ fed into an EMA:</p>
+      <div class="math-box">$$ \sigma_\text{out} = \sigma_d\sqrt{\frac{1-\alpha}{1+\alpha}} = \sigma_d\sqrt{\frac{0.15}{1.85}} \approx 0.285\,\sigma_d $$</div>
+      <p>So the derivative chatter drops to roughly 28% of its raw size — the ±42° hash becomes about ±12°, and the servo stops thrashing.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>nothing is free — the lag trade-off</small></div>
+      <p>The filter doesn't only attenuate noise; it <em>delays</em> the derivative. An EMA with coefficient $\alpha$ and step $dt$ has an effective time constant</p>
+      <div class="math-box">$$ \tau_\text{filt} = \frac{\alpha}{1-\alpha}\,dt = \frac{0.85}{0.15}\times 0.05\text{ s} \approx 0.28\text{ s} $$</div>
+      <p>That 0.28 s of lag is added to the D signal, so D reacts to the boat's swing a fraction of a second late. Late damping is weaker damping — push $\alpha$ too high and you re-introduce the overshoot D was supposed to kill. There's no escaping it: <strong>more noise rejection costs more phase lag, and phase lag is exactly what destabilises a loop (Chapter 09).</strong> $\alpha \approx 0.85$ is the sweet spot for this boat — enough to tame $\sigma=0.5°$, little enough that the damping barely notices.</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🛰️</span> The real-world escape hatch: fix it upstream</div>
+        <p>The honest answer to heading noise isn't a fatter D filter — it's a <em>better measurement</em>. A gyro is quiet and fast but drifts; a compass is noisy but absolute. Fuse them (complementary filter, or an EKF) and you get a heading estimate that's both smooth and drift-free, so D has clean data to differentiate. That's what the IMU fusion on your flight controller already does, and why Chapter 01 told you to take heading from <code>/odometry/filtered</code> rather than the raw magnetometer. Filter the derivative as a backstop; fuse the sensor as the real fix.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="both-fixes-together"><span class="sec-no">5</span>Both fixes, in one honest update()</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>the derivative block, finished</small></div>
+      <p>Here is the derivative half of <code>update()</code> with both fixes applied — measurement-derivative for the kick, EMA for the noise. Note the two new pieces of persistent state: <code>prev_measurement</code> (we remember $\psi$, not $e$, now) and <code>d_filt</code> (the filter's memory). Both must survive across calls, and both must be cleared in <code>reset()</code>.</p>
+
+      <div class="codeblock">
+        <div class="code-head">pid_controller.py <span class="lang">Python</span></div>
+<pre><code class="language-python">class PID:
+    def __init__(self, kp, ki, kd, alpha=0.85, output_limits=(-1.0, 1.0)):
+        self.kp, self.ki, self.kd = kp, ki, kd
+        self.alpha = alpha                      # derivative low-pass coefficient
+        self.out_min, self.out_max = output_limits
+        self.integral = 0.0
+        self.prev_measurement = None            # we differentiate psi now, not e
+        self.d_filt = 0.0                       # EMA memory for the derivative
+
+    def reset(self):
+        self.integral = 0.0
+        self.prev_measurement = None
+        self.d_filt = 0.0
+
+    def update(self, error, measurement, dt):
+        """error = wrap(setpoint - measurement); measurement = heading psi (rad)."""
+        p = self.kp * error
+        self.integral += error * dt
+        i = self.ki * self.integral
+
+        # --- derivative: Case 6 (on measurement) + Case 7 (low-pass) ---
+        if self.prev_measurement is None:
+            d_raw = 0.0                          # no history yet -> no kick
+        else:
+            d_raw = -(measurement - self.prev_measurement) / dt   # note the minus
+        self.prev_measurement = measurement
+        self.d_filt = self.alpha * self.d_filt + (1.0 - self.alpha) * d_raw
+        d = self.kd * self.d_filt
+
+        u = p + i + d
+        return max(self.out_min, min(self.out_max, u))            # clamp
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Two subtleties worth a second look</div>
+        <p>First, the <code>prev_measurement is None</code> guard: on the very first sample after a <code>reset()</code> there's no previous heading, so we emit $d=0$ rather than differentiating against garbage — exactly the same guard the Chapter 01 skeleton used for <code>prev_error</code>. Second, the filter sits on the <em>raw derivative</em>, before $k_d$ — so changing $k_d$ rescales the damping without touching the filter's noise behaviour.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="recipe"><span class="sec-no">6</span>The decision recipe</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>when to reach for which knob</small></div>
+      <p>These two fixes are not optional polish — they are the difference between a D term that helps and one that hurts. The decision tree is short:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Symptom</th><th>Cause</th><th>Fix</th><th>Cost</th></tr></thead>
+        <tbody>
+          <tr><td>One-sample rudder spike whenever the setpoint changes</td><td>Derivative kick — D differentiating the setpoint step</td><td>Differentiate the measurement (sign-flipped), not the error</td><td>None — identical when setpoint is steady</td></tr>
+          <tr><td>Rudder chatters / servo grinds while holding a steady heading</td><td>D amplifying sensor noise (high-pass behaviour)</td><td>Low-pass the derivative, $\alpha\approx 0.85$</td><td>~0.28 s lag on D → slightly weaker damping</td></tr>
+          <tr><td>Still too noisy even after filtering</td><td>The measurement itself is bad</td><td>Fuse gyro + compass upstream (complementary / EKF)</td><td>More code, but the right answer</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Both fixes share one idea</div>
+        <p>Each fix is about <em>what you let the derivative see</em>. The kick fix removes the setpoint from D's input; the noise fix removes high-frequency content from D's input. Same philosophy, two frequency bands: don't differentiate things that aren't the boat's real motion.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="pid06-why-no-kick">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">Why does differentiating the <em>measurement</em> instead of the <em>error</em> eliminate the derivative kick without changing the controller's normal behaviour?</div>
+        <ul class="ex-options">
+          <li data-correct="false">Because the measurement is always smaller than the error, so its derivative is smaller too.</li>
+          <li data-correct="true">When the setpoint is constant, $de/dt = -d\psi/dt$, so the two are identical — but the measurement contains no setpoint step, so a setpoint jump can't enter D.</li>
+          <li data-correct="false">Because the low-pass filter removes the spike anyway, so the choice of signal doesn't matter.</li>
+          <li data-correct="false">Because the measurement updates more slowly than the setpoint.</li>
+        </ul>
+        <div class="ex-explain">From the identity $\frac{de}{dt} = -\frac{d\psi}{dt} + \frac{\Delta\psi_\text{set}}{dt}$, the only difference between the two formulations is the $\Delta\psi_\text{set}/dt$ term. Hold the setpoint still and it's zero — the two signals match exactly, so you lose nothing. Step the setpoint and that term is the kick — and it lives entirely in the <em>error</em>, never in the measurement. Differentiating $\psi$ (with the sign flip) keeps the damping and drops the kick.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="pid06-kick-degrees" data-answer="600" data-tol="20">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">With D-on-error and $k_d = 3$, the setpoint steps 10° in one $dt = 0.05$ s sample. What is the magnitude of the D contribution, expressed in <strong>degrees of commanded rudder</strong>? (Hint: $\dot e = 10°/0.05$ s, convert to rad/s, multiply by $k_d$, convert back to degrees.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">° rudder</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$\dot e = 10°/0.05\text{ s} = 200\,°/\text{s} = 3.49\,\text{rad/s}$. Then $D = k_d\,\dot e = 3 \times 3.49 = 10.47\,\text{rad} = 600°$. On a ±35° rudder this saturates instantly for one sample — a kick that beats up the servo and does nothing useful. That's exactly the spike you toggle away in the sim.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="pid06-alpha-tradeoff">
+        <div class="ex-head"><span class="badge">Q3</span> Derivation — the filter's lag</div>
+        <div class="ex-q">You're tempted to push the derivative filter to $\alpha = 0.95$ to crush the noise further. Estimate the effective lag that adds to D, and explain in control terms why that's risky.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">The effective time constant of an EMA is $\tau_\text{filt} = \dfrac{\alpha}{1-\alpha}\,dt$. Compare $\alpha = 0.85$ to $\alpha = 0.95$ at $dt = 0.05$ s, then think about what extra delay in the <em>damping</em> term does to a loop.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p>At $\alpha = 0.85$: $\tau_\text{filt} = \frac{0.85}{0.15}\times 0.05 \approx 0.28$ s. At $\alpha = 0.95$: $\tau_\text{filt} = \frac{0.95}{0.05}\times 0.05 = 0.95$ s — more than <strong>triple</strong> the lag, for only a modest extra noise reduction (output noise drops from $\approx 0.285\sigma_d$ to $\approx 0.16\sigma_d$).</p>
+          <p>Why that's risky: the D term exists to <em>anticipate</em> the boat's swing and oppose it early. Delaying D by ~1 s means it opposes the swing the boat had a second ago, not the one happening now — late damping is weak damping, and the overshoot D was killing creeps back. Worse, added phase lag is the universal route to instability at high gain (Chapter 09). The right move when 0.85 isn't enough is to fix the <em>measurement</em> — fuse gyro + compass — not to keep cranking $\alpha$ and starving your damping of timeliness.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>The error changes for two reasons — the boat moved or you moved the setpoint — and plain $de/dt$ reacts to both. A setpoint step gives $\dot e = 200\,°/\text{s} \Rightarrow \approx 600°$ of rudder for one sample: the <strong>derivative kick</strong>. Fix it by differentiating the <em>measurement</em> (sign-flipped); it's identical when the setpoint is steady and blind to setpoint jumps. Separately, D is a high-pass, so a $\sigma=0.5°$ compass yields $\approx 42°$ of rudder hash that grinds the servo while the boat holds course. Fix it with a low-pass on the derivative, $\alpha\approx0.85$, dropping chatter to ~28% — at the cost of ~0.28 s of lag and slightly weaker damping. The deeper fix for noise is upstream sensor fusion. Next: angle wrapping — the classic vehicle bug that turns the boat 340° the wrong way.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+<script src="../assets/pid-sim.js"></script>
+<script>EM.pidSim("sim-dn", EM.pidPresets.derivative());</script>
+</body>
+</html>

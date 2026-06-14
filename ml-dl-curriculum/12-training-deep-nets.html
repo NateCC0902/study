@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Training Deep Networks That Actually Converge — Machine Learning &amp; Deep Learning</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="12-training-deep-nets">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 12</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL Course · 12</div>
+        <h1>Training Deep Networks That Actually Converge</h1>
+        <p>You can build a net and you know backprop is correct — yet your first training run will probably fail <em>silently</em>: flat loss, a sudden <code>NaN</code>, or a model that aces training and flunks reality. This is the craft of making training converge to something that <em>generalizes</em>, one knob at a time, watching the curves move.</p>
+        <div class="meta"><span>⏱ ~60 min</span><span>🧠 Optimizers · init · norm</span><span>⚡ PyTorch training loop</span><span>∑ Vanishing gradients</span></div>
+      </section>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Part 3 · Lesson 12 · Code stack: PyTorch</div>
+        <p><strong>Prerequisites:</strong> <a href="11-pytorch-fundamentals.html">11 — PyTorch Fundamentals</a> · and the gradient mechanics from <a href="10-backpropagation.html">10 — Backpropagation from Scratch</a>, plus the generalization ideas in <a href="05-overfitting-evaluation.html">05 — Overfitting, Regularization &amp; Evaluation</a>.</p>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> By the end you can</div>
+        <ul>
+          <li>Explain <em>why</em> plain SGD is fragile and pick between <strong>momentum, RMSProp, and Adam</strong> with reasons, not vibes.</li>
+          <li>Diagnose <strong>vanishing/exploding gradients</strong> and fix them with <strong>ReLU + good init (Xavier/He) + normalization</strong>.</li>
+          <li>Say exactly what <strong>batch norm</strong> and <strong>layer norm</strong> normalize, and when each is the right call.</li>
+          <li>Regularize a net so it <strong>generalizes</strong> instead of memorizing: <strong>dropout, weight decay, early stopping, data augmentation</strong>.</li>
+          <li>Run a real PyTorch training loop, read the <strong>loss/val curves</strong>, use an <strong>LR schedule</strong> + <strong>LR-finder</strong>, and reason about <strong>batch size</strong>.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>Intuition</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Lesson 9 built a net, lesson 10 derived backprop, lesson 11 handed you autograd and <code>optimizer.step()</code>. So you <em>can</em> train a net. The dirty secret: <strong>most of the time your first training run silently fails.</strong> The loss sits flat, or explodes to <code>NaN</code>, or trains beautifully and then performs like a coin flip on new data. None of these throw an error. The model just quietly doesn't work.</p>
+
+      <p>This lesson is the <strong>craft</strong> of making training converge to something that <em>generalizes</em>. It's the difference between "the gradients are mathematically correct" (lesson 10) and "the thing actually learns the sonar classifier you need."</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> Descending a foggy mountain in the dark</div>
+        <p>We're minimizing the loss surface from lesson 3, but now it's high-dimensional and viciously non-convex. Four knobs each attack a different way you fall off the mountain:</p>
+        <ul>
+          <li><strong>The optimizer</strong> is <em>how you take steps</em>. Plain SGD steps straight downhill, so it rattles back and forth across narrow valleys and crawls along flat plateaus. <strong>Momentum</strong> gives you a heavy ball that builds speed downhill and rolls through small bumps. <strong>Adam</strong> additionally gives each coordinate its <em>own</em> step size, so steep directions get short careful steps and flat directions get long bold ones.</li>
+          <li><strong>Weight initialization</strong> is <em>where you start</em>. Start in a bad spot — all weights too big or too small — and the very first gradients are either zero (you can't move) or infinite (you fly off the map). Good init drops you somewhere the slope is informative.</li>
+          <li><strong>Normalization</strong> keeps the <em>footing stable</em> as you descend: it stops the ground from tilting wildly under you as earlier layers change.</li>
+          <li><strong>Regularization</strong> stops you from <em>memorizing the exact path down</em> instead of learning the <em>shape</em> of the mountain — so when you're dropped on a new mountain (test data) you still know which way is down.</li>
+        </ul>
+      </div>
+
+      <div class="mermaid">
+graph TD
+    A[Raw net + plain SGD] -->|often| B[Flat loss / NaN / no generalization]
+    A --> C{Apply the craft}
+    C --> D[Good init: He/Xavier]
+    C --> E[ReLU + normalization]
+    C --> F[Adam / momentum + LR schedule]
+    C --> G[Dropout / weight decay / early stop / augmentation]
+    D & E & F --> H[Converges fast & stably]
+    G --> I[Generalizes to new data]
+    H & I --> J[A model that actually works]
+</div>
+
+      <p>The five knobs are not independent rituals — they attack the same failure from different angles. Let's see the math, then turn each knob in PyTorch and <em>watch</em> the curves change.</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>The Math</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive each knob</small></div>
+
+      <h3 id="optimizers">2.1 &nbsp;Optimizers: from plain SGD to Adam</h3>
+      <p>Recall the loss $L(\theta)$ over parameters $\theta$ and the gradient $g_t = \nabla_\theta L(\theta_t)$ at step $t$. Plain <strong>stochastic gradient descent (SGD)</strong> is:</p>
+      <div class="math-box">$$ \theta_{t+1} = \theta_t - \eta\, g_t $$</div>
+      <p>where $\eta$ is the <strong>learning rate</strong> (step size). Problem: $g_t$ is computed on a <em>mini-batch</em>, so it's noisy, and the loss surface has valleys far steeper in some directions than others. A single scalar $\eta$ can't be both small enough to not overshoot the steep direction and large enough to make progress along the flat one.</p>
+
+      <p><strong>Momentum</strong> fixes the zig-zag by accumulating an exponentially-decayed running average (a "velocity") of past gradients:</p>
+      <div class="math-box">$$ v_{t} = \beta\, v_{t-1} + g_t, \qquad \theta_{t+1} = \theta_t - \eta\, v_t $$</div>
+      <ul>
+        <li>$v_t$ — the <strong>velocity</strong>, a memory of recent gradient directions. Consistent directions add up (speed builds); oscillating ones cancel.</li>
+        <li>$\beta \in [0,1)$ — the <strong>momentum coefficient</strong>, typically $0.9$. <em>Where it comes from:</em> it's the decay of a geometric series — the effective averaging window is about $\frac{1}{1-\beta}$ steps, so $\beta=0.9$ averages the last ~10 gradients.</li>
+      </ul>
+
+      <p><strong>RMSProp</strong> attacks the <em>per-direction scaling</em> problem. It keeps a running average of squared gradients and divides each step by its root — so a coordinate with consistently huge gradients gets a <em>smaller</em> step, and a tiny-gradient coordinate gets a <em>bigger</em> one:</p>
+      <div class="math-box">$$ s_t = \rho\, s_{t-1} + (1-\rho)\, g_t^2, \qquad \theta_{t+1} = \theta_t - \frac{\eta}{\sqrt{s_t}+\epsilon}\, g_t $$</div>
+      <p>Here $g_t^2$ is <strong>element-wise</strong>, $s_t$ is the per-parameter second-moment estimate, $\rho \approx 0.9$, and $\epsilon \approx 10^{-8}$ guards against divide-by-zero. The division <strong>adapts the learning rate per parameter</strong> — this is the key idea behind every "adaptive" optimizer.</p>
+
+      <p><strong>Adam</strong> = momentum <strong>and</strong> RMSProp together (the name is <em>ADAptive Moment estimation</em>). It tracks both the first moment (mean, like momentum) and second moment (uncentered variance, like RMSProp):</p>
+      <div class="math-box">$$ m_t = \beta_1 m_{t-1} + (1-\beta_1) g_t, \qquad v_t = \beta_2 v_{t-1} + (1-\beta_2) g_t^2 $$</div>
+      <p>Both averages start at $0$ and are therefore <strong>biased toward zero</strong> early on, so Adam bias-corrects them:</p>
+      <div class="math-box">$$ \hat m_t = \frac{m_t}{1-\beta_1^{\,t}}, \qquad \hat v_t = \frac{v_t}{1-\beta_2^{\,t}}, \qquad \theta_{t+1} = \theta_t - \eta\,\frac{\hat m_t}{\sqrt{\hat v_t}+\epsilon} $$</div>
+      <p>Defaults $\beta_1=0.9$, $\beta_2=0.999$, $\epsilon=10^{-8}$ work shockingly often — which is why Adam is the default "just make it train" optimizer. <em>The intuition to keep:</em> <strong>momentum smooths the direction, the $\sqrt{\hat v}$ denominator auto-tunes the step per coordinate.</strong></p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Rule of thumb</div>
+        <p><strong>Adam</strong> to get training fast and forgivingly; <strong>SGD + momentum</strong> (with a schedule) often reaches a <em>slightly better</em> final test accuracy on big vision nets, at the cost of more tuning. Start with Adam.</p>
+      </div>
+
+      <h3 id="bad-init">2.2 &nbsp;Why bad initialization kills training</h3>
+      <p>Consider the variance of activations flowing forward through a layer $z = \sum_{i=1}^{n_{\text{in}}} w_i x_i$. If the weights $w_i$ are i.i.d. with variance $\mathrm{Var}(w)$ and inputs have variance $\mathrm{Var}(x)$, then (independence, zero mean):</p>
+      <div class="math-box">$$ \mathrm{Var}(z) = n_{\text{in}}\,\mathrm{Var}(w)\,\mathrm{Var}(x) $$</div>
+      <ul>
+        <li>$n_{\text{in}}$ — the <strong>fan-in</strong>, number of inputs to the neuron.</li>
+      </ul>
+      <p>To keep $\mathrm{Var}(z) \approx \mathrm{Var}(x)$ — so the signal neither blows up nor shrinks as it passes through $L$ layers — we need $\mathrm{Var}(w) = \tfrac{1}{n_{\text{in}}}$. That's <strong>Xavier/Glorot init</strong> (for tanh/sigmoid, it averages fan-in and fan-out). ReLU zeros half its inputs, halving the variance, so we double the target: $\mathrm{Var}(w) = \tfrac{2}{n_{\text{in}}}$ — that's <strong>He init</strong>.</p>
+      <div class="math-box">$$ \text{Xavier: } \mathrm{Var}(w) = \frac{2}{n_{\text{in}}+n_{\text{out}}}, \qquad \text{He: } \mathrm{Var}(w) = \frac{2}{n_{\text{in}}} $$</div>
+      <p>If instead you initialize too large, $\mathrm{Var}(z)$ multiplies up each layer → activations saturate (sigmoid/tanh flatten) or explode → <strong>exploding gradients</strong>. Too small → signal decays geometrically toward zero → <strong>vanishing gradients</strong>. Either way the early layers get gradients $\approx 0$ and never learn. Init isn't cosmetic; it's the difference between a slope you can descend and a cliff or a flat.</p>
+
+      <h3 id="vanishing-exploding">2.3 &nbsp;The vanishing/exploding gradient problem</h3>
+      <p>Backprop multiplies gradients layer by layer (chain rule, lesson 10). For an $L$-layer net the gradient w.r.t. an early weight contains a product of $L$ Jacobian-like factors. If each factor has magnitude $\approx r$, the early-layer gradient scales like $r^{L}$:</p>
+      <div class="math-box">$$ \left\|\frac{\partial L}{\partial \theta^{(1)}}\right\| \sim \prod_{\ell} \|J^{(\ell)}\| \approx r^{L} $$</div>
+      <ul>
+        <li>$r &lt; 1$ → $r^L \to 0$: <strong>vanishing</strong> gradients, early layers freeze. Classic culprit: sigmoid/tanh, whose derivative maxes at $0.25$ (sigmoid) — multiply many of those and you're toast.</li>
+        <li>$r &gt; 1$ → $r^L \to \infty$: <strong>exploding</strong> gradients, loss <code>NaN</code>s.</li>
+      </ul>
+      <p>Three fixes, working together: <strong>ReLU</strong> (derivative is exactly $1$ for active units → $r\approx1$, no decay), <strong>good init</strong> (sets $r\approx1$ at start), and <strong>normalization</strong> (re-centers each layer's pre-activations every step so $r$ <em>stays</em> near $1$ during training). For exploding gradients specifically, <strong>gradient clipping</strong> caps $\|g\|$ at a threshold — essential for RNNs (lesson 14).</p>
+
+      <h3 id="normalization-layers">2.4 &nbsp;Normalization layers</h3>
+      <p><strong>Batch normalization</strong> standardizes each feature <em>across the mini-batch</em>. For feature $j$ over a batch of $m$ samples:</p>
+      <div class="math-box">$$ \mu_j = \frac{1}{m}\sum_{i=1}^{m} x_{ij}, \quad \sigma_j^2 = \frac{1}{m}\sum_{i=1}^{m} (x_{ij}-\mu_j)^2, \quad \hat x_{ij} = \frac{x_{ij}-\mu_j}{\sqrt{\sigma_j^2+\epsilon}}, \quad y_{ij} = \gamma_j \hat x_{ij} + \beta_j $$</div>
+      <ul>
+        <li>$\mu_j, \sigma_j^2$ — the <strong>batch mean/variance</strong> of feature $j$.</li>
+        <li>$\gamma_j, \beta_j$ — <strong>learnable</strong> scale and shift, so the net can undo the normalization if it helps. <em>Where it comes from:</em> normalizing to zero-mean/unit-variance keeps each layer's input distribution stable as the layers below it change ("internal covariate shift"), and $\gamma,\beta$ restore representational freedom.</li>
+      </ul>
+      <p>Batch norm uses <em>batch</em> statistics at train time and a <em>running average</em> at eval time (set <code>model.eval()</code>!). It hates small batches (noisy $\mu,\sigma$) and doesn't fit sequence models well.</p>
+
+      <p><strong>Layer normalization</strong> normalizes across the <em>features of a single sample</em> instead of across the batch:</p>
+      <div class="math-box">$$ \mu_i = \frac{1}{d}\sum_{j=1}^{d} x_{ij}, \quad \sigma_i^2 = \frac{1}{d}\sum_{j=1}^{d}(x_{ij}-\mu_i)^2 $$</div>
+      <p>(then the same $\hat x$, $\gamma$, $\beta$). Because it's per-sample, it's <strong>independent of batch size</strong> and behaves identically at train and eval — which is why <strong>transformers and RNNs use layer norm</strong> (lessons 14–15).</p>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Quick rule</div>
+        <p><strong>Batch norm for CNNs with big batches, layer norm for sequences / tiny batches.</strong></p>
+      </div>
+
+      <h3 id="regularization">2.5 &nbsp;Regularization for nets</h3>
+      <ul>
+        <li><strong>Weight decay</strong>: add $\frac{\lambda}{2}\|\theta\|^2$ to the loss → gradient gains a $\lambda\theta$ term pulling weights toward 0. This is the L2 penalty from lesson 5; smaller weights = smoother function = less overfit. ($\lambda$ ≈ $10^{-4}$ to $10^{-2}$.)</li>
+        <li><strong>Dropout</strong>: during training, zero each activation independently with probability $p$, then scale survivors by $\frac{1}{1-p}$ so the expected value is unchanged. It forces the net not to rely on any single neuron — like training an ensemble of sub-networks that share weights. Off at eval time.</li>
+        <li><strong>Early stopping</strong>: watch validation loss; stop (and keep the best checkpoint) when it starts rising while train loss keeps falling. The gap <em>is</em> overfitting.</li>
+        <li><strong>Data augmentation</strong>: synthetically enlarge the training set with label-preserving transforms (flip/rotate/noise an image; jitter/time-shift a sensor trace). More effective "data" = better generalization, and it's the cheapest regularizer you have.</li>
+      </ul>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>Code</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>We'll train the same small net two ways on a noisy classification problem and <strong>watch the loss/val curves diverge</strong> — first the naive version, then the "with-the-craft" version. PyTorch.</p>
+
+      <div class="codeblock">
+        <div class="code-head">setup.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import TensorDataset, DataLoader
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+
+torch.manual_seed(0)
+
+# --- A deliberately hard, noisy dataset (small N, many features) -------------
+# Few samples + many features + label noise = a net WILL overfit if unchecked.
+X, y = make_classification(
+    n_samples=600, n_features=20, n_informative=8, n_redundant=4,
+    flip_y=0.10,        # 10% label noise -&gt; punishes memorization
+    class_sep=0.8, random_state=0,
+)
+X_tr, X_val, y_tr, y_val = train_test_split(X, y, test_size=0.4, random_state=0)
+
+# ALWAYS standardize inputs before a net (lesson 9 pitfall): zero mean/unit var,
+# fit on TRAIN ONLY to avoid leaking validation stats into the model.
+scaler = StandardScaler().fit(X_tr)
+X_tr, X_val = scaler.transform(X_tr), scaler.transform(X_val)
+
+def loader(X, y, train):
+    ds = TensorDataset(torch.tensor(X, dtype=torch.float32),
+                       torch.tensor(y, dtype=torch.long))
+    return DataLoader(ds, batch_size=64, shuffle=train)
+
+tr_loader, val_loader = loader(X_tr, y_tr, True), loader(X_val, y_val, False)
+</code></pre>
+      </div>
+
+      <h3 id="naive-vs-regularized">3.1 &nbsp;The naive net (no craft) vs. the regularized net</h3>
+      <div class="codeblock">
+        <div class="code-head">net.py <span class="lang">Python</span></div>
+<pre><code class="language-python">class Net(nn.Module):
+    """One architecture, a flag to toggle the 'craft'."""
+    def __init__(self, in_dim=20, hidden=256, n_classes=2, regularized=False):
+        super().__init__()
+        self.regularized = regularized
+        self.fc1 = nn.Linear(in_dim, hidden)
+        self.fc2 = nn.Linear(hidden, hidden)
+        self.fc3 = nn.Linear(hidden, n_classes)
+        # Normalization + dropout only exist in the regularized variant
+        self.bn1 = nn.BatchNorm1d(hidden)
+        self.bn2 = nn.BatchNorm1d(hidden)
+        self.drop = nn.Dropout(p=0.5)
+        if regularized:
+            self._he_init()          # He init for ReLU layers (section 2.2)
+
+    def _he_init(self):
+        for m in [self.fc1, self.fc2, self.fc3]:
+            nn.init.kaiming_normal_(m.weight, nonlinearity="relu")  # He
+            nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        if self.regularized:
+            # Linear -&gt; BatchNorm -&gt; ReLU -&gt; Dropout (the standard ordering)
+            x = self.drop(F.relu(self.bn1(self.fc1(x))))
+            x = self.drop(F.relu(self.bn2(self.fc2(x))))
+        else:
+            # No norm, no dropout, PyTorch default init -&gt; easy to overfit
+            x = F.relu(self.fc1(x))
+            x = F.relu(self.fc2(x))
+        return self.fc3(x)            # raw logits (CrossEntropyLoss adds softmax)
+
+
+def run(regularized, epochs=120, weight_decay=0.0, lr=1e-3):
+    model = Net(regularized=regularized)
+    # Adam: momentum + per-parameter LR (section 2.1). weight_decay = L2 penalty.
+    opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    crit = nn.CrossEntropyLoss()
+    hist = {"train": [], "val": [], "val_acc": []}
+
+    for ep in range(epochs):
+        model.train()                          # dropout ON, BN uses batch stats
+        tr_loss = 0.0
+        for xb, yb in tr_loader:
+            opt.zero_grad()                    # clear last step's gradients
+            loss = crit(model(xb), yb)
+            loss.backward()                    # backprop (lesson 10, now automatic)
+            opt.step()                         # apply the optimizer update rule
+            tr_loss += loss.item() * len(xb)
+        hist["train"].append(tr_loss / len(tr_loader.dataset))
+
+        model.eval()                           # dropout OFF, BN uses running stats
+        v_loss, correct = 0.0, 0
+        with torch.no_grad():                  # no autograd graph at eval = faster
+            for xb, yb in val_loader:
+                out = model(xb)
+                v_loss += crit(out, yb).item() * len(xb)
+                correct += (out.argmax(1) == yb).sum().item()
+        hist["val"].append(v_loss / len(val_loader.dataset))
+        hist["val_acc"].append(correct / len(val_loader.dataset))
+    return hist
+
+naive = run(regularized=False, weight_decay=0.0)
+craft = run(regularized=True,  weight_decay=1e-3)   # He init + BN + dropout + L2
+
+print(f"naive  best val acc: {max(naive['val_acc']):.3f}")
+print(f"craft  best val acc: {max(craft['val_acc']):.3f}")
+# -&gt; naive  best val acc: 0.858
+# -&gt; craft  best val acc: 0.867
+# (Everything is seeded, so this is the exact deterministic output. Note the two
+# val accuracies are nearly identical -- the gap does NOT show up in val ACCURACY.
+# The overfitting lives in the LOSS curves: naive train loss collapses to ~0.0003
+# while its val loss bottoms at ~0.34 then climbs to ~1.19; the craft net's train
+# loss stays at ~0.16 and its val loss stays flat at ~0.45. That train/val LOSS
+# gap -- not the accuracy -- is the point. Plot it next.)
+</code></pre>
+      </div>
+
+      <h3 id="plot-curves">3.2 &nbsp;Plot the curves — see the overfitting</h3>
+      <div class="codeblock">
+        <div class="code-head">plot_curves.py <span class="lang">Python</span></div>
+<pre><code class="language-python">fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+for name, h, c in [("naive", naive, "tab:red"), ("craft", craft, "tab:blue")]:
+    ax[0].plot(h["train"], c=c, ls="--", label=f"{name} train")
+    ax[0].plot(h["val"],   c=c, ls="-",  label=f"{name} val")
+    ax[1].plot(h["val_acc"], c=c, label=f"{name} val acc")
+ax[0].set_title("Loss"); ax[0].set_xlabel("epoch"); ax[0].set_ylabel("loss"); ax[0].legend()
+ax[1].set_title("Validation accuracy"); ax[1].set_xlabel("epoch"); ax[1].legend()
+plt.tight_layout(); plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What you should SEE</div>
+        <p>The <em>naive</em> train loss (red dashed) plunges toward zero (~0.0003) while its val loss (red solid) bottoms out then <strong>creeps back up</strong> (~0.34 → ~1.19) — the textbook overfitting U-curve, and the place you'd apply <strong>early stopping</strong> (stop at the val-loss minimum). The <em>craft</em> curves (blue) stay closer together: train loss doesn't hit zero (~0.16, dropout + decay prevent memorization) and its val loss stays low and flat (~0.45). Watch the <strong>loss</strong>, not the accuracy — both nets land at ~0.86 <em>val accuracy</em>, so accuracy hides the story; the blown-open train/val <strong>loss</strong> gap is where the naive net's overfitting shows. The shrinking <em>gap</em> between dashed and solid is generalization improving.</p>
+      </div>
+
+      <h3 id="lr-finder">3.3 &nbsp;The LR-finder idea</h3>
+      <p>You don't have to guess the learning rate. <strong>LR-finder</strong> (popularized by fast.ai): start with a tiny LR and multiply it up every batch; plot loss vs LR. Loss is flat (LR too small to move), then drops steeply (the good zone), then explodes (LR too big). Pick an LR about one order of magnitude <em>below</em> the explosion — roughly the steepest-descent point.</p>
+      <div class="codeblock">
+        <div class="code-head">lr_finder.py <span class="lang">Python</span></div>
+<pre><code class="language-python">def lr_finder(make_model, lr_min=1e-6, lr_max=1.0, n=120):
+    model = make_model()
+    opt = torch.optim.Adam(model.parameters(), lr=lr_min)
+    crit = nn.CrossEntropyLoss()
+    mult = (lr_max / lr_min) ** (1 / n)       # geometric LR ramp per step
+    lrs, losses = [], []
+    it = iter(tr_loader)
+    for i in range(n):
+        try:
+            xb, yb = next(it)
+        except StopIteration:                  # restart loader if exhausted
+            it = iter(tr_loader); xb, yb = next(it)
+        lr = lr_min * (mult ** i)
+        for g in opt.param_groups:
+            g["lr"] = lr                       # manually bump the LR each step
+        opt.zero_grad()
+        loss = crit(model(xb), yb)
+        loss.backward(); opt.step()
+        lrs.append(lr); losses.append(loss.item())
+        if loss.item() &gt; 4 * min(losses):      # diverged -&gt; stop early
+            break
+    plt.plot(lrs, losses); plt.xscale("log")
+    plt.xlabel("learning rate (log)"); plt.ylabel("loss")
+    plt.title("LR finder"); plt.show()
+    return lrs, losses
+
+lr_finder(lambda: Net(regularized=True))
+# What you should SEE: a flat-then-steep-then-blowup curve. Pick the LR ~10x
+# below where it blows up (here typically around 1e-3 to 3e-3 -&gt; matches our lr).
+</code></pre>
+      </div>
+
+      <h3 id="lr-schedules">3.4 &nbsp;Learning-rate schedules</h3>
+      <p>A fixed LR is a compromise: big enough to move fast early, but then it overshoots near the minimum. A <strong>schedule</strong> anneals it down. Cosine annealing is a strong default.</p>
+      <div class="codeblock">
+        <div class="code-head">lr_schedule.py <span class="lang">Python</span></div>
+<pre><code class="language-python">model = Net(regularized=True)
+opt   = torch.optim.Adam(model.parameters(), lr=3e-3, weight_decay=1e-3)
+# Cosine: LR smoothly decays from 3e-3 toward ~0 over T_max epochs.
+sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=120)
+
+for ep in range(120):
+    model.train()
+    for xb, yb in tr_loader:
+        opt.zero_grad()
+        nn.CrossEntropyLoss()(model(xb), yb).backward()
+        opt.step()
+    sched.step()           # advance the schedule ONCE PER EPOCH (not per batch)
+# Effect: fast progress early, fine-tuning late -&gt; usually a lower final loss
+# and steadier val curve than a fixed LR.
+</code></pre>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>Real Case — a sonar sensor classifier that <em>generalizes</em>, not memorizes</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>why this matters</small></div>
+      <p>You're on a <strong>ROV</strong> (remotely operated underwater vehicle) doing seabed survey. The forward sonar returns an echo; you want to classify each return as <strong>rock</strong> vs <strong>mine-like metal cylinder</strong> — the classic <strong>Sonar (Connectionist Bench)</strong> dataset (Gorman &amp; Sejnowski, 1988): 208 returns, each a <strong>60-dim</strong> vector of energy in frequency bands, binary label <code>R</code>/<code>M</code>.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> The trap this lesson is about</div>
+        <p><strong>60 features, only 208 samples.</strong> A net with thousands of parameters can trivially memorize 208 examples — train accuracy 100%, and then it's useless on the next survey leg because it learned <em>those specific echoes</em>, not "what metal sounds like." Generalization is the entire job.</p>
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">sonar_classifier.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np, torch, torch.nn as nn, torch.nn.functional as F
+from torch.utils.data import TensorDataset, DataLoader
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
+# UCI Sonar dataset (60 features, R/M label). One-liner fetch:
+url = "https://archive.ics.uci.edu/ml/machine-learning-databases/undocumented/connectionist-bench/sonar/sonar.all-data"
+df = pd.read_csv(url, header=None)
+X = df.iloc[:, :60].values.astype("float32")
+y = (df.iloc[:, 60] == "M").astype("int64").values            # M(ine)=1, R(ock)=0
+
+Xtr, Xval, ytr, yval = train_test_split(X, y, test_size=0.3, stratify=y, random_state=1)
+sc = StandardScaler().fit(Xtr)                                 # fit on train only
+Xtr, Xval = sc.transform(Xtr).astype("float32"), sc.transform(Xval).astype("float32")
+
+def dl(X, y, train, bs=16):                                    # tiny dataset -&gt; small batch
+    ds = TensorDataset(torch.tensor(X), torch.tensor(y))
+    # drop_last=train: with 145 train samples the last batch is a single sample,
+    # and BatchNorm1d in train() mode CANNOT normalize a batch of 1 (it raises
+    # "Expected more than 1 value per channel"). Drop it on the train loader; keep
+    # every sample at eval (BN uses running stats there, so size-1 is fine).
+    return DataLoader(ds, batch_size=bs, shuffle=train, drop_last=train)
+tr, va = dl(Xtr, ytr, True), dl(Xval, yval, False)
+
+class SonarNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(60, 128); self.fc2 = nn.Linear(128, 64); self.fc3 = nn.Linear(64, 2)
+        self.bn1, self.bn2 = nn.BatchNorm1d(128), nn.BatchNorm1d(64)
+        self.drop = nn.Dropout(0.4)
+        for m in (self.fc1, self.fc2, self.fc3):
+            nn.init.kaiming_normal_(m.weight, nonlinearity="relu"); nn.init.zeros_(m.bias)
+    def forward(self, x):
+        x = self.drop(F.relu(self.bn1(self.fc1(x))))
+        x = self.drop(F.relu(self.bn2(self.fc2(x))))
+        return self.fc3(x)
+
+def augment(xb):
+    """Sensor data augmentation: add small Gaussian noise to mimic real
+    echo variability. Label-preserving -&gt; a 'free' regularizer (section 2.5)."""
+    return xb + 0.05 * torch.randn_like(xb)
+
+model = SonarNet()
+opt = torch.optim.Adam(model.parameters(), lr=2e-3, weight_decay=1e-3)
+crit = nn.CrossEntropyLoss()
+best_acc, best_state, patience, bad = 0.0, None, 25, 0      # early-stopping state
+
+for ep in range(300):
+    model.train()
+    for xb, yb in tr:
+        opt.zero_grad()
+        crit(model(augment(xb)), yb).backward()            # augment ONLY at train time
+        opt.step()
+    model.eval()
+    with torch.no_grad():
+        acc = np.mean([ (model(xb).argmax(1) == yb).float().mean().item() for xb, yb in va ])
+    if acc &gt; best_acc:                                     # early stopping: keep best
+        best_acc, best_state, bad = acc, {k: v.clone() for k, v in model.state_dict().items()}, 0
+    else:
+        bad += 1
+        if bad &gt;= patience:                                # val hasn't improved in 25 epochs
+            print(f"early stop at epoch {ep}"); break
+
+model.load_state_dict(best_state)
+print(f"best val acc: {best_acc:.3f}")
+# -&gt; best val acc: ~0.85-0.90  (vs ~0.75-0.80 for a naive overfit net)
+</code></pre>
+      </div>
+
+      <p>How the craft maps onto the ROV problem:</p>
+      <ul>
+        <li><strong>Standardize features</strong> — sonar energy bands span very different magnitudes; unscaled inputs saturate the first layer (lesson 9 pitfall) and break BatchNorm's assumptions.</li>
+        <li><strong>He init + BatchNorm</strong> keep gradients alive in a 3-layer net so all layers actually learn from 208 samples.</li>
+        <li><strong>Dropout + weight decay</strong> stop the net memorizing those exact 208 echoes — the difference between 100% train accuracy that fails at sea, and a model that flags real mines.</li>
+        <li><strong>Data augmentation (noise injection)</strong> mimics the run-to-run variability of a real sonar — the model learns the <em>shape</em> of a metallic return, not one frozen snapshot. The same trick generalizes to IMU/lidar streams: jitter, time-shift, dropout-channels.</li>
+        <li><strong>Early stopping</strong> picks the checkpoint <em>before</em> overfitting starts — critical when you have far too little data to spare a big validation split.</li>
+        <li><strong>Small batch size (16)</strong> is forced by the tiny dataset; note we chose BatchNorm anyway, and with full 16-sample batches it's stable. But watch the <em>last</em> batch: 145 train samples ÷ 16 leaves a remainder of 1, and BatchNorm1d in <code>train()</code> mode flat-out refuses a batch of size 1 (it can't compute a variance) — hence <code>drop_last=True</code> on the train loader above. With batches of 1–4 throughout you'd switch to <strong>LayerNorm</strong>.</li>
+      </ul>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>Pitfalls &amp; Tips</h2>
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> The silent killers</div>
+        <ul>
+          <li><strong>Forgetting <code>model.train()</code> / <code>model.eval()</code>.</strong> Dropout and BatchNorm behave <em>differently</em> in the two modes. Leaving the model in <code>train()</code> at evaluation gives random, dropout-corrupted predictions and BN using batch (not running) stats — a silent 5–15% accuracy hit. Toggle them every loop.</li>
+          <li><strong>Not standardizing inputs, or leaking the scaler.</strong> Fit <code>StandardScaler</code> (or BatchNorm's running stats) on <strong>train only</strong>. Fitting on the full dataset leaks validation/test information and inflates your score — you'll be disappointed at deployment.</li>
+          <li><strong><code>loss</code> going <code>NaN</code>.</strong> Almost always exploding gradients or LR too high. Lower the LR, add gradient clipping (<code>torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)</code>), check your init, and make sure you're not taking <code>log(0)</code> in a custom loss.</li>
+          <li><strong>Adam + manual L2 ≠ true weight decay.</strong> Adam's <code>weight_decay</code> param is fine for most cases, but the <em>correct</em> decoupled version is <strong>AdamW</strong> (<code>torch.optim.AdamW</code>) — prefer it when weight decay matters (transformers, lesson 15).</li>
+          <li><strong>Big batch → fewer, smoother steps; small batch → noisier steps that regularize.</strong> Larger batches need a <em>larger</em> LR (roughly linear scaling) and sometimes a warmup. Don't crank batch size for speed and keep the old LR — training will stall.</li>
+          <li><strong>Stacking BatchNorm <em>and</em> high dropout</strong> can fight each other (BN's batch statistics get noisy under heavy dropout). If using both, keep dropout moderate (≤0.5) and put dropout <em>after</em> the activation.</li>
+          <li><strong>Tuning ten knobs at once.</strong> Change one thing, watch the curve, then change the next. If you flip init, optimizer, LR, and dropout together and it works, you've learned nothing about <em>why</em>.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>Check Your Understanding</h2>
+
+      <p><strong>Q1.</strong> Your 8-layer tanh network trains with the loss stuck dead flat from epoch 1, and the first-layer weights barely move. Name the most likely cause and two fixes.</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p><strong>Vanishing gradients.</strong> tanh's derivative is $\tanh'(x) = 1 - \tanh^2(x)$, which maxes at $1$ (at $x=0$) and shrinks toward $0$ as the unit saturates (~$0.07$ at $x=2$, ~$0.01$ at $x=3$); multiplied across 8 layers the early-layer gradient shrinks toward zero, so the first layers can't learn. Fixes: switch hidden activations to <strong>ReLU</strong> ($r\approx1$, no decay), use <strong>He initialization</strong>, and/or add <strong>BatchNorm</strong> to keep per-layer variance near 1. Any two of those.</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> What is the single conceptual difference between RMSProp and Adam?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>RMSProp adapts the per-parameter learning rate using the running average of squared gradients ($\sqrt{s_t}$ denominator). <strong>Adam = RMSProp + momentum</strong>: it adds a running average of the gradients themselves ($m_t$, the first moment) plus bias-correction. So Adam smooths the <em>direction</em> and auto-scales the <em>step size</em> per coordinate; RMSProp only does the latter.</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> Batch norm vs layer norm: you're training a transformer with batch size 8 (and sometimes 1 during generation). Which do you pick and why?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p><strong>Layer norm.</strong> It normalizes across the features of a <em>single</em> sample, so it's independent of batch size and behaves identically at train and inference — essential when batches are tiny or size-1. Batch norm relies on batch statistics, which are noisy/ill-defined at batch size 1, and it must switch to running stats at eval. Sequences/transformers → layer norm.</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> Your train accuracy is 99% but validation accuracy is 76% and falling. Which lesson-12 tools directly attack this, and what does the <em>gap itself</em> tell you?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>The gap <strong>is</strong> overfitting — the net is memorizing training specifics. Directly attack it with <strong>dropout</strong>, <strong>weight decay</strong> (L2), <strong>data augmentation</strong>, and <strong>early stopping</strong> (stop at the validation-loss minimum). These don't make the net more powerful; they constrain it to learn generalizable structure instead of the training set's quirks. More/cleaner data is the ultimate fix.</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> You run the LR finder and the loss-vs-LR curve drops steeply around $10^{-3}$ and explodes around $10^{-1}$. What LR do you choose, and why not just pick the explosion point where loss is lowest?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Pick roughly $10^{-2}$ — about an order of magnitude <em>below</em> the explosion (near the steepest-descent region), not the minimum-loss point. The lowest plotted loss sits right at the edge of divergence; using that LR makes real training unstable (it'll NaN). You want the largest LR that still descends <em>reliably</em>, which is the steep middle of the curve, not its very end.</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml12-norm-choice">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You're training a sequence model where the batch size is sometimes 1 (autoregressive generation). Which normalization belongs here, and why?</div>
+        <ul class="ex-options">
+          <li data-correct="false">Batch norm — it always stabilizes training regardless of batch size.</li>
+          <li data-correct="true">Layer norm — it normalizes across a single sample's features, so it's independent of batch size and identical at train/eval.</li>
+          <li data-correct="false">No normalization — sequence models don't suffer from internal covariate shift.</li>
+          <li data-correct="false">Batch norm, but only if you set <code>drop_last=True</code>.</li>
+        </ul>
+        <div class="ex-explain">Layer norm computes $\mu_i,\sigma_i^2$ over the $d$ features of <em>one</em> sample, so a batch of 1 is no problem and there is no train-vs-eval statistics switch. Batch norm relies on batch statistics that are noisy or undefined at batch size 1 (BatchNorm1d literally refuses a size-1 batch in <code>train()</code> mode), which is exactly why transformers and RNNs use layer norm.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml12-he-variance" data-answer="0.04" data-tol="0.002">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">A ReLU layer has fan-in $n_{\text{in}} = 50$. Using <strong>He initialization</strong>, what variance should you give each weight? (Hint: $\mathrm{Var}(w) = \tfrac{2}{n_{\text{in}}}$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">variance</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">He init targets $\mathrm{Var}(w) = \tfrac{2}{n_{\text{in}}} = \tfrac{2}{50} = 0.04$ (so a std of $\sqrt{0.04} = 0.2$). The factor of 2 compensates for ReLU zeroing roughly half its inputs, which would otherwise halve the forward variance; this keeps $\mathrm{Var}(z)\approx\mathrm{Var}(x)$ layer to layer and stops gradients from vanishing or exploding through depth.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml12-adam-from-pieces">
+        <div class="ex-head"><span class="badge">Q3</span> Derivation — build Adam from its two ingredients</div>
+        <div class="ex-q">Adam is described as "momentum + RMSProp." Write the update using the first moment $m_t$ and second moment $v_t$, explain why each is bias-corrected, and state which ingredient supplies which behavior.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Momentum contributes a running average of the gradients (the direction); RMSProp contributes a running average of the squared gradients (the per-coordinate scale). Both averages start at $0$, so early estimates are too small.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p>Track both moments: $m_t = \beta_1 m_{t-1} + (1-\beta_1) g_t$ (first moment, the <strong>momentum</strong> piece — smooths the <em>direction</em>) and $v_t = \beta_2 v_{t-1} + (1-\beta_2) g_t^2$ (second moment, the <strong>RMSProp</strong> piece — per-coordinate scale). Both are EMAs initialized at $0$, so for small $t$ they are <em>biased toward zero</em>; dividing by $1-\beta^{\,t}$ removes that startup bias: $\hat m_t = \frac{m_t}{1-\beta_1^{\,t}}$, $\hat v_t = \frac{v_t}{1-\beta_2^{\,t}}$. The step is then $\theta_{t+1} = \theta_t - \eta\,\dfrac{\hat m_t}{\sqrt{\hat v_t}+\epsilon}$. Momentum sets <em>which way</em> to step; the $\sqrt{\hat v_t}$ denominator auto-tunes <em>how big</em> a step per coordinate — steep directions (large $\hat v$) get short steps, flat ones (small $\hat v$) get long steps. Defaults: $\beta_1=0.9$, $\beta_2=0.999$, $\epsilon=10^{-8}$.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Lesson recap</div>
+        <ul>
+          <li><strong>Optimizers</strong>: plain SGD zig-zags; <strong>momentum</strong> smooths the direction, <strong>RMSProp</strong> adapts the per-parameter step, <strong>Adam</strong> does both (your default). Pair with an <strong>LR schedule</strong> (cosine) and find the LR with the <strong>LR-finder</strong> instead of guessing.</li>
+          <li><strong>Init matters</strong>: keep activation variance $\approx1$ layer to layer — <strong>Xavier</strong> for tanh/sigmoid, <strong>He</strong> for ReLU — or you get vanishing/exploding gradients before training even starts.</li>
+          <li><strong>Vanishing/exploding gradients</strong> come from multiplying $L$ factors in backprop; <strong>ReLU + good init + normalization</strong> keep that product near 1. Clip gradients to tame explosions.</li>
+          <li><strong>Normalization</strong>: BatchNorm normalizes a feature across the batch (great for CNNs, big batches); LayerNorm normalizes across a sample's features (great for sequences, tiny batches). Remember <code>train()</code>/<code>eval()</code>.</li>
+          <li><strong>Regularization</strong> — dropout, weight decay, early stopping, augmentation — closes the train/val gap so the model generalizes. We saw the naive net overfit and the crafted net hold its validation accuracy, and we trained a sonar classifier that learns <em>metal</em>, not <em>these 208 echoes</em>.</li>
+        </ul>
+        <p>Now that we can reliably train a deep net, we'll give it the right <em>architecture</em> for spatial data — sharing weights across an image so the net learns local patterns (edges, textures, shapes) instead of memorizing pixels. ➡️ <strong>Next:</strong> <a href="13-cnns.html">13 — Convolutional Neural Networks</a></p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

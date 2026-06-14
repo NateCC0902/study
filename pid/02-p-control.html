@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>P Control: The Spring &amp; Its Offset — PID Control for a USV</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-pid" data-course="pid" data-track="main" data-chapter="02-p-control">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> PID&nbsp;·&nbsp;USV</a>
+  <span class="spacer"></span>
+  <span class="track-pill">PID · Ch 02</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">PID Course · Chapter 02 · The P term</div>
+        <h1>P Control: The Spring &amp; Its Offset</h1>
+        <p>Turn on exactly one term — proportional — and the boat becomes a mass on a spring. We sweep $k_p$ to watch it go from sluggish to ringing forever, then prove why P alone can <em>never</em> sit on the setpoint when a current pushes the bow. Two cases, one stubborn lesson: more gain is not the answer.</p>
+        <div class="meta"><span>⏱ ~30 min</span><span>🪝 The spring analogy</span><span>⚡ Live kp sweep</span><span>📐 e_ss = −4°/kp</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="p-is-a-spring"><span class="sec-no">1</span>P alone: the boat becomes a spring</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>find the picture first</small></div>
+      <p>Strip the controller down to one term. No integral, no derivative — just $u = k_p\,e$. The rudder command is proportional to how far off you are: way off, hard over; nearly there, barely a nudge; on the setpoint, zero rudder. That last clause is innocent-looking and it's the villain of section&nbsp;5.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> P <em>is</em> a spring</div>
+        <p>A spring pulls back with a force proportional to how far you've stretched it: $F = -kx$. A P controller pushes the rudder proportional to how far the heading is stretched from the setpoint: $u = k_p\,e$. Same law, same personality — including the bad parts. Hang a mass on a spring with little friction and it <strong>oscillates</strong>. Our "mass" is the hull's yaw inertia; our "friction" is hydrodynamic yaw damping. Stiffen the spring enough and the friction can't keep up.</p>
+      </div>
+
+      <p>So before we touch a slider, predict the shape: a stiffer spring (bigger $k_p$) snaps toward the target faster, but a fast-moving mass carries momentum <em>past</em> it — overshoot — and a weakly-damped spring rings on the way to rest. Crank the stiffness high enough and it never comes to rest at all.</p>
+
+      <div class="mermaid">
+flowchart LR
+    E["error e = ψ_set − ψ"] -->|"× kp"| U["rudder u = kp·e"]
+    U -->|"plant (K, T)"| R["yaw rate r"]
+    R -->|"∫ dt"| P["heading ψ"]
+    P -->|"feedback"| E
+</div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The pattern to memorize</div>
+        <p>More $k_p$ = faster response, less leftover offset, more ringing — <strong>until it never stops ringing.</strong> Everything in this chapter is a consequence of that one sentence.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="kp-sweep"><span class="sec-no">2</span>The kp sweep: from sluggish to never-settling</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>Case 1 from the notes</small></div>
+      <p>The experiment is simple: $u = k_p e$, command a turn from 0° to 90°, and sweep the gain. Here's what the boat does at four values — read it like a personality test for $k_p$.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>$k_p$</th><th>Behaviour</th><th>Settles at</th></tr></thead>
+        <tbody>
+          <tr><td>0.5</td><td>sluggish; big sloppy overshoot</td><td>~98° (big offset → §4)</td></tr>
+          <tr><td>2</td><td>brisk; rings once; usable</td><td>~92°</td></tr>
+          <tr><td>5</td><td><strong>never settles</strong> — ±16° oscillation, forever</td><td>— (this is $K_u$)</td></tr>
+          <tr><td>8</td><td>bigger, faster oscillation</td><td>±25°, forever</td></tr>
+        </tbody>
+      </table></div>
+
+      <p>That $k_p=5$ row is special. The boat enters a <strong>sustained oscillation</strong> that neither grows nor decays — a clean ±16° wobble with period $T_u\approx 9$&nbsp;s. This is the <em>ultimate gain</em> $K_u$: the stiffness at which the spring's ringing exactly balances the hull's damping. It's not a curiosity — it's the single most useful number for tuning this boat (we cash it in for real gains in Ch 08).</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> "I'll just crank kp" is a trap</div>
+        <p>Every instinct says: offset too big? raise the gain. And it <em>does</em> shrink the offset (§4). But $k_p\ge 5$ oscillates without end. You are squeezed between a steady-state error you can't fully kill and an oscillation you can't tolerate. P alone cannot win this — which is exactly why I and D exist.</p>
+      </div>
+
+      <p>Don't take my word for the four rows — go drive it. Pull $k_p$ up slowly and find the value where the wobble stops shrinking and stops growing. That crossover is $K_u$.</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>🧭</span> P-only heading hold (sweep kp; turn on the current)</div>
+        <canvas id="sim-p"></canvas>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> What to drag, what to watch</div>
+        <p><strong>Sweep $k_p$ low → high.</strong> Near 0.5 the boat crawls in and parks well short — note <em>where</em> it stops, not just that it's slow. Around 2 it arrives smartly with one small ring. Push toward 5 and the oscillation locks into a steady ±16° forever — that's $K_u$; time one full cycle and you'll get $T_u\approx 9$&nbsp;s. Past 5 it gets worse, not better. Then <strong>turn the current on</strong> and re-run: every settling point shifts: that's §4's offset, live.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="why-oscillation"><span class="sec-no">3</span>Why it oscillates: spring meets lag</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>where the ringing comes from</small></div>
+      <p>Close the P loop on the Nomoto plant from Ch&nbsp;01 and the dynamics become second-order. Start from the plant and substitute the control law $u = k_p e$ with $e = \psi_\text{set}-\psi$ (no disturbance for now):</p>
+      <div class="math-box">$$ T\,\ddot\psi + \dot\psi = K\,u = K\,k_p\,(\psi_\text{set} - \psi) $$</div>
+      <p>Rearranged, that's the equation of a damped harmonic oscillator driven toward $\psi_\text{set}$:</p>
+      <div class="math-box">$$ T\,\ddot\psi + \underbrace{1\cdot\dot\psi}_{\text{damping}} + \underbrace{K k_p\,\psi}_{\text{spring}} = K k_p\,\psi_\text{set} $$</div>
+      <p>Read off the two knobs. The <strong>spring stiffness</strong> is $K k_p$ — it grows with the gain you set. The <strong>damping</strong> coefficient is fixed at $1$ (it's the hull's own yaw damping, baked into the plant). The natural frequency and damping ratio fall straight out:</p>
+      <div class="math-box">$$ \omega_n = \sqrt{\frac{K k_p}{T}}, \qquad \zeta = \frac{1}{2\sqrt{K k_p\,T}} $$</div>
+      <p>Now the whole chapter is in one inequality. Crank $k_p$ and $\zeta$ <em>drops</em> — more stiffness, same friction, so proportionally less damping. The mass swings harder past the target each time. With $K=0.6$ and $T=2.5$, $\zeta$ falls below the comfortable range right where the notes say it does: around $k_p\approx 2$ you get a single tidy overshoot, and by $k_p=5$ the lag in the loop has eaten the last of the effective damping and you ring forever.</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Honest caveat (full story in Ch 09)</div>
+        <p>A <em>bare</em> first-order Nomoto boat with a perfect rudder is technically too well-behaved — on paper, even enormous $k_p$ settles. Real boats oscillate because the actuator <strong>lags</strong>: our servo slews at 25&nbsp;°/s and can't follow a command that flips rail-to-rail. That phase lag is the missing ingredient that turns "less damped" into "undamped" at $K_u\approx 5$. The sim has the slew limit built in, so it oscillates like the real thing.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="the-offset"><span class="sec-no">4</span>The structural offset: P can't beat a current</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>Case 2 from the notes</small></div>
+      <p>Now turn on the current — the constant push that acts like 4° of stuck rudder. Run the P boat to a heading and look <em>closely</em> at where it parks. It won't be on the setpoint. And no amount of waiting fixes it: the error sits there, steady and stubborn. This isn't sloppiness or a slow transient — it's structural, and three lines of algebra tell you exactly how big it is.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>do this once, it's 3 lines</small></div>
+      <p>To hold a steady heading, the net yaw moment must be zero. The current pushes like +4° of rudder, so the controller's rudder must hold <strong>−4°</strong> to cancel it — otherwise the boat keeps turning. But a P controller can only ever output $k_p\,e$. Set that equal to the rudder the boat <em>needs</em>:</p>
+      <div class="math-box">$$ k_p\,e_{ss} = -4° \qquad\Longrightarrow\qquad \boxed{\,e_{ss} = -\frac{4°}{k_p}\,} $$</div>
+      <p>There it is. To produce the −4° of holding rudder, the P term <em>requires</em> a nonzero error to multiply — so the boat settles off-target by exactly $4°/k_p$. Plug in gains:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>$k_p$</th><th>offset $|e_{ss}|$</th><th>settles at (target 90°)</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>4°</td><td>94°</td></tr>
+          <tr><td>2</td><td>2°</td><td>92°</td></tr>
+          <tr><td>4</td><td>1°</td><td>91°</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Why this is <em>structural</em>, not a bug</div>
+        <p>At <strong>zero error a P controller outputs zero rudder</strong> — and zero rudder loses to the current. So the only way P can hold any nonzero rudder is to keep a nonzero error alive to multiply by $k_p$. The offset isn't a tuning mistake; it's the math of the term. Yes, bigger $k_p$ shrinks it ($4°/k_p \to 0$) — but §2 already capped you: $k_p\ge 5$ oscillates. With usable gains you're stuck a degree or two off, forever.</p>
+      </div>
+
+      <div class="layer"><span class="step">④</span> Real case <small>this is everywhere</small></div>
+      <p>The same droop appears in every proportional-only loop fighting a constant load: a cruise-control car that sags a few mph on a long uphill, a thermostat that holds a chilly 19° when it's freezing outside, an op-amp follower with finite gain. The cure is always the same — <strong>something must hold the actuator while the error is zero.</strong> That something is the integral term, and meeting it is Ch 05's whole job.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> Tease for I</div>
+        <p>Imagine a term that <em>remembers</em> "I've been 2° short for a while now" and slowly leans on the rudder until the error is gone — then keeps holding that lean even at zero error. That's integral: a self-trimming tab that learns the current. P can't do it because P has no memory; it only knows where you are <em>right now</em>.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="in-code"><span class="sec-no">5</span>P-only, in code</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>Here's the entire P controller — the Ch&nbsp;01 PID class with two gains zeroed. I'm showing it explicitly so the offset is undeniable: trace the control step at $e=0$ and the output is exactly zero rudder, no matter the disturbance.</p>
+
+      <div class="codeblock">
+        <div class="code-head">p_only.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import math
+
+def wrap(angle):                     # → (-pi, pi]; matters once you cross north (Ch 07)
+    return (angle + math.pi) % (2 * math.pi) - math.pi
+
+class PController:
+    """The whole P controller. ki = kd = 0 — no memory, no lookahead."""
+    def __init__(self, kp, rudder_max=math.radians(35)):
+        self.kp = kp
+        self.rudder_max = rudder_max
+
+    def update(self, setpoint, heading):
+        error = wrap(setpoint - heading)          # rad
+        u = self.kp * error                        # the ENTIRE control law
+        # NOTE: when error == 0, u == 0. Zero rudder loses to the current.
+        return max(-self.rudder_max, min(self.rudder_max, u))
+</code></pre>
+      </div>
+
+      <p>And the steady-state check — the simulator equivalent of staring at where the boat parks. We solve for the heading at which everything stops moving with the current switched on:</p>
+
+      <div class="codeblock">
+        <div class="code-head">offset_check.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import math
+
+K, T   = 0.6, 2.5                  # Nomoto plant (Ch 01)
+current = math.radians(4.0)        # disturbance ≡ +4° of stuck rudder
+setpoint = math.radians(90.0)
+
+for kp in (1.0, 2.0, 4.0):
+    # Steady state: yaw rate r = 0  ⇒  net rudder (u + current) = 0  ⇒  u = -current.
+    # P law: u = kp * e_ss,  and e_ss = setpoint - heading_ss.
+    #   kp * e_ss = -current  ⇒  e_ss = -current / kp
+    e_ss   = -current / kp
+    settle = setpoint - e_ss                       # where the bow actually parks
+    print(f"kp={kp:>3}:  offset = {math.degrees(e_ss):+5.1f}°"
+          f"   settles at {math.degrees(settle):5.1f}°")
+
+# kp=1.0:  offset =  -4.0°   settles at  94.0°
+# kp=2.0:  offset =  -2.0°   settles at  92.0°
+# kp=4.0:  offset =  -1.0°   settles at  91.0°
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Sign convention, so you don't trip</div>
+        <p>The error is $e = \psi_\text{set}-\psi$. A current that pushes the bow <em>up</em> in heading needs the controller to hold <em>negative</em> rudder to cancel it, so $e_{ss}$ comes out negative — the boat settles a touch <em>past</em> the setpoint, at 94° not 86°. The magnitude $4°/k_p$ is what you tune against; the sign just tells you which way it droops.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="two-failures"><span class="sec-no">6</span>Two failures, one root cause</h2>
+      <p>Step back. We met two distinct misbehaviours, and they are not really two problems — they're the same limitation wearing different clothes.</p>
+      <ol>
+        <li><strong>Oscillation</strong> (no current): push $k_p$ up and the spring out-stiffens the damping. Ringing, then a never-ending wobble at $K_u\approx 5$.</li>
+        <li><strong>Offset</strong> (with current): a P controller outputs zero rudder at zero error, so it can't hold the −4° trim a steady current demands. It settles $4°/k_p$ short.</li>
+      </ol>
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> The squeeze</div>
+        <p>Each failure points at the <em>opposite</em> gain. Offset wants $k_p$ <strong>high</strong> (shrink $4°/k_p$). Oscillation wants $k_p$ <strong>low</strong> (stay under $K_u$). One knob can't satisfy both, because $k_p$ alone has no memory and no anticipation. The fix isn't a better $k_p$ — it's two <em>more</em> terms: <strong>D</strong> to add damping so you can run more gain (Ch 03), and <strong>I</strong> to kill the offset without any gain at all (Ch 05).</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="pid02-why-offset">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">With the current on, a P-only boat settles a couple of degrees off the setpoint and stays there. Why can't it ever reach the setpoint exactly?</div>
+        <ul class="ex-options">
+          <li data-correct="false">The gain $k_p$ is set too low; a high enough $k_p$ would reach it exactly.</li>
+          <li data-correct="true">At zero error a P controller outputs zero rudder, but the current needs −4° of held rudder — so a nonzero error must remain to produce it.</li>
+          <li data-correct="false">The rudder saturates at ±35° and can't push hard enough.</li>
+          <li data-correct="false">The plant is unstable, so it can never settle anywhere.</li>
+        </ul>
+        <div class="ex-explain">Holding a steady heading needs net zero yaw moment, i.e. rudder $=-4°$. P can only make rudder via $k_p\,e$, so it needs $e_{ss}=-4°/k_p \ne 0$. Raising $k_p$ <em>shrinks</em> the offset toward zero but never reaches it — and you can't raise it far anyway, since $k_p\ge 5$ oscillates. The offset is structural; killing it needs the integral term.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="pid02-offset-kp25" data-answer="91.6" data-tol="0.15">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">A P-only boat with $k_p = 2.5$ is commanded to 90° with the 4° current on. Using $e_{ss} = -4°/k_p$, at what heading (in degrees) does it actually settle?</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">°</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$e_{ss} = -4°/2.5 = -1.6°$. Since $e = \psi_\text{set}-\psi$, a negative error means $\psi$ overshoots the setpoint: $\psi_{ss} = 90° - e_{ss} = 90° - (-1.6°) = 91.6°$. Note $k_p=2.5$ is the high end of the usable range — below $K_u\approx 5$, so no oscillation — and even there the offset is still 1.6°.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="pid02-second-order">
+        <div class="ex-head"><span class="badge">Q3</span> Derivation — why higher $k_p$ rings more</div>
+        <div class="ex-q">Starting from the closed-loop equation $T\ddot\psi + \dot\psi + K k_p\,\psi = K k_p\,\psi_\text{set}$, show how the damping ratio $\zeta$ depends on $k_p$, and explain in one line why cranking the gain makes the boat oscillate.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Compare term-by-term with the standard second-order form $\ddot\psi + 2\zeta\omega_n\dot\psi + \omega_n^2\psi = \omega_n^2\psi_\text{set}$. First divide the whole equation by $T$ so the $\ddot\psi$ coefficient is 1.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p>Divide by $T$: $\ddot\psi + \dfrac{1}{T}\dot\psi + \dfrac{K k_p}{T}\psi = \dfrac{K k_p}{T}\psi_\text{set}$. Matching the standard form gives $\omega_n^2 = \dfrac{K k_p}{T}$, so $\omega_n = \sqrt{\dfrac{K k_p}{T}}$, and $2\zeta\omega_n = \dfrac{1}{T}$, so</p>
+          <p>$$\zeta = \frac{1}{2\omega_n T} = \frac{1}{2T}\sqrt{\frac{T}{K k_p}} = \frac{1}{2\sqrt{K k_p\,T}}.$$</p>
+          <p><strong>One line:</strong> $\zeta \propto 1/\sqrt{k_p}$ — the spring stiffens with $k_p$ but the damping is fixed by the hull, so raising the gain drops the damping ratio and the boat rings harder. (On the ideal model $\zeta$ never quite hits zero; in §3's caveat, real actuator lag is what finally pushes effective $\zeta$ to zero at $K_u$, producing the sustained ±16° oscillation.)</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>P alone is a spring: $u=k_p e$. Closed on the boat it's a damped oscillator with $\zeta = 1/(2\sqrt{K k_p T})$ — so more $k_p$ means faster response but less damping, ringing harder until it never settles at $K_u\approx 5$ (period $T_u\approx 9$&nbsp;s). Worse, against a steady current P can't sit on the setpoint at all: zero error gives zero rudder, so it droops by the structural offset $e_{ss}=-4°/k_p$. The two failures pull $k_p$ in opposite directions — proof that one term isn't enough. Next: add D to buy back damping so you can finally run a useful gain.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+<script src="../assets/pid-sim.js"></script>
+<script>EM.pidSim("sim-p", EM.pidPresets.pOnly());</script>
+</body>
+</html>

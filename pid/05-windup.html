@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Integral Windup &amp; Anti-Windup — PID Control for a USV</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-pid" data-course="pid" data-track="main" data-chapter="05-windup">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> PID&nbsp;·&nbsp;USV</a>
+  <span class="spacer"></span>
+  <span class="track-pill">PID · Ch 05</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">PID Course · Chapter 05 · The integral's dark side</div>
+        <h1>Integral Windup &amp; Anti-Windup</h1>
+        <p>In Chapter 04 the integral was the hero — it learned the current and trimmed the boat to zero error. Now we hand it a big maneuver, watch the rudder slam into its stop, and discover the integral has no idea the rudder is maxed. It keeps accumulating. Then it owns the boat. We'll watch it happen, do the arithmetic, and bolt on three different fixes.</p>
+        <div class="meta"><span>⏱ ~30 min</span><span>🧨 750° of stored rudder</span><span>⚡ Live sim</span><span>🛡️ 3 anti-windup fixes</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="the-setup"><span class="sec-no">1</span>The setup: a turn big enough to saturate</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>where the trouble starts</small></div>
+      <p>Everything so far has been a polite maneuver: a 90° turn, gentle gains, the rudder never near its limit. Now we make it ugly. Command a <strong>180° turn</strong> — point the boat at a waypoint directly behind it — with a <em>hot</em> integral: $k_p=2,\ k_d=3,\ k_i=1$. That $k_i$ is five times the value we settled on in Chapter 04, and it's about to matter enormously.</p>
+
+      <p>The error at the start of a 180° turn is $\pi$ radians. Multiply by $k_p=2$ and the P term alone wants $2\pi \approx 360°$ of rudder. The rudder stop is $\pm35°$. So the command is pinned hard at $+35°$ from the very first sample, and it <em>stays</em> pinned for the whole sweep — about <strong>9 seconds</strong> while the boat lumbers around. During those 9 seconds the controller is, in a real sense, no longer in control: the rudder is doing the maximum it can do, and nothing the math computes can change that.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence bug</div>
+        <p>While the rudder is saturated, the integral keeps <em>adding up the error</em> as if its output still mattered — but it doesn't, because the actuator is already maxed. The integral is filling a bucket whose tap is already wide open.</p>
+      </div>
+
+      <div class="layer"><span class="step">④</span> Real case <small>this is not exotic</small></div>
+      <p>This is the single most common bug every hobby-autopilot author meets. Command a USV to a waypoint behind it, the rudder saturates, the integral winds up, and the boat does something insane. It happens any time demand exceeds what the actuator can deliver: a drone commanded to climb faster than full throttle allows, a thermostat with the heater already flat-out, a motor at its current limit. Saturation plus an integrator is a universal trap.</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="watch-it-happen"><span class="sec-no">2</span>Watch it happen</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>two boats, one turn</small></div>
+      <p>Here is the exact experiment. The same 180° turn, the same hot gains, run two ways: with the integral protected (anti-windup ON) and with it left naked (OFF). Toggle the switch and compare. Watch the <strong>heading</strong> panel and the <strong>rudder</strong> panel together — the rudder panel is where the crime is committed; the heading panel is where you find the body.</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>🧭</span> Hard 180° turn — toggle anti-windup on/off</div>
+        <canvas id="sim-windup"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What to drag, what to watch</div>
+        <p>Flip <strong>anti-windup ON</strong>: the boat makes a clean 180° turn, settles, done — the protected integral never bloats. Flip it <strong>OFF</strong> and watch the boat blow straight through 180°. By the time the error finally changes sign, the integral is so engorged it <em>keeps the rudder pinned</em> the wrong way — the boat does <strong>donuts forever</strong>, heading climbing past 2000°, the integral half-unwinding each lap and re-winding, never recovering. Same plant, same gains. The only difference is whether the integral is allowed to lie to itself while the rudder is maxed.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> The integral outlives the maneuver</div>
+        <p>The fatal detail: windup doesn't hurt you <em>during</em> the turn — the rudder is maxed either way, so both boats turn identically at first. It hurts you <em>after</em>. The bloated integral is a debt that has to be paid back error-by-error, and there isn't enough negative error in a single overshoot to pay it. So the boat never stops.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="the-arithmetic"><span class="sec-no">3</span>The arithmetic: how 750° of rudder gets stored</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>count the accumulation</small></div>
+      <p>Let's make the disaster quantitative, because the number is genuinely shocking. Recall the discrete integral term: every sample, we add $e\cdot dt$ to a running accumulator, then multiply by $k_i$ to get the I contribution.</p>
+
+      <div class="math-box">$$ \text{integral} \;\mathrel{+}=\; e \cdot dt, \qquad I = k_i \cdot \text{integral} $$</div>
+
+      <p>During the 180° turn the error sweeps from $\pi \approx 3.14$ rad down toward $0$, so its <em>average</em> over the maneuver is roughly $1.5$ rad. The turn lasts about $9$ s. So the accumulator grows by:</p>
+
+      <div class="math-box">$$ \Delta\,\text{integral} \;\approx\; \bar e \cdot \Delta t \;=\; 1.5\ \text{rad} \times 9\ \text{s} \;=\; 13.5\ \text{rad·s} $$</div>
+
+      <p>With $k_i = 1$, the I term alone is then $k_i \cdot \text{integral} \approx 13$ rad. Convert to degrees:</p>
+
+      <div class="math-box">$$ I \;\approx\; 13\ \text{rad} \times \frac{180°}{\pi} \;\approx\; \mathbf{750°}\ \text{of commanded rudder} $$</div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Read that number</div>
+        <p>The rudder stop is $\pm35°$. The integral term alone is demanding <strong>750°</strong> — more than twenty times the physical limit, and that's <em>before</em> we add P and D. To unwind 750° of stored rudder, the controller needs the error to be <em>negative</em> for a long time. One overshoot past 180° doesn't supply nearly enough negative-error-seconds. So the integral stays saturated, the rudder stays pinned, and the boat keeps turning. Donuts.</p>
+      </div>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the bucket analogy, finished</small></div>
+      <p>Think of the accumulator as a bucket the integral keeps pouring into. Normally the I output drains the bucket: when error reaches zero the integral stops growing, and any sign-flip in error drains it back down. But while the rudder is saturated, the I output is <em>capped</em> — the drain is choked — yet we keep pouring. By the time the maneuver ends, the bucket is overflowing with 750° of water that has to be bailed out one teaspoon (one negative-error sample) at a time.</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="output-clamp-isnt-enough"><span class="sec-no">4</span>Why clamping the output isn't enough</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>the subtle trap</small></div>
+      <p>"But we already clamp the output," you object — and you're right; Chapter 01's <code>update()</code> ends with <code>u = clamp(u, -RUDDER_MAX, +RUDDER_MAX)</code>. That clamp keeps the <em>command we send the servo</em> sane. It does <strong>nothing</strong> for the integral, which lives upstream of the clamp and keeps growing regardless. The clamp throws away the excess command silently — and that discarded excess is exactly the windup.</p>
+
+      <div class="mermaid">
+flowchart LR
+    E["error e"] --> P["P = kp·e"]
+    E --> ACC["integral += e·dt"]
+    ACC --> I["I = ki·integral"]
+    E --> D["D = kd·de/dt"]
+    P --> SUM["u = P + I + D"]
+    I --> SUM
+    D --> SUM
+    SUM --> CLAMP["clamp ±35°"]
+    CLAMP --> SERVO["rudder servo"]
+    CLAMP -.->|"u − u_clamped<br/>silently discarded"| WASTE["the windup"]
+</div>
+
+      <p>The lesson: the integral must be told, somehow, that the actuator is saturated, so it stops accumulating debt it can't act on. There are three standard ways to tell it. They differ in elegance and smoothness, but all three break the feedback path between "huge error" and "ever-growing integral" while the rudder is pinned.</p>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="three-fixes"><span class="sec-no">5</span>Three fixes, from blunt to elegant</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+
+      <p><strong>Fix 1 — Clamp the integral itself.</strong> The bluntest fix and the one the blue trace in the sim uses: cap the accumulator so that $k_i\cdot\text{integral}$ can never, by itself, exceed the rudder limit. Simple, robust, and impossible to get catastrophically wrong.</p>
+
+      <div class="codeblock">
+        <div class="code-head">fix 1 · integral clamp <span class="lang">Python</span></div>
+<pre><code class="language-python">self.integral += error * dt
+# cap so ki*integral stays within the actuator range
+i_limit = self.out_max / max(self.ki, 1e-9)        # rad·s
+self.integral = max(-i_limit, min(i_limit, self.integral))
+i = self.ki * self.integral
+</code></pre>
+      </div>
+
+      <p><strong>Fix 2 — Conditional integration.</strong> Don't integrate on samples where the output is saturated. If the rudder is already pinned, accumulating more error is pointless, so skip the <code>+=</code> on those steps. (A refinement: still allow integration in the direction that would <em>reduce</em> saturation, so the integral can start unwinding the instant the error helps.)</p>
+
+      <div class="codeblock">
+        <div class="code-head">fix 2 · conditional integration <span class="lang">Python</span></div>
+<pre><code class="language-python">u_raw = self.kp*error + self.ki*self.integral + d   # before clamp
+saturated = (u_raw &gt; self.out_max) or (u_raw &lt; self.out_min)
+
+# only accumulate if NOT saturated, OR if this error pushes us back in-range
+pushing_into_limit = (u_raw &gt; self.out_max and error &gt; 0) or \
+                     (u_raw &lt; self.out_min and error &lt; 0)
+if not (saturated and pushing_into_limit):
+    self.integral += error * dt
+i = self.ki * self.integral
+</code></pre>
+      </div>
+
+      <p><strong>Fix 3 — Back-calculation.</strong> The industry standard, and the smoothest. Each step, compute the unclamped command and the clamped command; feed the <em>difference</em> back into the integral as a corrective term scaled by a back-calc gain $k_b$. The more we're clamping, the harder we bleed the integral down. There's no hard switch, so no chattering at the saturation boundary.</p>
+
+      <div class="math-box">$$ \text{integral} \;\mathrel{+}=\; e\cdot dt \;-\; k_b\,\big(u_\text{unclamped} - u_\text{clamped}\big)\,dt $$</div>
+
+      <div class="codeblock">
+        <div class="code-head">fix 3 · back-calculation (recommended) <span class="lang">Python</span></div>
+<pre><code class="language-python">def update(self, error, dt):
+    p = self.kp * error
+    d = 0.0 if self.prev_error is None else \
+        self.kd * (error - self.prev_error) / dt
+    self.prev_error = error
+
+    self.integral += error * dt
+    i = self.ki * self.integral
+
+    u_unclamped = p + i + d
+    u = max(self.out_min, min(self.out_max, u_unclamped))   # clamp
+
+    # back-calc: bleed the integral toward what the actuator can actually do
+    self.integral -= self.kb * (u_unclamped - u) * dt       # kb ~ 1/ki
+    return u
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Which one should you ship?</div>
+        <p>Start with <strong>Fix 1</strong> — it's three lines and it can never blow up. Move to <strong>Fix 3</strong> when you want smooth recovery and have a few minutes to tune $k_b$ (a good starting point is $k_b \approx 1/k_i$). Fix 2 is fine but the hard on/off switch can chatter right at the saturation edge; back-calculation is the same idea made continuous, which is why it's the textbook default.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="recovery-cost"><span class="sec-no">6</span>The cost of recovery: counting negative-error-seconds</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>why one overshoot can't pay the debt</small></div>
+      <p>Let's prove to ourselves <em>why</em> the unprotected boat can't recover, because it sharpens the intuition for every saturating loop you'll ever build. The integral holds 13.5 rad·s of accumulated error. To drive it back to the modest value that just trims the current (about $-4°$ of rudder, i.e. $\text{integral} \approx -0.07$ rad·s with $k_i=1$), the error must integrate <em>negatively</em> by roughly that whole 13.5 rad·s.</p>
+
+      <p>A single overshoot past 180° might reach, say, 30° past — that's about $0.5$ rad of negative error, lasting maybe $4$ s before the boat is dragged back around. That contributes only:</p>
+
+      <div class="math-box">$$ \int e\,dt \;\approx\; -0.5\ \text{rad} \times 4\ \text{s} \;=\; -2\ \text{rad·s} $$</div>
+
+      <p>Two rad·s paid against a thirteen-and-a-half rad·s debt. The integral is still hugely positive, the rudder is still pinned, the boat keeps turning — straight into another lap, where it re-accumulates what little it just shed. That's the mathematical signature of the donut: a debt that re-grows faster than any single overshoot can repay it.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The general rule</div>
+        <p>An integrator that has wound up by $W$ rad·s of error needs $W$ rad·s of <em>opposite</em>-sign error to unwind. If your maneuver can't naturally supply that much opposite error before the next saturation event, you will not recover without anti-windup. This is not specific to boats — it's arithmetic.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="on-the-boat"><span class="sec-no">7</span>On the real boat (ROS 2)</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>where this bites you in the field</small></div>
+      <p>On an actual USV node, three things conspire to make windup worse than the sim suggests, so anti-windup isn't optional — it's a safety item:</p>
+      <ul>
+        <li><strong>Software limits are tighter than physical ones.</strong> You clamp the rudder to $\pm35°$ in software for mechanical safety, which means you saturate <em>earlier</em> and wind up <em>more</em> than the raw actuator would.</li>
+        <li><strong>Re-engagement.</strong> When the operator flips from manual back to auto, a stale integral from minutes ago is itself a wound-up integrator. Always <code>reset()</code> the controller on re-engage — that's the windup bug the field-tuning notes warned you about.</li>
+        <li><strong>Differential thrust.</strong> If you steer with <code>left = base + u, right = base − u</code>, the command saturates when <code>base ± u</code> hits the ESC limit. Same windup, just hidden one layer down in the mixer. Clamp <em>and</em> anti-windup at the PID, before the mixer.</li>
+      </ul>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🛰️</span> Field rule</div>
+        <p>Before any autonomy test: hardware kill switch armed, software rudder clamp in place, anti-windup enabled, and <code>reset()</code> wired to your auto-engage transition. A wound-up integral on the water doesn't just look silly — it ignores your stick inputs until it bleeds down, which near a dock is a collision.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="pid05-why-donuts">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">In the unprotected 180° turn, the boat does donuts forever. What is the direct cause?</div>
+        <ul class="ex-options">
+          <li data-correct="false">The P term is too large and saturates the rudder.</li>
+          <li data-correct="false">The plant (Nomoto model) is unstable for any large turn.</li>
+          <li data-correct="true">The integral wound up far past the rudder limit during saturation, and one overshoot can't supply enough negative error to unwind it.</li>
+          <li data-correct="false">The derivative kick on the 180° setpoint step keeps re-saturating the rudder.</li>
+        </ul>
+        <div class="ex-explain">P saturating is normal and harmless on its own — the protected boat saturates P identically and still turns cleanly. The killer is the <em>integral</em>: ~13.5 rad·s (~750° of rudder) accumulated while the rudder was pinned, and a single overshoot only repays a couple of rad·s. The debt re-grows each lap, so the rudder stays pinned and the boat never stops.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="pid05-integral-degrees" data-answer="773" data-tol="60">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">During the 9 s turn, average error $\bar e \approx 1.5$ rad and $k_i = 1$. The accumulator grows by $\bar e\cdot\Delta t = 13.5$ rad·s. What is the I term, $k_i\cdot\text{integral}$, expressed in <strong>degrees</strong> of commanded rudder?</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">° rudder</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$k_i\cdot\text{integral} = 1 \times 13.5 = 13.5$ rad. Convert: $13.5 \times 180/\pi \approx 773°$ (we round it to "~750°" in the prose). Against a $\pm35°$ rudder stop, that's over 20× the physical limit demanded by the integral alone, before P and D are even added.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="pid05-backcalc-derive">
+        <div class="ex-head"><span class="badge">Q3</span> Derivation — why back-calculation self-limits</div>
+        <div class="ex-q">In back-calculation we add $-k_b(u_\text{unclamped}-u_\text{clamped})\,dt$ to the integral each step. Show why this drives the integral to a steady value where the unclamped command sits right at the saturation limit, and why that's exactly what we want.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">A quantity stops changing when its net increment per step is zero. Write the total change to <code>integral</code> per step as the error term plus the back-calc term, and set it to zero.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p>Per step the integral changes by $\Delta = \big(e - k_b(u_\text{unclamped}-u_\text{clamped})\big)\,dt$. While saturated, $u_\text{clamped}=u_\text{max}$ is fixed and $u_\text{unclamped}$ rises with the integral. The back-calc term grows with the overshoot $(u_\text{unclamped}-u_\text{max})$, so it fights the $e\,dt$ growth. Setting $\Delta = 0$ gives the equilibrium $u_\text{unclamped}-u_\text{max} = e/k_b$: the integral settles so the unclamped command hovers just barely above the limit by a small amount proportional to the current error. The instant the error shrinks, that gap closes and the integral can move freely again — <strong>no hard switch, no chatter, and the integral is never more wound up than it needs to be to keep the rudder at the stop.</strong> That graceful, continuous self-limiting is why back-calculation beats both the hard integral clamp and the on/off conditional-integration switch.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>A maneuver big enough to saturate the rudder ($180°$ turn, hot $k_i=1$) lets the integral accumulate ~13.5 rad·s — about <strong>750° of stored rudder</strong> — because the integrator can't see that the actuator is already maxed. Clamping the <em>output</em> doesn't help; the integral lives upstream of the clamp. After the turn, one overshoot can't supply enough negative-error-seconds to unwind that debt, so the rudder stays pinned and the boat does donuts forever. Three fixes break the windup: <strong>clamp the integral</strong> (blunt, robust), <strong>conditional integration</strong> (skip accumulation while saturated), and <strong>back-calculation</strong> (bleed the integral by the clamped excess — smoothest, industry standard). Next: the derivative's own dark side — derivative kick on setpoint steps.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+<script src="../assets/pid-sim.js"></script>
+<script>EM.pidSim("sim-windup", EM.pidPresets.windup());</script>
+</body>
+</html>

@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Support Vector Machines &amp; Kernels — Machine Learning &amp; Deep Learning</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="07-svm-kernels">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 07</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL Course · 07</div>
+        <h1>Support Vector Machines &amp; Kernels</h1>
+        <p>Two lines can both separate your data perfectly and still be wildly unequal — one grazes your nearest points, the other splits the gap down the middle. The SVM bulldozes the widest possible street between the classes, then the kernel trick bends that street into any shape you need without ever paying for the high-dimensional coordinates.</p>
+        <div class="meta"><span>⏱ ~35 min</span><span>🛣️ Maximum margin</span><span>🎚️ C &amp; γ</span><span>🧪 scikit-learn SVC</span></div>
+      </section>
+
+      <p style="opacity:.8"><strong>Part 2 · Lesson 07 · Code stack:</strong> scikit-learn &nbsp;·&nbsp; <strong>Prerequisites:</strong> <a href="06-knn-trees-ensembles.html">06 — k-NN, Decision Trees &amp; Ensembles</a></p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎯</span> By the end you can</div>
+        <ul>
+          <li>Explain <em>why</em> the <strong>maximum-margin</strong> hyperplane is the "safest" linear separator, and identify the <strong>support vectors</strong> that define it.</li>
+          <li>Connect the SVM objective to the <strong>hinge loss</strong> + L2 regularization, and tune the <strong>soft-margin C</strong> parameter.</li>
+          <li>Use the <strong>kernel trick</strong> to separate non-linear data without ever computing the high-dimensional features, picking sensibly between <strong>linear / polynomial / RBF</strong> kernels and tuning <strong>gamma</strong>.</li>
+          <li>Train and visualize <code>SVC</code> decision boundaries in scikit-learn, and decide when an SVM beats a tree ensemble.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>Intuition</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>find the widest street</small></div>
+      <p>A logistic-regression boundary (Lesson 04) is happy as long as points land on the correct side. Two different boundaries that both separate the data perfectly look equally good to it. But they are <em>not</em> equally good — one might pass a hair's breadth from your nearest data points, the other might split the gap right down the middle.</p>
+
+      <p>A <strong>Support Vector Machine (SVM)</strong> picks the line that sits in the <em>middle of the widest empty street</em> between the two classes. Think of bulldozing the fattest possible road through the gap between the clusters: the <strong>margin</strong> is the width of that road, and the boundary is its center line. The handful of points touching the curbs are the <strong>support vectors</strong> — they alone determine the road. Every other point could be deleted and the boundary would not move.</p>
+
+      <div class="mermaid">
+flowchart LR
+    A["Many separating lines<br/>fit the data"] --> B["SVM rule:<br/>maximize the margin<br/>(widest street)"]
+    B --> C["Boundary defined only by<br/>support vectors on the curb"]
+    C --> D["Data not linearly separable?"]
+    D -->|"lift to higher dim<br/>via a kernel"| E["Linear street there<br/>= curvy boundary here"]
+</div>
+
+      <p>Why is the widest street the smart choice? It is the most <em>robust</em> to noise. A new measurement that lands slightly off from training points still falls on the correct side, because you left the maximum buffer. This is a built-in form of regularization — large margin is the geometric cousin of "keep the model simple" from Lesson 05.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The kernel idea in one breath</div>
+        <p>Real sensor data is rarely separable by a straight line. The <strong>kernel trick</strong> lets the SVM behave as if it lifted your points into a much higher-dimensional space where a flat plane <em>does</em> separate them — without ever paying the cost of computing those coordinates. A curved boundary in your 2D world is just a straight cut in that hidden high-D world.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>The Math</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive the objective</small></div>
+
+      <h3 id="separating-hyperplane">The separating hyperplane</h3>
+      <p>A linear classifier is a hyperplane</p>
+      <div class="math-box">$$f(\mathbf{x}) = \mathbf{w}^\top \mathbf{x} + b$$</div>
+      <ul>
+        <li>$\mathbf{x} \in \mathbb{R}^d$ — a feature vector (e.g. $d$ sensor readings).</li>
+        <li>$\mathbf{w} \in \mathbb{R}^d$ — the weight vector, <strong>normal (perpendicular) to the boundary</strong>.</li>
+        <li>$b \in \mathbb{R}$ — the bias / offset that shifts the plane away from the origin.</li>
+      </ul>
+      <p>We predict class $\hat{y} = \operatorname{sign}(f(\mathbf{x}))$, with labels coded as $y \in \{-1, +1\}$ (note: SVMs use $\pm 1$, not $0/1$).</p>
+
+      <h3 id="margin-distance">Margin = distance to the closest point</h3>
+      <p>The signed distance from a point $\mathbf{x}$ to the hyperplane is $f(\mathbf{x}) / \lVert \mathbf{w} \rVert$ (standard point-to-plane formula from Lesson 01). We are free to rescale $\mathbf{w}, b$ however we like, so we fix the scale by demanding that the closest points satisfy $|f(\mathbf{x})| = 1$. Those points sit on the <strong>margin boundaries</strong> $f(\mathbf{x}) = \pm 1$, and the street's half-width is</p>
+      <div class="math-box">$$\text{margin} = \frac{1}{\lVert \mathbf{w} \rVert}.$$</div>
+      <p>Maximizing $1/\lVert \mathbf{w} \rVert$ is the same as <strong>minimizing $\lVert \mathbf{w} \rVert^2$</strong>. That is where the SVM objective comes from.</p>
+
+      <h3 id="hard-margin">Hard-margin SVM</h3>
+      <p>If the data <em>is</em> perfectly separable, we solve</p>
+      <div class="math-box">$$\min_{\mathbf{w}, b} \ \tfrac{1}{2}\lVert \mathbf{w} \rVert^2 \quad \text{subject to} \quad y_i (\mathbf{w}^\top \mathbf{x}_i + b) \ge 1 \ \ \forall i.$$</div>
+      <p>The constraint says every point is on the correct side <em>and</em> outside the street. The points where the constraint is tight ($y_i f(\mathbf{x}_i) = 1$) are the <strong>support vectors</strong>.</p>
+
+      <h3 id="soft-margin">Soft margin + the hinge loss + C</h3>
+      <p>Real data overlaps, so we allow violations via <strong>slack</strong> $\xi_i \ge 0$ and pay for them:</p>
+      <div class="math-box">$$\min_{\mathbf{w}, b, \boldsymbol{\xi}} \ \tfrac{1}{2}\lVert \mathbf{w} \rVert^2 + C \sum_i \xi_i \quad \text{s.t.} \quad y_i f(\mathbf{x}_i) \ge 1 - \xi_i, \ \ \xi_i \ge 0.$$</div>
+      <p>The optimal slack is exactly $\xi_i = \max(0,\, 1 - y_i f(\mathbf{x}_i))$, which is the <strong>hinge loss</strong>. Substituting it in turns the constrained problem into plain regularized loss minimization:</p>
+      <div class="math-box">$$\min_{\mathbf{w}, b} \ \underbrace{C \sum_i \max\big(0,\, 1 - y_i f(\mathbf{x}_i)\big)}_{\text{hinge loss: penalty for being inside/past the margin}} + \underbrace{\tfrac{1}{2}\lVert \mathbf{w} \rVert^2}_{\text{L2 reg = wide margin}}.$$</div>
+      <p>The hinge loss is zero once a point is correctly classified <em>with room to spare</em> ($y_i f \ge 1$); it grows linearly as the point creeps into the street or onto the wrong side. Compare to the smooth log-loss of Lesson 04 — the hinge has a hard "elbow" at margin 1 and ignores points that are already comfortably correct.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎚️</span> What C does</div>
+        <p><strong>$C$ = inverse regularization strength.</strong> Large $C$ → violations are expensive → narrow margin, low bias, high variance (can overfit). Small $C$ → tolerate violations → wide, smooth margin, more bias. $C$ plays the same role here as $1/\lambda$ in ridge.</p>
+      </div>
+
+      <h3 id="kernel-trick">The kernel trick</h3>
+      <p>The dual form of the problem (derived via Lagrange multipliers $\alpha_i \ge 0$) depends on the data <strong>only through inner products</strong> $\mathbf{x}_i^\top \mathbf{x}_j$:</p>
+      <div class="math-box">$$\max_{\boldsymbol{\alpha}} \ \sum_i \alpha_i - \tfrac{1}{2}\sum_{i,j}\alpha_i \alpha_j y_i y_j \, \mathbf{x}_i^\top \mathbf{x}_j, \qquad \text{with } \mathbf{w} = \sum_i \alpha_i y_i \mathbf{x}_i.$$</div>
+      <p>Only support vectors have $\alpha_i > 0$. Now the magic: replace every inner product $\mathbf{x}_i^\top \mathbf{x}_j$ with a <strong>kernel</strong> $K(\mathbf{x}_i, \mathbf{x}_j) = \phi(\mathbf{x}_i)^\top \phi(\mathbf{x}_j)$, where $\phi$ maps to some high-dimensional space. We get a linear separator <em>in that space</em> — a curved boundary in the original space — and we never compute $\phi$ explicitly. A kernel is just a <strong>similarity score</strong> between two points.</p>
+
+      <p>Common kernels:</p>
+      <div class="math-box">$$
+\begin{aligned}
+\text{Linear:} \quad &amp; K(\mathbf{x},\mathbf{z}) = \mathbf{x}^\top \mathbf{z} \\
+\text{Polynomial (deg } p): \quad &amp; K(\mathbf{x},\mathbf{z}) = (\gamma\,\mathbf{x}^\top \mathbf{z} + r)^{p} \\
+\text{RBF / Gaussian:} \quad &amp; K(\mathbf{x},\mathbf{z}) = \exp\!\big(-\gamma \lVert \mathbf{x} - \mathbf{z} \rVert^2\big)
+\end{aligned}
+$$</div>
+
+      <p>The <strong>RBF kernel</strong> is the workhorse. Read it as similarity: it is $1$ when two points coincide and decays toward $0$ as they separate. <strong>$\gamma$ controls the reach</strong> of each support vector:</p>
+      <ul>
+        <li><strong>Large $\gamma$</strong> → fast decay → each support vector influences only its tiny neighborhood → wiggly, complex boundary (can overfit).</li>
+        <li><strong>Small $\gamma$</strong> → slow decay → influence spreads far → smooth, almost-linear boundary (can underfit).</li>
+      </ul>
+      <p>So $\gamma$ controls boundary <em>shape/complexity</em> while $C$ controls <em>tolerance for errors</em>. You tune them together.</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> The two knobs, side by side</div>
+        <p>$C$ is about <em>errors</em> (how much you punish points inside the street); $\gamma$ is about <em>shape</em> (how far each support vector's influence reaches). High $C$ and high $\gamma$ both push toward overfitting, but for different reasons — that's why they must be tuned jointly.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>Code</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>separate the two moons</small></div>
+      <p>We will separate the classic <strong>two-moons</strong> dataset — two interlocking crescents that no straight line can split — and watch how the kernel changes everything.</p>
+
+      <div class="codeblock">
+        <div class="code-head">svm_moons.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import make_moons
+from sklearn.svm import SVC
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+
+# --- 1. Build a non-linearly-separable dataset ---------------------------
+X, y = make_moons(n_samples=400, noise=0.25, random_state=42)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, random_state=42, stratify=y
+)
+
+# --- 2. SVMs are distance-based, so ALWAYS scale features first ----------
+# A pipeline guarantees the scaler is fit on train data only (no leakage).
+def make_svm(**kwargs):
+    return make_pipeline(StandardScaler(), SVC(**kwargs))
+
+models = {
+    "Linear":        make_svm(kernel="linear", C=1.0),
+    "Poly (deg 3)":  make_svm(kernel="poly", degree=3, C=1.0, gamma="scale"),
+    "RBF (gamma=1)": make_svm(kernel="rbf",  C=1.0, gamma=1.0),
+}
+
+for name, model in models.items():
+    model.fit(X_train, y_train)
+    acc = model.score(X_test, y_test)
+    print(f"{name:14s} test accuracy = {acc:.3f}")
+# -&gt; Linear         test accuracy = 0.892
+# -&gt; Poly (deg 3)   test accuracy = 0.867
+# -&gt; RBF (gamma=1)  test accuracy = 0.917
+</code></pre>
+      </div>
+
+      <p>The linear kernel is held back because no line splits the moons. The RBF kernel wins by bending the boundary around the crescents. Note the degree-3 polynomial actually does <em>worse</em> than linear here at this noise level — a useful reminder that a fancier kernel is not automatically better; RBF, not poly, is the reliable non-linear default.</p>
+
+      <h3 id="plot-boundaries">Plotting the decision boundaries</h3>
+      <div class="codeblock">
+        <div class="code-head">plot_boundary.py <span class="lang">Python</span></div>
+<pre><code class="language-python">def plot_boundary(ax, model, X, y, title):
+    # Build a grid covering the data, classify every grid point.
+    h = 0.02
+    x_min, x_max = X[:, 0].min() - 0.5, X[:, 0].max() + 0.5
+    y_min, y_max = X[:, 1].min() - 0.5, X[:, 1].max() + 0.5
+    xx, yy = np.meshgrid(np.arange(x_min, x_max, h),
+                         np.arange(y_min, y_max, h))
+    Z = model.predict(np.c_[xx.ravel(), yy.ravel()]).reshape(xx.shape)
+    ax.contourf(xx, yy, Z, alpha=0.25, cmap="coolwarm")          # filled regions
+    ax.scatter(X[:, 0], X[:, 1], c=y, cmap="coolwarm",
+               edgecolors="k", s=18)                              # data points
+    ax.set_title(title)
+    ax.set_xticks([]); ax.set_yticks([])
+
+fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+for ax, (name, model) in zip(axes, models.items()):
+    plot_boundary(ax, model, X, y, name)
+plt.tight_layout()
+plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">👁️</span> What you should SEE</div>
+        <p>The <em>Linear</em> panel cuts a straight diagonal that clips both moons (misclassifying the tips). The <em>Poly</em> panel bows the boundary into a gentle parabola-like curve that still can't fully wrap the crescents. The <em>RBF</em> panel hugs the gap between the two moons almost perfectly — a smooth S-curve threading the empty street.</p>
+      </div>
+
+      <h3 id="gamma-c-overfit">Watching gamma and C overfit</h3>
+      <div class="codeblock">
+        <div class="code-head">gamma_c_grid.py <span class="lang">Python</span></div>
+<pre><code class="language-python">fig, axes = plt.subplots(2, 3, figsize=(15, 9))
+settings = [
+    ("RBF gamma=0.1, C=1",  dict(gamma=0.1,  C=1)),
+    ("RBF gamma=1,   C=1",  dict(gamma=1.0,  C=1)),
+    ("RBF gamma=30,  C=1",  dict(gamma=30,   C=1)),    # too wiggly -&gt; overfit
+    ("RBF gamma=1,   C=0.05", dict(gamma=1.0, C=0.05)),# soft -&gt; wide street
+    ("RBF gamma=1,   C=1",  dict(gamma=1.0,  C=1)),
+    ("RBF gamma=1,   C=100", dict(gamma=1.0, C=100)),  # hard -&gt; tight street
+]
+for ax, (title, kw) in zip(axes.ravel(), settings):
+    m = make_svm(kernel="rbf", **kw).fit(X_train, y_train)
+    plot_boundary(ax, m, X, y, f"{title}\n(test acc {m.score(X_test, y_test):.2f})")
+plt.tight_layout()
+plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">👁️</span> What you should SEE</div>
+        <p>Top row — as $\gamma$ climbs from 0.1 → 30 the boundary morphs from nearly straight to a jittery blob of islands wrapped tightly around individual training points (textbook overfit). Bottom row — as $C$ climbs from 0.05 → 100 the margin street narrows and the boundary contorts to catch every last training point.</p>
+      </div>
+
+      <h3 id="inspect-svs">Inspecting support vectors</h3>
+      <div class="codeblock">
+        <div class="code-head">inspect_svs.py <span class="lang">Python</span></div>
+<pre><code class="language-python">svm = SVC(kernel="rbf", C=1.0, gamma=1.0).fit(StandardScaler().fit_transform(X_train), y_train)
+print("n_support_vectors per class:", svm.n_support_)
+print("fraction of training set used:", svm.support_vectors_.shape[0] / len(X_train))
+# -&gt; n_support_vectors per class: [41 40]
+# -&gt; fraction of training set used: 0.289
+</code></pre>
+      </div>
+
+      <p>Only ~29% of points are support vectors; the rest are irrelevant to the boundary. That sparsity is what makes prediction efficient and the model robust.</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>Real Case — Acoustic / vibration fault detection on small labeled data</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>scarce labels, rich features</small></div>
+      <p>On a USV you mount an accelerometer or hydrophone near the propulsion shaft. You want to flag <strong>cavitation</strong> or <strong>bearing wear</strong> before it becomes a failure. The catch: you can only afford to <em>label</em> a few dozen runs (someone has to inspect the hardware to confirm ground truth). This is exactly the regime where SVMs beat random forests and neural nets — <strong>small, clean, high-dimensional data</strong>.</p>
+
+      <p><strong>Pipeline.</strong> Each ~1-second vibration clip becomes a feature vector: an FFT power spectrum (or a handful of MFCC / band-energy + RMS + kurtosis features). That gives you, say, $d \approx 64$ features per sample but only $n \approx 80$ labeled clips. With $d$ comparable to $n$, a deep net would overfit instantly; an RBF SVM thrives because its complexity is controlled by the margin, not by parameter count.</p>
+
+      <div class="codeblock">
+        <div class="code-head">fault_detection.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from sklearn.svm import SVC
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import GridSearchCV
+
+# X_spec: (80, 64) band-energy spectra, y: 0 = healthy, 1 = faulty
+pipe = make_pipeline(StandardScaler(), SVC(kernel="rbf", class_weight="balanced"))
+grid = GridSearchCV(
+    pipe,
+    {"svc__C": [0.1, 1, 10, 100], "svc__gamma": ["scale", 0.01, 0.1, 1]},
+    cv=5, scoring="f1",          # F1 because faults are the rare, important class
+)
+# grid.fit(X_spec, y)
+# print(grid.best_params_, grid.best_score_)
+# -&gt; {'svc__C': 10, 'svc__gamma': 0.1} 0.91
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🌊</span> Why the kernel is the right mental model here</div>
+        <p>The RBF kernel measures <em>spectral similarity</em>: two clips with similar frequency signatures get a high $K$, dissimilar ones get a low $K$. The decision for a new clip is literally a weighted vote of "how similar is this to the faulty support-vector clips vs the healthy ones?" — a sonar-operator's intuition, formalized. <code>class_weight="balanced"</code> handles the fact that healthy clips vastly outnumber faulty ones.</p>
+      </div>
+
+      <p>The same recipe maps onto <strong>sonar target classification</strong> (rock vs metal — the UCI <em>Connectionist Bench Sonar</em> dataset, $n=208$, $d=60$, an SVM classic), <strong>lidar-return material classification</strong>, or <strong>IMU gait/anomaly detection</strong> — any setting with rich features and scarce labels.</p>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>Pitfalls &amp; Tips</h2>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Always scale your features</div>
+        <p>SVMs measure distances; an unscaled feature with a huge numeric range (e.g. pressure in Pa vs a normalized ratio) silently dominates the kernel. Wrap <code>StandardScaler</code> in a <code>Pipeline</code> so scaling is fit on the training fold only.</p>
+      </div>
+
+      <ul>
+        <li><strong>Tune $C$ and $\gamma$ jointly with cross-validation.</strong> They interact — a good $C$ at one $\gamma$ is wrong at another. Use <code>GridSearchCV</code> over a log grid (<code>C ∈ {0.1,1,10,100}</code>, <code>gamma ∈ {scale, 0.01, 0.1, 1}</code>). Default <code>gamma="scale"</code> is a sane starting point.</li>
+        <li><strong>Don't reach for poly degree &gt; 3.</strong> High-degree polynomial kernels are numerically unstable and prone to wild extrapolation. If RBF can't do it, poly usually won't either.</li>
+        <li><strong>SVMs scale poorly with sample count.</strong> Training is roughly $O(n^2)$ to $O(n^3)$ in the number of samples, and <code>SVC</code> keeps support vectors in memory. Beyond ~50k–100k rows, switch to <code>LinearSVC</code> / <code>SGDClassifier(loss="hinge")</code>, or move to tree ensembles / nets.</li>
+        <li><strong>Raw <code>SVC</code> scores are not probabilities.</strong> <code>decision_function</code> returns signed margins, not calibrated probabilities. Set <code>probability=True</code> (adds Platt scaling, slower) or wrap with <code>CalibratedClassifierCV</code> if you need probabilities for thresholding.</li>
+        <li><strong>SVM vs trees, the quick rule:</strong> prefer <strong>SVM</strong> for small/medium data, many continuous features, and when you expect a smooth decision surface (signals, spectra, embeddings). Prefer <strong>tree ensembles</strong> (Lesson 06) for large tabular data, mixed categorical+numeric features, missing values, and when you want feature-importance interpretability with near-zero scaling fuss.</li>
+      </ul>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Knob / choice</th><th>Effect</th><th>Default / rule of thumb</th></tr></thead>
+        <tbody>
+          <tr><td>$C$</td><td>↑ = punish violations harder → tighter margin, more variance</td><td>grid {0.1, 1, 10, 100}</td></tr>
+          <tr><td>$\gamma$ (RBF)</td><td>↑ = shorter reach → wigglier boundary, more variance</td><td><code>"scale"</code>, then grid</td></tr>
+          <tr><td>kernel</td><td>linear (fast/big-n), poly (degree ≤ 3), RBF (default non-linear)</td><td>RBF for non-linear</td></tr>
+          <tr><td>scaling</td><td>mandatory — distances dominate the kernel</td><td><code>StandardScaler</code> in pipeline</td></tr>
+          <tr><td>probabilities</td><td><code>decision_function</code> = signed margin, not calibrated</td><td><code>probability=True</code> if needed</td></tr>
+        </tbody>
+      </table></div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>Check Your Understanding</h2>
+
+      <p><strong>Q1.</strong> Two boundaries both separate your training data with 100% accuracy. Why does the SVM prefer the one with the larger margin?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>The larger margin is more robust to noise and generalizes better: a new point that lands a bit off from training data still falls on the correct side because of the buffer. Geometrically, maximizing the margin minimizes $\lVert\mathbf{w}\rVert$, which is L2 regularization — the wide-street boundary is the "simplest" one and least likely to overfit.</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> You delete all training points <em>except</em> the support vectors and retrain. How does the boundary change?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>It does not change at all. The optimal $\mathbf{w} = \sum_i \alpha_i y_i \mathbf{x}_i$ has $\alpha_i = 0$ for every non-support-vector, so only support vectors enter the solution. This is the source of the SVM's sparsity and robustness.</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> Your RBF SVM gets 100% train accuracy but 70% test accuracy. Which knob did you likely set too high, and which way do you turn it?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Overfitting — likely $\gamma$ too high (each support vector's influence is too local, producing a wiggly boundary that memorizes the training set), and/or $C$ too high (margin too tight). Decrease $\gamma$ and/or decrease $C$ to smooth/widen the boundary, then re-validate.</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> Why is the kernel called a "similarity function," and what does the RBF kernel return for two identical points vs two very distant points?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>$K(\mathbf{x},\mathbf{z}) = \phi(\mathbf{x})^\top\phi(\mathbf{z})$ is an inner product in the lifted space, and inner products measure alignment/similarity. For RBF, $K=\exp(-\gamma\lVert\mathbf{x}-\mathbf{z}\rVert^2)$: identical points give $K=1$ (max similarity), distant points give $K\to 0$. A prediction is a similarity-weighted vote over the support vectors.</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> You have 5 million labeled rows of mostly categorical tabular telemetry. Is an RBF <code>SVC</code> a good choice? What would you use instead?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>No. Kernel <code>SVC</code> is $O(n^2)$–$O(n^3)$ in samples and chokes on millions of rows, and RBF doesn't handle categorical features gracefully. Use a gradient-boosted tree ensemble (Lesson 06) for big mixed-type tabular data, or <code>LinearSVC</code>/<code>SGDClassifier(loss="hinge")</code> if you specifically want a linear max-margin model at scale.</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml07-fancier-kernel">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">On the two-moons run, the degree-3 polynomial SVM scored 0.867 test accuracy — <em>below</em> the linear kernel's 0.892, while RBF led at 0.917. What is the correct takeaway?</div>
+        <ul class="ex-options">
+          <li data-correct="false">A polynomial kernel can never beat a linear one.</li>
+          <li data-correct="true">A more flexible kernel is not automatically better; RBF — not poly — is the reliable non-linear default, and you should validate the choice.</li>
+          <li data-correct="false">The polynomial result must be a bug; degree-3 always dominates linear.</li>
+          <li data-correct="false">Test accuracy is meaningless for non-linear kernels.</li>
+        </ul>
+        <div class="ex-explain">At this noise level the degree-3 poly bows into a gentle curve that still can't wrap the crescents, and its extra flexibility just chases noise — landing below linear. RBF, which decays smoothly and threads the gap, wins. The lesson: fancier ≠ better; pick the kernel by cross-validation, and treat RBF as your go-to non-linear baseline.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml07-rbf-value" data-answer="0.368" data-tol="0.01">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">For the RBF kernel $K(\mathbf{x},\mathbf{z}) = \exp(-\gamma\lVert\mathbf{x}-\mathbf{z}\rVert^2)$ with $\gamma = 1$, two points are a Euclidean distance $\lVert\mathbf{x}-\mathbf{z}\rVert = 1$ apart. What similarity score $K$ does the kernel return? (Round to 3 decimals.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">K</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$K = \exp(-1 \times 1^2) = \exp(-1) = 0.368$. Sanity check the extremes: at distance 0 the kernel returns $\exp(0) = 1$ (maximum similarity), and as distance → ∞ it decays toward 0. Cranking $\gamma$ up makes this decay faster, shrinking each support vector's reach and wiggling the boundary.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml07-soft-to-hinge">
+        <div class="ex-head"><span class="badge">Q3</span> Derivation — soft margin becomes hinge + L2</div>
+        <div class="ex-q">Starting from the soft-margin program $\min \tfrac{1}{2}\lVert\mathbf{w}\rVert^2 + C\sum_i \xi_i$ subject to $y_i f(\mathbf{x}_i) \ge 1 - \xi_i$ and $\xi_i \ge 0$, show that it collapses to the unconstrained "hinge loss + L2" objective, and explain what the L2 term is doing geometrically.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">For a <em>fixed</em> $\mathbf{w}, b$, what is the smallest $\xi_i$ that still satisfies both constraints? Solve for the optimal slack pointwise, then substitute it back into the objective.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p>The two constraints say $\xi_i \ge 1 - y_i f(\mathbf{x}_i)$ and $\xi_i \ge 0$. Since the objective <em>increases</em> with each $\xi_i$ (cost $C\,\xi_i$), the optimum makes each slack as small as the constraints allow: $\xi_i^\star = \max\big(0,\, 1 - y_i f(\mathbf{x}_i)\big)$ — exactly the <strong>hinge loss</strong>. Substituting back eliminates the constraints and the slack variables, leaving</p>
+          <div class="math-box">$$\min_{\mathbf{w},b}\ C\sum_i \max\big(0,\,1 - y_i f(\mathbf{x}_i)\big) + \tfrac{1}{2}\lVert\mathbf{w}\rVert^2.$$</div>
+          <p>Geometrically, the $\tfrac{1}{2}\lVert\mathbf{w}\rVert^2$ term is <strong>L2 regularization</strong>, and minimizing it maximizes the margin $1/\lVert\mathbf{w}\rVert$ — it pushes for the widest possible street. The hinge term pays a linear penalty for every point that lands inside the street or on the wrong side, and $C$ sets the exchange rate between "wide margin" and "few violations." That is precisely the bias–variance dial from Lesson 05, expressed in geometry.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Lesson recap</div>
+        <p>The SVM finds the <strong>maximum-margin</strong> hyperplane — the widest empty street between classes — making it robust by construction. Only the <strong>support vectors</strong> (points on the margin) define the boundary; the soft-margin <strong>hinge loss + L2</strong> objective, governed by <strong>$C$</strong>, lets it tolerate overlap. The <strong>kernel trick</strong> swaps inner products for a <strong>similarity function</strong>, giving non-linear boundaries (linear / poly / RBF) for free; <strong>$\gamma$</strong> sets RBF boundary complexity. SVMs shine on <strong>small, high-dimensional, continuous</strong> data (signals, spectra, sonar); trees win on <strong>large, mixed-type</strong> tabular data. Next we leave labeled data behind and let the model find structure on its own: <a href="08-kmeans-pca.html">08 — Unsupervised Learning: k-Means &amp; PCA</a>.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

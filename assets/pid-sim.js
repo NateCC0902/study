@@ -227,7 +227,7 @@
     pid: () => ({
       psi0: 0, fixed: { kp: 2, kd: 3, sp: 90 },
       distFn: (t, o) => (t >= 20 ? 4 : 0),
-      params: [{ key: "ki", label: "ki", min: 0, max: 1.0, step: 0.05, value: 0.2 }]
+      params: [{ key: "ki", label: "ki", min: 0, max: 2.0, step: 0.05, value: 0.2 }]
     }),
     // ch05 — windup: hard 180° turn, integral winds up unless clamped
     windup: () => ({

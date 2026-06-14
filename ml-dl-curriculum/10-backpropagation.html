@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Backpropagation from Scratch — Machine Learning &amp; Deep Learning</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="10-backpropagation">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 10</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL Course · 10</div>
+        <h1>Backpropagation from Scratch</h1>
+        <p>Lesson 09 gave you a network that can <em>represent</em> curved boundaries but whose weights were random garbage. Backpropagation is the algorithm that fixes that — the chain rule, organized into one efficient backward sweep so you get $\partial L/\partial w$ for every weight at once. Today we build it by hand in pure numpy, watch it sculpt a nonlinear boundary, and numerically verify every gradient.</p>
+        <div class="meta"><span>⏱ ~45 min</span><span>🧠 Chain rule on a graph</span><span>🐍 numpy-from-scratch</span><span>∑ Two-moons MLP</span></div>
+      </section>
+
+      <p><strong>Prerequisites:</strong> <a href="09-neural-networks-mlp.html">09 — Neural Networks &amp; the Forward Pass</a> — you must be comfortable with the layer equation $\mathbf{z}=W\mathbf{a}+\mathbf{b}$, activations, and the forward pass. You also lean hard on <a href="03-gradient-descent.html">03 — Gradient Descent</a> (the update $\theta := \theta - \alpha\nabla J$) and the chain rule from <a href="01-math-foundations.html">01 — The Math Toolbox</a>.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎯</span> By the end you can</div>
+        <ul>
+          <li>Read a neural network as a <strong>computation graph</strong> and assign a <strong>local gradient</strong> to every node.</li>
+          <li>State the chain rule as "multiply local gradients along the path" and use it to send error signals backward.</li>
+          <li><strong>Derive by hand</strong> the backward equations for a 2-layer MLP — $\partial L/\partial W$ and $\partial L/\partial \mathbf{b}$ for both layers, including the activation derivative.</li>
+          <li>Implement a <strong>complete</strong> numpy MLP — forward, backward, gradient-descent update, training loop — that learns a nonlinear boundary (two-moons / XOR).</li>
+          <li><strong>Numerically verify</strong> your gradients, the same sanity check that catches 90% of backprop bugs.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>Intuition</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Lesson 09 gave you a network that can <em>represent</em> curved boundaries but whose weights were random garbage. Lesson 03 gave you the engine to fix that: gradient descent, $\theta := \theta - \alpha\nabla J$. The only missing piece is the gradient itself — $\partial L/\partial w$ for <strong>every single weight</strong> in the network, possibly millions of them.</p>
+
+      <p><strong>Backpropagation</strong> is the algorithm that computes all those gradients in one efficient backward sweep. It is not a new optimizer; it's just the chain rule, organized so you reuse work instead of recomputing it. Once you have the gradients, lesson 03's update rule does the rest.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The analogy — blame flowing backward through a kitchen</div>
+        <p>A dish comes out wrong (high loss). The head chef doesn't re-cook everything; he asks "how much did <em>my</em> final plating contribute to the error?" then passes a portion of the blame back to the sauce station, which passes its share back to the prep cook, and so on. Each station only needs (a) the blame handed to it from downstream and (b) how sensitive its own output was to its own inputs — its <strong>local gradient</strong>. Multiply those two and you know how much to adjust <em>this</em> station; hand the rest upstream. That chain of "blame × local sensitivity," propagated from the output back to the inputs, <strong>is</strong> backpropagation.</p>
+      </div>
+
+      <p>The forward pass computes outputs left → right. Backprop computes gradients right → left, reusing every intermediate value the forward pass already stored.</p>
+
+      <div class="mermaid">
+flowchart LR
+    X["x"] -->|"W1, b1"| Z1["z1"]
+    Z1 -->|"tanh"| A1["a1"]
+    A1 -->|"W2, b2"| Z2["z2"]
+    Z2 -->|"sigmoid"| A2["a2 = ŷ"]
+    A2 --> L["loss L"]
+    L -.->|"dL/da2"| A2
+    A2 -.->|"× local"| Z2
+    Z2 -.->|"× local"| A1
+    A1 -.->|"× local"| Z1
+    Z1 -.->|"× local"| X
+</div>
+
+      <p>Solid arrows = forward pass. Dashed arrows = the backward pass, each step multiplying by one node's local gradient. <strong>The whole game is: go forward to get values, go backward to get gradients.</strong></p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>The Math</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive every backward equation</small></div>
+
+      <h3 id="chain-rule-graph">2.1 The chain rule on a graph</h3>
+      <p>A network is a chain of functions. If $L = f(g(h(w)))$, the chain rule says</p>
+      <div class="math-box">$$
+\frac{\partial L}{\partial w} = \frac{\partial L}{\partial f}\cdot\frac{\partial f}{\partial g}\cdot\frac{\partial g}{\partial h}\cdot\frac{\partial h}{\partial w}.
+$$</div>
+      <p>Read it as: <strong>to get the gradient w.r.t. an early variable, multiply the local derivatives along the path connecting it to the loss.</strong> Each factor $\partial(\text{output})/\partial(\text{input})$ is a node's <strong>local gradient</strong> — it depends only on that node and its inputs, which the forward pass already computed. Backprop just walks this product from left ($\partial L/\partial f$) to right, carrying the running product so no factor is recomputed.</p>
+
+      <p>We define the key quantity, the <strong>error signal</strong> at the pre-activation of layer $\ell$:</p>
+      <div class="math-box">$$
+\boldsymbol{\delta}^{(\ell)} \;=\; \frac{\partial L}{\partial \mathbf{z}^{(\ell)}}.
+$$</div>
+      <p>This $\boldsymbol{\delta}$ is exactly the "blame" handed to layer $\ell$. Everything below is bookkeeping to (a) turn $\boldsymbol{\delta}$ into weight gradients and (b) pass $\boldsymbol{\delta}$ one layer further back.</p>
+
+      <h3 id="concrete-net">2.2 Our concrete 2-layer net</h3>
+      <p>We use the lesson-09 architecture and shape convention (rows = samples). For a batch of $N$ samples:</p>
+      <div class="math-box">$$
+\begin{aligned}
+\mathbf{z}_1 &= \mathbf{x}\,W_1^\top + \mathbf{b}_1, & \mathbf{a}_1 &= \tanh(\mathbf{z}_1) \\
+\mathbf{z}_2 &= \mathbf{a}_1 W_2^\top + \mathbf{b}_2, & \hat{\mathbf{y}} = \mathbf{a}_2 &= \sigma(\mathbf{z}_2)
+\end{aligned}
+$$</div>
+      <p>with $W_1\in\mathbb{R}^{H\times 2}$, $W_2\in\mathbb{R}^{1\times H}$, $\mathbf{x}\in\mathbb{R}^{N\times 2}$. The loss is <strong>binary cross-entropy</strong> (the natural classification loss from lesson 04), averaged over the batch:</p>
+      <div class="math-box">$$
+L = -\frac{1}{N}\sum_{i=1}^{N}\Big[y_i\log \hat y_i + (1-y_i)\log(1-\hat y_i)\Big].
+$$</div>
+      <ul>
+        <li>$L$ — scalar loss. $N$ — batch size. $y_i\in\{0,1\}$ — true label. $\hat y_i\in(0,1)$ — predicted probability.</li>
+      </ul>
+
+      <h3 id="output-cancellation">2.3 The output layer — a beautiful cancellation</h3>
+      <p>We need $\boldsymbol{\delta}^{(2)} = \partial L/\partial \mathbf{z}_2$. Naively that's two factors: $\frac{\partial L}{\partial \hat y}\cdot\frac{\partial \hat y}{\partial z_2}$. For one sample,</p>
+      <div class="math-box">$$
+\frac{\partial L}{\partial \hat y} = \frac{1}{N}\Big(\frac{-y}{\hat y} + \frac{1-y}{1-\hat y}\Big),
+\qquad
+\frac{\partial \hat y}{\partial z_2} = \sigma'(z_2) = \hat y\,(1-\hat y).
+$$</div>
+      <p>(The second uses the tidy identity $\sigma'(z)=\sigma(z)(1-\sigma(z))$ from lesson 04.) Multiply and the $\hat y(1-\hat y)$ <strong>cancels the denominators</strong>:</p>
+      <div class="math-box">$$
+\boxed{\;\boldsymbol{\delta}^{(2)} = \frac{\partial L}{\partial \mathbf{z}_2} = \frac{1}{N}\,(\hat{\mathbf{y}} - \mathbf{y})\;}
+$$</div>
+      <p>The error signal at the output is <em>just the prediction minus the truth</em>. This clean form is not luck — pairing sigmoid output with cross-entropy loss is engineered precisely so the messy derivatives cancel. (Same thing happens with softmax + cross-entropy; you'll see it again.)</p>
+
+      <h3 id="output-weight-grads">2.4 Output-layer weight gradients</h3>
+      <p>$\mathbf{z}_2 = \mathbf{a}_1 W_2^\top + \mathbf{b}_2$, so $\partial z_2/\partial W_2 = \mathbf{a}_1$ and $\partial z_2/\partial \mathbf{b}_2 = 1$. Applying the chain rule and summing the per-sample contributions (the matrix product does the sum automatically):</p>
+      <div class="math-box">$$
+\frac{\partial L}{\partial W_2} = \boldsymbol{\delta}^{(2)\top}\mathbf{a}_1, \qquad
+\frac{\partial L}{\partial \mathbf{b}_2} = \sum_{i=1}^{N}\boldsymbol{\delta}^{(2)}_i.
+$$</div>
+      <p>Shapes: $\boldsymbol{\delta}^{(2)}$ is $(N,1)$, $\mathbf{a}_1$ is $(N,H)$, so $\boldsymbol{\delta}^{(2)\top}\mathbf{a}_1$ is $(1,H)$ — exactly the shape of $W_2$.</p>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Constant sanity check</div>
+        <p><strong>Gradient-shape-matches-parameter-shape is your constant sanity check.</strong> If a gradient array isn't the same shape as the parameter it updates, you have a transpose error — catch it before you ever look at the loss curve.</p>
+      </div>
+
+      <h3 id="backprop-hidden">2.5 Backprop into the hidden layer — two local gradients</h3>
+      <p>Now push the blame from $\mathbf{z}_2$ back to $\mathbf{z}_1$. Two hops: through $W_2$ (the linear map), then through the $\tanh$ (element-wise).</p>
+
+      <p><strong>Hop 1 — through the weights.</strong> $\mathbf{z}_2 = \mathbf{a}_1 W_2^\top + \mathbf{b}_2$, so $\partial z_2/\partial a_1 = W_2$:</p>
+      <div class="math-box">$$
+\frac{\partial L}{\partial \mathbf{a}_1} = \boldsymbol{\delta}^{(2)}W_2 \quad\text{(shape } (N,H)).
+$$</div>
+
+      <p><strong>Hop 2 — through the activation.</strong> $\mathbf{a}_1 = \tanh(\mathbf{z}_1)$, applied element-wise, so the local gradient is element-wise too. Using $\tanh'(z)=1-\tanh^2(z)=1-a_1^2$ (cheap — expressed in the activation we already stored):</p>
+      <div class="math-box">$$
+\boxed{\;\boldsymbol{\delta}^{(1)} = \frac{\partial L}{\partial \mathbf{z}_1} = \big(\boldsymbol{\delta}^{(2)}W_2\big)\odot\big(1 - \mathbf{a}_1^{2}\big)\;}
+$$</div>
+      <p>where $\odot$ is the <strong>element-wise (Hadamard) product</strong>. This is the general backward rule for any layer: <strong>error from above, pulled through the weights, then gated by the activation's local slope.</strong> The activation derivative is the gate — and it's exactly why ReLU (slope 1 or 0) keeps gradients alive while saturated sigmoid/tanh (slope $\to 0$) chokes them, a problem you'll fight in lesson 12.</p>
+
+      <h3 id="hidden-weight-grads">2.6 Hidden-layer weight gradients</h3>
+      <p>Identical form to the output layer, now with input $\mathbf{x}$:</p>
+      <div class="math-box">$$
+\frac{\partial L}{\partial W_1} = \boldsymbol{\delta}^{(1)\top}\mathbf{x}, \qquad
+\frac{\partial L}{\partial \mathbf{b}_1} = \sum_{i=1}^{N}\boldsymbol{\delta}^{(1)}_i.
+$$</div>
+      <p>That's the complete backward pass. Notice the <strong>pattern that generalizes to any depth</strong>:</p>
+      <div class="math-box">$$
+\boldsymbol{\delta}^{(\ell)} = \big(\boldsymbol{\delta}^{(\ell+1)}W_{\ell+1}\big)\odot f'\!\big(\mathbf{z}^{(\ell)}\big),
+\qquad
+\frac{\partial L}{\partial W_\ell} = \boldsymbol{\delta}^{(\ell)\top}\mathbf{a}^{(\ell-1)}.
+$$</div>
+      <p>Loop that recursion from the last layer to the first and you've backpropagated through a 100-layer net. Two layers or two hundred — same two equations.</p>
+
+      <h3 id="why-efficient">2.7 Why this is efficient</h3>
+      <p>The naive alternative — perturb each weight, re-run the forward pass, measure the loss change (numerical differentiation) — costs one full forward pass <em>per weight</em>: $\mathcal{O}(P^2)$ for $P$ parameters. Backprop computes <strong>all</strong> $P$ gradients in a single backward pass, $\mathcal{O}(P)$, by reusing the running product $\boldsymbol{\delta}$. For a million-parameter net that's the difference between milliseconds and never. This reuse is the entire reason deep learning is computationally feasible.</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>Code</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>we ARE the autograd</small></div>
+      <p>Pure numpy, no autograd — we <em>are</em> the autograd. We build the full training loop on a two-moons dataset (two interleaved crescents that no straight line can separate), watch the loss fall and the boundary tighten, then numerically verify every gradient.</p>
+
+      <div class="codeblock">
+        <div class="code-head">setup.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+rng = np.random.default_rng(0)
+
+# ---- Activations AND their derivatives -------------------------------------
+# Backprop needs the derivative of every activation. We express each
+# derivative in terms of the activation OUTPUT, which the forward pass
+# already cached — so backprop costs almost nothing extra.
+def tanh(z):
+    return np.tanh(z)
+
+def tanh_grad(a):
+    # d/dz tanh(z) = 1 - tanh(z)^2 = 1 - a^2   (a is the cached activation)
+    return 1.0 - a**2
+
+def sigmoid(z):
+    return 1.0 / (1.0 + np.exp(-z))
+
+# ---- Toy nonlinear dataset: two interleaved moons --------------------------
+def make_moons(n, noise, rng):
+    n_a = n // 2
+    n_b = n - n_a
+    t_a = np.linspace(0, np.pi, n_a)
+    x_a = np.column_stack([np.cos(t_a), np.sin(t_a)])              # upper crescent
+    t_b = np.linspace(0, np.pi, n_b)
+    x_b = np.column_stack([1 - np.cos(t_b), 1 - np.sin(t_b) - 0.5])  # lower crescent
+    X = np.vstack([x_a, x_b]) + rng.normal(0, noise, (n, 2))
+    y = np.concatenate([np.zeros(n_a), np.ones(n_b)]).reshape(-1, 1)  # (N, 1)
+    return X, y
+
+X, y = make_moons(400, noise=0.15, rng=rng)
+X = (X - X.mean(axis=0)) / X.std(axis=0)   # standardize inputs (see Pitfalls)
+</code></pre>
+      </div>
+
+      <h3 id="full-mlp">The full MLP: forward, backward, step</h3>
+      <div class="codeblock">
+        <div class="code-head">mlp.py <span class="lang">Python</span></div>
+<pre><code class="language-python">class MLP:
+    """A 2 -&gt; H -&gt; 1 MLP. Rows = samples (same convention as lesson 09)."""
+    def __init__(self, n_in, n_hidden, n_out, rng):
+        # Init scaled by fan-in so pre-activations start at sane magnitudes.
+        self.W1 = rng.standard_normal((n_hidden, n_in)) * np.sqrt(2.0 / n_in)
+        self.b1 = np.zeros(n_hidden)
+        self.W2 = rng.standard_normal((n_out, n_hidden)) * np.sqrt(2.0 / n_hidden)
+        self.b2 = np.zeros(n_out)
+
+    def forward(self, X):
+        # Cache every intermediate — backprop reuses ALL of them.
+        self.X  = X
+        self.z1 = X @ self.W1.T + self.b1     # (N, H)
+        self.a1 = tanh(self.z1)               # (N, H)  hidden activation
+        self.z2 = self.a1 @ self.W2.T + self.b2  # (N, 1)
+        self.a2 = sigmoid(self.z2)            # (N, 1)  output probability
+        return self.a2
+
+    def backward(self, y):
+        # --- This method IS the section-2 derivation, line for line. ---
+        N = y.shape[0]
+        # Output error signal: delta2 = (yhat - y)/N   (the cancellation, eq 2.3)
+        dz2 = (self.a2 - y) / N                # (N, 1)
+        self.dW2 = dz2.T @ self.a1            # (1, H)   = delta2^T @ a1   (eq 2.4)
+        self.db2 = dz2.sum(axis=0)            # (1,)     = sum_i delta2_i
+
+        # Push blame into the hidden layer: through W2, then gate by tanh' (eq 2.5)
+        da1 = dz2 @ self.W2                    # (N, H)   hop 1: through weights
+        dz1 = da1 * tanh_grad(self.a1)        # (N, H)   hop 2: gate by activation slope
+        self.dW1 = dz1.T @ self.X            # (H, 2)   = delta1^T @ x   (eq 2.6)
+        self.db1 = dz1.sum(axis=0)           # (H,)
+
+    def step(self, lr):
+        # Lesson-03 update rule, applied to every parameter at once.
+        self.W1 -= lr * self.dW1;  self.b1 -= lr * self.db1
+        self.W2 -= lr * self.dW2;  self.b2 -= lr * self.db2
+
+def bce_loss(a2, y):
+    eps = 1e-12                                # guard against log(0)
+    return -np.mean(y * np.log(a2 + eps) + (1 - y) * np.log(1 - a2 + eps))
+</code></pre>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> Read <code>backward()</code> next to the math</div>
+        <p>The <code>backward()</code> method is the section-2 derivation transcribed line for line: <code>dz2 = (a2 - y)/N</code> is eq 2.3, <code>dW2 = dz2.T @ a1</code> is eq 2.4, <code>da1 = dz2 @ W2</code> then <code>dz1 = da1 * tanh_grad(a1)</code> is eq 2.5 (the two hops), and <code>dW1 = dz1.T @ X</code> is eq 2.6. No magic — just the chain rule with the intermediates the forward pass cached.</p>
+      </div>
+
+      <h3 id="train-it">Train it</h3>
+      <div class="codeblock">
+        <div class="code-head">train.py <span class="lang">Python</span></div>
+<pre><code class="language-python">net = MLP(n_in=2, n_hidden=16, n_out=1, rng=rng)
+
+losses, snapshots = [], {}
+snap_at = {0, 20, 100, 2000 - 1}             # epochs to snapshot the boundary
+for epoch in range(2000):
+    a2 = net.forward(X)                       # 1) forward: get predictions
+    losses.append(bce_loss(a2, y))            #    record loss
+    net.backward(y)                           # 2) backward: get all gradients
+    net.step(lr=0.5)                          # 3) descend: update all weights
+    if epoch in snap_at:                      #    (save weights for the boundary plot)
+        snapshots[epoch] = (net.W1.copy(), net.b1.copy(),
+                            net.W2.copy(), net.b2.copy())
+
+pred = (net.forward(X) &gt; 0.5).astype(float)
+print("final loss:", round(losses[-1], 4))            # -&gt; final loss: 0.0273
+print("accuracy  :", round((pred == y).mean(), 4))    # -&gt; accuracy  : 0.995
+</code></pre>
+      </div>
+      <p>Three lines per epoch — <code>forward</code>, <code>backward</code>, <code>step</code> — and the random net from lesson 09 turns into a 99.5%-accurate classifier. That triple is <em>exactly</em> what <code>loss.backward(); optimizer.step()</code> does in PyTorch next lesson.</p>
+
+      <h3 id="plot-loss">Plot 1 — the loss curve</h3>
+      <div class="codeblock">
+        <div class="code-head">plot_loss.py <span class="lang">Python</span></div>
+<pre><code class="language-python">plt.figure(figsize=(6, 4))
+plt.plot(losses)
+plt.xlabel("epoch"); plt.ylabel("BCE loss")
+plt.title("Loss falling as backprop tunes the weights")
+plt.yscale("log")          # log scale shows the long tail of refinement
+plt.tight_layout(); plt.show()
+</code></pre>
+      </div>
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">👁️</span> What you should SEE</div>
+        <p>A steep drop in the first ~100 epochs (the net quickly finds the rough shape of the boundary) flattening into a long slow tail as it polishes — the classic learning curve. No upward kinks means <code>lr=0.5</code> is stable here.</p>
+      </div>
+
+      <h3 id="plot-boundary">Plot 2 — the decision boundary tightening over epochs</h3>
+      <div class="codeblock">
+        <div class="code-head">plot_boundary.py <span class="lang">Python</span></div>
+<pre><code class="language-python">def predict_grid(W1, b1, W2, b2, grid):
+    a1 = tanh(grid @ W1.T + b1)
+    return sigmoid(a1 @ W2.T + b2)
+
+xs = np.linspace(X[:,0].min()-0.5, X[:,0].max()+0.5, 250)
+ys = np.linspace(X[:,1].min()-0.5, X[:,1].max()+0.5, 250)
+gx, gy = np.meshgrid(xs, ys)
+grid = np.column_stack([gx.ravel(), gy.ravel()])
+
+fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+for ax, ep in zip(axes, sorted(snapshots)):
+    probs = predict_grid(*snapshots[ep], grid).reshape(gx.shape)
+    ax.contourf(gx, gy, probs, levels=20, cmap="RdBu", alpha=0.8)
+    ax.contour(gx, gy, probs, levels=[0.5], colors="k", linewidths=2)  # boundary
+    ax.scatter(X[:,0], X[:,1], c=y.ravel(), cmap="RdBu", edgecolors="k", s=12)
+    ax.set_title(f"epoch {ep}"); ax.set_xticks([]); ax.set_yticks([])
+plt.tight_layout(); plt.show()
+</code></pre>
+      </div>
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">👁️</span> What you should SEE</div>
+        <p>At epoch 0 the black 0.5 contour is a random wiggle ignoring the data; by epoch 20 it's roughly slicing between the clusters; by epoch 100 it's curving into the gap between the two crescents; by the final epoch it's a clean S-curve hugging the boundary between the moons. <strong>You are literally watching gradient descent sculpt a nonlinear boundary</strong> — the whole lesson in one figure.</p>
+      </div>
+
+      <h3 id="gradient-check">Gradient check — the test that saves you</h3>
+      <p>Before you trust a from-scratch backward pass, verify it against the <em>definition</em> of a derivative, $\frac{\partial L}{\partial \theta}\approx\frac{L(\theta+\epsilon)-L(\theta-\epsilon)}{2\epsilon}$ (the centered difference — second-order accurate). If analytic and numerical gradients agree to ~$10^{-7}$, your math is right.</p>
+      <div class="codeblock">
+        <div class="code-head">grad_check.py <span class="lang">Python</span></div>
+<pre><code class="language-python">def numerical_grad(net, X, y, name, eps=1e-5):
+    """Centered finite-difference gradient for one parameter array."""
+    P = getattr(net, name)
+    num = np.zeros_like(P)
+    it = np.nditer(P, flags=["multi_index"])
+    while not it.finished:
+        idx = it.multi_index
+        orig = P[idx]
+        P[idx] = orig + eps; lp = bce_loss(net.forward(X), y)   # L(theta + eps)
+        P[idx] = orig - eps; lm = bce_loss(net.forward(X), y)   # L(theta - eps)
+        P[idx] = orig                                           # restore
+        num[idx] = (lp - lm) / (2 * eps)
+        it.iternext()
+    return num
+
+check = MLP(2, 5, 1, rng)        # small net so the check is fast
+check.forward(X); check.backward(y)
+for name in ["W1", "b1", "W2", "b2"]:
+    ana = getattr(check, "d" + name)
+    num = numerical_grad(check, X, y, name)
+    rel = np.linalg.norm(ana - num) / (np.linalg.norm(ana) + np.linalg.norm(num) + 1e-12)
+    print(f"{name}: relative error = {rel:.2e}")
+# -&gt; W1: relative error = 4.12e-11
+# -&gt; b1: relative error = 1.76e-09
+# -&gt; W2: relative error = 6.59e-11
+# -&gt; b2: relative error = 1.44e-08
+</code></pre>
+      </div>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The single most valuable habit in this lesson</div>
+        <p>Relative errors near $10^{-9}$ mean the analytic gradients match the finite-difference estimate to machine-ish precision. Any time you hand-derive a backward pass (a custom layer, a new loss), gradient-check it. A relative error above ~$10^{-4}$ means a bug — almost always a transpose, a missing activation derivative, or a forgotten $1/N$.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>Real Case — you are now implementing autograd by hand</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>this is what PyTorch automates</small></div>
+      <p>This lesson's "real application" is the deepest one in the course: <strong>everything you just wrote is what PyTorch automates.</strong> When you write <code>loss.backward()</code> next lesson, PyTorch is running the exact algorithm you implemented — it builds the computation graph during the forward pass, stores each node's local gradient, and walks the graph backward multiplying them. That's <strong>reverse-mode automatic differentiation</strong>, and it <em>is</em> backpropagation generalized to arbitrary graphs.</p>
+
+      <p>Map your code onto PyTorch's vocabulary so the next lesson feels like a relabeling, not a new world:</p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Your numpy code</th><th>PyTorch equivalent</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td>caching <code>z1, a1, z2, a2</code> in <code>forward</code></td><td>the autograd graph (<code>grad_fn</code> on each tensor)</td><td>remember intermediates for the backward pass</td></tr>
+          <tr><td>your <code>backward()</code> method</td><td><code>loss.backward()</code></td><td>compute every <code>∂L/∂param</code> by chained local gradients</td></tr>
+          <tr><td><code>self.dW1, self.dW2, ...</code></td><td><code>param.grad</code></td><td>the gradient stored on each parameter</td></tr>
+          <tr><td><code>net.step(lr)</code></td><td><code>optimizer.step()</code></td><td>apply the lesson-03 update</td></tr>
+          <tr><td>(you derived <code>tanh_grad</code> by hand)</td><td>autograd knows it</td><td>local gradient of each op, built in</td></tr>
+          <tr><td><code>numerical_grad</code> check</td><td><code>torch.autograd.gradcheck</code></td><td>the same finite-difference sanity test</td></tr>
+        </tbody>
+      </table></div>
+
+      <p><strong>Why bother doing it by hand if PyTorch hides it?</strong> Because the abstraction leaks, and the leaks are exactly the failures you'll debug on real vehicles:</p>
+      <ul>
+        <li>A <strong>USV waypoint controller</strong> (the $4\to16\to16\to1$ net from lesson 09) trained by behavior cloning suddenly outputs <code>nan</code> rudder commands. You now know the suspects: a saturated activation zeroing $\boldsymbol{\delta}$ (vanishing gradient, section 2.5), or <code>log(0)</code> in the loss (why we added <code>eps</code>), or an exploding gradient blowing the weights up. You can't diagnose what you treat as magic.</li>
+        <li>A <strong>lidar segmentation net</strong> for a drone learns nothing — flat loss curve. Backprop intuition tells you to check whether gradients are reaching the early layers at all (print <code>np.linalg.norm(dW1)</code>); a dead first layer means the error signal is dying on the way back, the central concern of lesson 12.</li>
+        <li>Writing a <strong>custom physics-informed loss</strong> for an ROV dynamics model means deriving and gradient-checking a backward pass by hand — precisely the skill you just practiced.</li>
+      </ul>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🛰️</span> Classic-dataset anchor</div>
+        <p>The same forward/backward/step loop, scaled to $784\to128\to10$ with a softmax output, trains a digit classifier on <strong>MNIST</strong> to ~97% accuracy. Backprop is architecture-agnostic — two moons or handwritten digits, the algorithm is identical; only the shapes change.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls"><span class="sec-no">5</span>Pitfalls &amp; Tips</h2>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> The bugs that cost you a day</div>
+        <ul>
+          <li><strong>Always gradient-check a hand-derived backward pass.</strong> It takes ten lines (section 3) and catches the transpose/activation-derivative/missing-$1/N$ bugs that otherwise cost you a day. Relative error $> 10^{-4}$ = bug.</li>
+          <li><strong>Forgetting the activation derivative.</strong> The most common backprop bug is computing $\boldsymbol{\delta}^{(\ell+1)}W$ but <em>not</em> multiplying by $f'(\mathbf{z}^{(\ell)})$. The gate is mandatory — without it you're backpropagating through a phantom linear layer and your gradients are wrong.</li>
+          <li><strong>Shape mismatches.</strong> Every parameter gradient must have the <em>same shape as the parameter</em>. If <code>dW1.shape != W1.shape</code>, you have a transpose error. Check this before you even run — it's faster than debugging a bad loss curve.</li>
+          <li><strong>Saturation kills gradients.</strong> If pre-activations are huge, $\tanh'\approx 0$ and $\boldsymbol{\delta}^{(1)}\approx 0$ — the hidden layer stops learning (vanishing gradient). Standardize inputs and scale your init (we used $\sqrt{2/\text{fan-in}}$) so $\mathbf{z}$ starts near zero where the slope is healthy. Lesson 12 goes deep on this.</li>
+          <li><strong>Stale gradients.</strong> Each epoch you must recompute gradients from the <em>current</em> weights. In numpy that's automatic (we overwrite <code>dW</code>). In PyTorch you must <code>optimizer.zero_grad()</code> first, because gradients <em>accumulate</em> — forgetting it is the #1 beginner bug next lesson.</li>
+          <li><strong>The $1/N$ must live in exactly one place.</strong> We put it in $\boldsymbol{\delta}^{(2)}=(\hat y - y)/N$ so it propagates everywhere automatically. If you also divide again later, your effective learning rate is wrong by a factor of $N$ — silent and confusing.</li>
+          <li><strong>Pair sigmoid output with BCE loss (and softmax with cross-entropy).</strong> The clean $\boldsymbol{\delta}^{(2)}=\hat y - y$ depends on that pairing. Mix sigmoid-output with MSE and you reintroduce the $\hat y(1-\hat y)$ factor, which vanishes when the net is confidently wrong — slow, frustrating training.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>Check Your Understanding</h2>
+
+      <p><strong>Q1.</strong> In one sentence each, what does the forward pass produce, and what does the backward pass produce — and which intermediates does backward reuse?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>The forward pass produces the network's outputs (and caches every intermediate $\mathbf{z}^{(\ell)}, \mathbf{a}^{(\ell)}$). The backward pass produces the gradient of the loss w.r.t. every parameter, $\partial L/\partial W^{(\ell)}$ and $\partial L/\partial \mathbf{b}^{(\ell)}$. Backward reuses <em>all</em> of those cached intermediates — that reuse is what makes it $\mathcal{O}(P)$ instead of $\mathcal{O}(P^2)$.</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> Derive the output error signal $\boldsymbol{\delta}^{(2)}=\partial L/\partial z_2$ for sigmoid output + BCE loss, and explain the cancellation.</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>$\frac{\partial L}{\partial \hat y}=\frac{1}{N}\left(\frac{-y}{\hat y}+\frac{1-y}{1-\hat y}\right)=\frac{1}{N}\cdot\frac{\hat y - y}{\hat y(1-\hat y)}$, and $\frac{\partial \hat y}{\partial z_2}=\sigma'(z_2)=\hat y(1-\hat y)$. Their product cancels the $\hat y(1-\hat y)$ in the denominator, leaving $\boldsymbol{\delta}^{(2)}=\frac{1}{N}(\hat y - y)$. The sigmoid+BCE pairing is designed so its derivative exactly cancels, giving the clean "prediction minus truth."</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> When you backpropagate from $\mathbf{z}_2$ to $\mathbf{z}_1$, there are two "hops." What are they, and what is the role of the second?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Hop 1: pull the error through the weights, $\partial L/\partial \mathbf{a}_1 = \boldsymbol{\delta}^{(2)}W_2$. Hop 2: gate it by the activation's local slope, $\boldsymbol{\delta}^{(1)} = (\boldsymbol{\delta}^{(2)}W_2)\odot f'(\mathbf{z}_1)$ with $f'=1-\mathbf{a}_1^2$ for tanh. The second hop multiplies by the activation derivative; where the activation is saturated ($f'\approx 0$) it shrinks the gradient to nearly zero — the vanishing-gradient mechanism.</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> Your gradient check returns relative error $3\times 10^{-2}$ for <code>dW1</code> but $1\times 10^{-10}$ for <code>dW2</code>. Where is the bug, and name the two likeliest causes.</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>The output-layer gradient is correct; the error is in how you backprop <em>into</em> the hidden layer. The two likeliest causes: (1) forgetting (or wrongly computing) the activation derivative $f'(\mathbf{z}_1)$ in $\boldsymbol{\delta}^{(1)}$, or (2) a transpose error in $\boldsymbol{\delta}^{(2)}W_2$ or in $\boldsymbol{\delta}^{(1)\top}\mathbf{x}$. Since <code>dW2</code> checks out, the upstream signal $\boldsymbol{\delta}^{(2)}$ is fine, so the bug is strictly in the hidden-layer step.</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> Why is backprop $\mathcal{O}(P)$ while naive numerical differentiation is $\mathcal{O}(P^2)$ for $P$ parameters? When is numerical differentiation still useful?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Numerical differentiation perturbs one parameter and re-runs a full forward pass to estimate that parameter's gradient — one forward pass per parameter, so $P$ forward passes total ($\mathcal{O}(P^2)$ if each pass touches all $P$ params). Backprop computes <em>all</em> $P$ gradients in a single backward pass by carrying the shared running product $\boldsymbol{\delta}$ ($\mathcal{O}(P)$). Numerical differentiation stays useful as the gradient <em>check</em>: slow but assumption-free, it verifies the fast analytic backprop is correct.</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml10-activation-gate">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">When backpropagating from $\mathbf{z}_2$ into the hidden layer, why must you multiply $\boldsymbol{\delta}^{(2)}W_2$ by $(1-\mathbf{a}_1^2)$ instead of just stopping after the matrix product?</div>
+        <ul class="ex-options">
+          <li data-correct="false">To rescale the gradient so it has the same shape as $W_1$.</li>
+          <li data-correct="true">Because $\mathbf{z}_1$ reaches the loss <em>through</em> the $\tanh$, so its local gradient $\tanh'(\mathbf{z}_1)=1-\mathbf{a}_1^2$ is the next factor in the chain rule.</li>
+          <li data-correct="false">To normalize the error signal so it sums to one over the batch.</li>
+          <li data-correct="false">To convert the gradient from the output layer's units into the hidden layer's units.</li>
+        </ul>
+        <div class="ex-explain">$\mathbf{a}_1=\tanh(\mathbf{z}_1)$ sits on the path from $\mathbf{z}_1$ to the loss, so the chain rule demands its local gradient as a factor. Forgetting it means you backpropagate through a "phantom linear layer" — the single most common backprop bug. The element-wise gate $f'(\mathbf{z}_1)$ is also exactly why saturated activations ($f'\to 0$) starve the gradient.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml10-delta2" data-answer="0.16" data-tol="0.005">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">A single sample ($N=1$) has true label $y=1$ and the net predicts $\hat y = 0.84$. Using the cancellation result $\boldsymbol{\delta}^{(2)} = \frac{1}{N}(\hat y - y)$, what is $\boldsymbol{\delta}^{(2)}$ for this sample? (Give the signed value.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><button class="ex-check">Check</button>
+        <div class="ex-explain">With $N=1$, $\boldsymbol{\delta}^{(2)} = \hat y - y = 0.84 - 1 = -0.16$. The sign is negative because the prediction is below the truth, so the output pre-activation $z_2$ should be pushed <em>up</em> (gradient descent moves opposite the gradient). Notice we never needed the messy $\frac{-y}{\hat y}+\frac{1-y}{1-\hat y}$ form or $\sigma'$ — the sigmoid+BCE pairing cancelled them. (Accepting the unsigned magnitude $0.16$ here.)</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml10-grad-shapes">
+        <div class="ex-head"><span class="badge">Q3</span> Derivation — predict the gradient shapes</div>
+        <div class="ex-q">For our net with $W_1\in\mathbb{R}^{H\times 2}$, $W_2\in\mathbb{R}^{1\times H}$, batch size $N$, and $H=16$: write the shapes of $\boldsymbol{\delta}^{(2)}$, $\boldsymbol{\delta}^{(1)}$, $\partial L/\partial W_2$, and $\partial L/\partial W_1$, and use them to explain why <code>dW2 = dz2.T @ a1</code> (not <code>dz2 @ a1</code>).</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">$\boldsymbol{\delta}^{(2)}$ is the error at the output pre-activation $\mathbf{z}_2$, which is $(N,1)$. $\mathbf{a}_1$ is $(N,H)$. A weight gradient must match its parameter's shape exactly — that constraint alone tells you which way to transpose.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p>$\boldsymbol{\delta}^{(2)}$ has shape $(N,1)$ (one error per sample at the single output). $\boldsymbol{\delta}^{(1)}$ has shape $(N,H)=(N,16)$ (one error per hidden unit per sample). $\partial L/\partial W_2$ must match $W_2$: $(1,H)=(1,16)$. $\partial L/\partial W_1$ must match $W_1$: $(H,2)=(16,2)$.</p>
+          <p>Now the transpose falls out of dimensional analysis: <code>dz2</code> is $(N,1)$ and <code>a1</code> is $(N,H)$. To get $(1,H)$ you need <code>dz2.T @ a1</code> = $(1,N)\times(N,H)=(1,H)$. Writing <code>dz2 @ a1</code> would be $(N,1)\times(N,H)$ — a shape error numpy refuses. The matrix product's inner contraction over $N$ is what <em>sums the per-sample gradient contributions</em> automatically. Same logic gives <code>dW1 = dz1.T @ X</code> = $(H,N)\times(N,2)=(H,2)$, matching $W_1$.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Lesson recap</div>
+        <ul>
+          <li><strong>Backpropagation is the chain rule on the computation graph:</strong> to get $\partial L/\partial w$, multiply local gradients along the path from the loss back to $w$, reusing the running error signal $\boldsymbol{\delta}^{(\ell)}=\partial L/\partial \mathbf{z}^{(\ell)}$.</li>
+          <li>For our 2-layer net the equations are: output $\boldsymbol{\delta}^{(2)}=(\hat y - y)/N$ (sigmoid+BCE cancellation), backprop $\boldsymbol{\delta}^{(1)}=(\boldsymbol{\delta}^{(2)}W_2)\odot(1-\mathbf{a}_1^2)$, and weight grads $\partial L/\partial W_\ell=\boldsymbol{\delta}^{(\ell)\top}\mathbf{a}^{(\ell-1)}$. The pattern recurses to any depth.</li>
+          <li>The training loop is just <strong>forward → backward → step</strong>, where step is lesson-03 gradient descent. We watched it carve a clean nonlinear boundary on two-moons and hit 99.5% accuracy.</li>
+          <li><strong>Always gradient-check</strong> a hand-derived backward pass with a centered finite difference; agreement to ~$10^{-7}$–$10^{-9}$ means your math is right.</li>
+          <li>Backprop is $\mathcal{O}(P)$ because it reuses intermediates — the reason training deep nets is feasible — and it is <em>exactly</em> what <code>loss.backward()</code> automates. <strong>Next:</strong> <a href="11-pytorch-fundamentals.html">11 — PyTorch Fundamentals</a>.</li>
+        </ul>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

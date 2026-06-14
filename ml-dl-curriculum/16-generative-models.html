@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Generative Models: Autoencoders, VAEs, GANs &amp; Diffusion — Machine Learning &amp; Deep Learning</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="16-generative-models">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 16</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL Course · 16</div>
+        <h1>Generative Models: Autoencoders, VAEs, GANs &amp; Diffusion</h1>
+        <p>Every classifier you've built draws boundaries — it tells a rock from a fish but can't <em>paint you a new rock</em>. Generative models learn the data distribution itself, so they can create, compress, and score. We build an autoencoder in code for your ROV anomaly detector, then climb the ladder through VAEs, GANs, and diffusion.</p>
+        <div class="meta"><span>⏱ ~40 min</span><span>🧠 Latent spaces</span><span>🔥 PyTorch</span><span>🤖 ROV anomaly detection</span></div>
+      </section>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Part 5 · Lesson 16 · Code stack: PyTorch</div>
+        <p><strong>Prerequisites:</strong> <a href="15-attention-transformers.html">15 — Attention &amp; Transformers</a> · you'll also lean on <a href="13-cnns.html">13 — Convolutional Neural Networks</a> for the conv layers and <a href="08-kmeans-pca.html">08 — Unsupervised Learning: k-Means &amp; PCA</a> for the idea of a compressed <strong>latent space</strong>.</p>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎯</span> By the end you can</div>
+        <ul>
+          <li>Explain the difference between a <strong>discriminative</strong> model (draws boundaries) and a <strong>generative</strong> model (learns the data distribution so it can <em>create</em>).</li>
+          <li>Build and train an <strong>autoencoder</strong> in PyTorch, and use its <strong>reconstruction error</strong> for compression and anomaly detection.</li>
+          <li>Explain a <strong>VAE</strong> — the probabilistic latent space, the <strong>reparameterization trick</strong>, and the <strong>ELBO = reconstruction + KL</strong> — at the intuition level.</li>
+          <li>Describe the <strong>GAN</strong> minimax game and why <strong>mode collapse</strong> happens.</li>
+          <li>Explain <strong>diffusion</strong> (add noise, learn to undo it) conceptually — the engine behind modern image generators.</li>
+          <li>Map all of this onto a real ROV problem: flag anomalous sensor streams and synthesize training data.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>Intuition</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>critics versus forgers</small></div>
+      <p>Every model you've built so far is <strong>discriminative</strong>: given an input $x$, predict a label $y$. Logistic regression, the SVM, the CNN classifier — they all learn $p(y \mid x)$, a <em>boundary</em> that sorts inputs into bins. They can tell a sonar return labeled "rock" from one labeled "fish", but they cannot <em>draw you a new rock</em>.</p>
+
+      <p>A <strong>generative model</strong> learns the data itself — the distribution $p(x)$ (or $p(x \mid y)$). Once a model knows what real data <em>looks like</em>, it can do three things a classifier can't:</p>
+      <ol>
+        <li><strong>Generate</strong> brand-new samples that look like the training data (synthetic sonar frames, fake-but-realistic camera images).</li>
+        <li><strong>Compress</strong> data into a tiny <strong>latent code</strong> and rebuild it (lossy compression, denoising).</li>
+        <li><strong>Score</strong> how "normal" a new input is — anything the model rebuilds <em>badly</em> is <strong>anomalous</strong>.</li>
+      </ol>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> Analogy — the art forger</div>
+        <p>A discriminative model is an art <em>critic</em>: shown a painting, it says "Monet" or "not Monet." A generative model is a <em>forger</em>: it has stared at so many Monets that it can paint a new one from scratch. The forger had to learn far more than the critic — not just the boundary between Monet and non-Monet, but the entire <em>style</em> that fills the Monet region. That's why generation is harder, and why the same model that can forge can also spot a fake (it knows what real looks like, so a bad reconstruction stands out).</p>
+      </div>
+
+      <p>This lesson walks a ladder of generative models, each fixing a limitation of the last:</p>
+
+      <div class="mermaid">
+graph TD
+    AE["Autoencoder&lt;br/&gt;compress &amp; rebuild&lt;br/&gt;(deterministic latent)"] --> VAE["VAE&lt;br/&gt;probabilistic latent&lt;br/&gt;→ can sample new data"]
+    VAE --> GAN["GAN&lt;br/&gt;adversarial game&lt;br/&gt;→ sharp samples"]
+    GAN --> DIFF["Diffusion&lt;br/&gt;denoise step by step&lt;br/&gt;→ SOTA images"]
+    AE -. "reconstruction error" .-> ANOM["Anomaly detection"]
+</div>
+
+      <p>We'll <strong>build</strong> the autoencoder in code (it's the workhorse for your ROV anomaly use-case), then climb the conceptual ladder through VAE → GAN → diffusion, keeping the math at intuition level.</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>The Math</h2>
+
+      <h3 id="autoencoder-math">2.1 Autoencoder — squeeze then rebuild</h3>
+
+      <div class="layer"><span class="step">②</span> Math <small>encoder, bottleneck, decoder</small></div>
+      <p>An <strong>autoencoder</strong> is two networks glued at a narrow waist. An <strong>encoder</strong> $f_\phi$ maps input $x$ to a low-dimensional <strong>latent code</strong> $z$; a <strong>decoder</strong> $g_\theta$ maps $z$ back to a reconstruction $\hat{x}$:</p>
+
+      <div class="math-box">$$
+z = f_\phi(x), \qquad \hat{x} = g_\theta(z), \qquad z \in \mathbb{R}^d,\; d \ll \dim(x)
+$$</div>
+
+      <ul>
+        <li>$x$ — input vector (e.g. a flattened $28\times28 = 784$-pixel image).</li>
+        <li>$z$ — the <strong>bottleneck</strong> / latent code; $d$ is the <strong>latent dimension</strong> (e.g. 16). Forcing $d \ll \dim(x)$ is what makes the model <em>learn</em> rather than copy.</li>
+        <li>$\phi, \theta$ — encoder and decoder weights.</li>
+        <li>$\hat{x}$ — the rebuilt input.</li>
+      </ul>
+
+      <p>Train it to make $\hat{x}$ match $x$. The <strong>reconstruction loss</strong> is just mean squared error (where it comes from: it's the per-pixel squared distance, the same MSE from <a href="02-linear-regression.html">02 — Linear Regression</a>):</p>
+
+      <div class="math-box">$$
+\mathcal{L}_{\text{recon}} = \frac{1}{N}\sum_{i=1}^{N}\lVert x_i - g_\theta(f_\phi(x_i)) \rVert^2
+$$</div>
+
+      <p>The narrow bottleneck is the whole trick: the network <em>cannot</em> memorize, so it must discover the few directions of variation that actually matter. This is a <strong>non-linear PCA</strong> — recall PCA from lesson 08 finds the best <em>linear</em> subspace; an autoencoder with non-linear layers finds the best <em>curved</em> one.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Reconstruction error as an anomaly score</div>
+        <p>Train only on <em>normal</em> data. For a new sample $x$, the per-sample error</p>
+        <div class="math-box">$$
+e(x) = \lVert x - g_\theta(f_\phi(x)) \rVert^2
+$$</div>
+        <p>is small for inputs resembling training data and large for anything off-distribution — because the decoder was never taught to rebuild it. Threshold $e(x)$ and you have an unsupervised anomaly detector.</p>
+      </div>
+
+      <h3 id="vae-math">2.2 VAE — make the latent space a probability distribution</h3>
+
+      <p>A plain autoencoder's latent space is full of holes: pick a random $z$ and the decoder usually produces garbage, because nothing forced the codes to be <em>organized</em>. A <strong>Variational Autoencoder (VAE)</strong> fixes this by making the encoder output a <strong>distribution</strong>, not a point.</p>
+
+      <p>The encoder emits a mean $\mu$ and a (log-)variance for a Gaussian; we sample $z$ from it:</p>
+
+      <div class="math-box">$$
+z \sim \mathcal{N}(\mu_\phi(x),\, \sigma_\phi(x)^2)
+$$</div>
+
+      <ul>
+        <li>$\mu_\phi(x), \sigma_\phi(x)$ — the encoder's predicted mean and standard deviation for input $x$.</li>
+      </ul>
+
+      <p>We then push the encoder to keep these per-input Gaussians close to a standard normal $\mathcal{N}(0, I)$, so the latent space is smooth and <em>samplable</em>. The training objective is the <strong>ELBO</strong> (Evidence Lower BOund), which decomposes into two readable terms:</p>
+
+      <div class="math-box">$$
+\mathcal{L}_{\text{VAE}} = \underbrace{\mathbb{E}_{z}\big[\lVert x - g_\theta(z)\rVert^2\big]}_{\text{reconstruction: rebuild } x}
+\;+\; \underbrace{\beta \cdot D_{\text{KL}}\!\big(\mathcal{N}(\mu,\sigma^2)\,\Vert\,\mathcal{N}(0, I)\big)}_{\text{KL: keep latent organized}}
+$$</div>
+
+      <ul>
+        <li>$D_{\text{KL}}(\cdot\Vert\cdot)$ — <strong>KL divergence</strong>, a measure of how far one distribution is from another (here: how far the encoder's Gaussian is from a standard normal). It's a <em>regularizer</em> on the latent space.</li>
+        <li>$\beta$ — a knob (1 in the original VAE) trading reconstruction sharpness against latent regularity. Where it comes from: it's the Lagrange-style weight in the $\beta$-VAE variant.</li>
+      </ul>
+
+      <p>Intuition for the two terms: reconstruction says "be able to rebuild the data"; KL says "but pack all the codes into a tidy unit blob so I can sample from it." The tension between them is what makes a VAE <em>generative</em> — after training, sample $z \sim \mathcal{N}(0,I)$, decode, and you get a plausible new $x$.</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> The reparameterization trick</div>
+        <p>You can't backprop through a random <code>sample()</code> — the randomness has no gradient. Rewrite the sample as a deterministic function of the parameters plus <em>external</em> noise:</p>
+        <div class="math-box">$$
+z = \mu + \sigma \odot \varepsilon, \qquad \varepsilon \sim \mathcal{N}(0, I)
+$$</div>
+        <p>$\varepsilon$ — noise drawn <em>outside</em> the network; $\odot$ is element-wise product. Now $z$ is a smooth function of $\mu$ and $\sigma$, gradients flow straight through, and the randomness sits in $\varepsilon$ which needs no gradient. This one algebraic move is what makes VAEs trainable by ordinary backprop.</p>
+      </div>
+
+      <h3 id="gan-math">2.3 GAN — two networks at war</h3>
+
+      <p>A <strong>Generative Adversarial Network (GAN)</strong> ditches reconstruction entirely. Two networks play a game:</p>
+      <ul>
+        <li>A <strong>generator</strong> $G$ turns noise $z \sim \mathcal{N}(0,I)$ into a fake sample $G(z)$.</li>
+        <li>A <strong>discriminator</strong> $D$ takes a sample and outputs the probability it's <em>real</em> (from data) vs <em>fake</em> (from $G$).</li>
+      </ul>
+
+      <p>They optimize opposite objectives — a <strong>minimax</strong> game:</p>
+
+      <div class="math-box">$$
+\min_G \max_D \; \mathbb{E}_{x \sim \text{data}}[\log D(x)] + \mathbb{E}_{z}[\log(1 - D(G(z)))]
+$$</div>
+
+      <ul>
+        <li>First term: $D$ wants $D(x) \to 1$ on real data.</li>
+        <li>Second term: $D$ wants $D(G(z)) \to 0$ on fakes, while $G$ wants $D(G(z)) \to 1$ (fool the critic).</li>
+      </ul>
+
+      <p>Read the directions straight off the displayed objective: $D$ <strong>maximizes</strong> $V$ and $G$ <strong>minimizes</strong> it. $V$ climbs toward $0$ when $D$ classifies perfectly ($D(x)\to1$, $D(G(z))\to0$), so $D$ pushes it up; $V$ plunges toward $-\infty$ when $G$ fools $D$ ($D(G(z))\to1$), so $G$ drives it down. Where it comes from: this $V$ is exactly the <em>negative</em> of the cross-entropy classification loss of <a href="04-logistic-regression.html">04 — Logistic Regression</a>. So in loss terms, $D$ minimizes its cross-entropy loss $L_D = -V$ while $G$ tries to <em>increase</em> that loss — equivalently, $G$ minimizes $V$ and $D$ maximizes it. At the ideal equilibrium $D$ can't tell real from fake ($D \equiv \tfrac12$, where $V = 2\log\tfrac12 = -1.386$) and $G$'s samples match the data distribution. GANs produce the <strong>sharpest</strong> samples of any model here — no blurry MSE averaging — but the adversarial balance is delicate.</p>
+
+      <h3 id="diffusion-math">2.4 Diffusion — destroy, then learn to restore</h3>
+
+      <p><strong>Diffusion models</strong> (the engine in Stable Diffusion, DALL·E, Midjourney) take a beautifully simple view. <strong>Forward process:</strong> repeatedly add a little Gaussian noise to an image over $T$ steps until it's pure static:</p>
+
+      <div class="math-box">$$
+x_t = \sqrt{1-\beta_t}\, x_{t-1} + \sqrt{\beta_t}\, \varepsilon_t, \qquad \varepsilon_t \sim \mathcal{N}(0, I)
+$$</div>
+
+      <ul>
+        <li>$\beta_t$ — a small noise level at step $t$ (the <strong>noise schedule</strong>). After $T$ steps, $x_T$ is indistinguishable from random noise.</li>
+      </ul>
+
+      <p>This forward process needs no learning — it's just adding noise. <strong>Reverse process:</strong> train a network $\varepsilon_\theta$ to predict the noise that was added at each step, so you can <em>subtract</em> it. The training loss is shockingly plain:</p>
+
+      <div class="math-box">$$
+\mathcal{L}_{\text{diff}} = \mathbb{E}_{t,\,x_0,\,\varepsilon}\big[\lVert \varepsilon - \varepsilon_\theta(x_t, t)\rVert^2\big]
+$$</div>
+
+      <p>To generate: start from pure noise $x_T \sim \mathcal{N}(0,I)$ and run the learned denoiser backward step by step until a clean image emerges. The genius is that "denoise a little" is a far easier task to learn than "paint a whole image in one shot" (the GAN's burden), which makes diffusion stable to train and is why it now dominates image generation.</p>
+
+      <div class="mermaid">
+graph LR
+    x0["clean x₀"] -->|"+noise"| x1 -->|"+noise"| dots["…"] -->|"+noise"| xT["pure noise x_T"]
+    xT -.->|"learned denoise"| dots2["…"] -.->|"denoise"| x1b["x₁"] -.->|"denoise"| x0b["clean x₀"]
+</div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>Code</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>build the autoencoder you'll actually use</small></div>
+      <p>We'll build a <strong>convolutional autoencoder on MNIST</strong>, see reconstructions, and turn reconstruction error into an anomaly detector. Autoencoders are the right thing to actually code here: they're the directly useful tool for your robotics work, and the VAE/GAN/diffusion ideas above all build on this same encode/decode skeleton.</p>
+
+      <p>Run inside the <code>study</code> conda env (<code>conda activate study</code>).</p>
+
+      <div class="codeblock">
+        <div class="code-head">setup_data.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+import matplotlib.pyplot as plt
+
+torch.manual_seed(0)
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# --- Data: MNIST, scaled to [0,1]. We treat images as the "normal" distribution. ---
+tfm = transforms.ToTensor()  # gives float tensors in [0,1], shape (1, 28, 28)
+train_ds = datasets.MNIST(root="./data", train=True,  download=True, transform=tfm)
+test_ds  = datasets.MNIST(root="./data", train=False, download=True, transform=tfm)
+train_loader = DataLoader(train_ds, batch_size=256, shuffle=True)
+</code></pre>
+      </div>
+
+      <p>The model: a conv <strong>encoder</strong> squeezing $28\times28$ down to a 16-D bottleneck, and a mirror-image <strong>decoder</strong> rebuilding it.</p>
+
+      <div class="codeblock">
+        <div class="code-head">conv_autoencoder.py <span class="lang">Python</span></div>
+<pre><code class="language-python">class ConvAutoencoder(nn.Module):
+    def __init__(self, latent_dim=16):
+        super().__init__()
+        # ENCODER: 28x28 -> 14x14 -> 7x7, then flatten to a tiny code.
+        self.enc = nn.Sequential(
+            nn.Conv2d(1, 16, 3, stride=2, padding=1),  # (16, 14, 14)
+            nn.ReLU(),
+            nn.Conv2d(16, 32, 3, stride=2, padding=1), # (32, 7, 7)
+            nn.ReLU(),
+            nn.Flatten(),                              # (32*7*7 = 1568,)
+            nn.Linear(32 * 7 * 7, latent_dim),         # the BOTTLENECK
+        )
+        # DECODER: mirror the encoder, ConvTranspose2d UPsamples back to 28x28.
+        self.dec_fc = nn.Linear(latent_dim, 32 * 7 * 7)
+        self.dec = nn.Sequential(
+            nn.ConvTranspose2d(32, 16, 3, stride=2, padding=1, output_padding=1),  # (16,14,14)
+            nn.ReLU(),
+            nn.ConvTranspose2d(16, 1, 3, stride=2, padding=1, output_padding=1),    # (1,28,28)
+            nn.Sigmoid(),  # pixels back into [0,1]
+        )
+
+    def forward(self, x):
+        z = self.enc(x)                       # encode to latent code
+        h = self.dec_fc(z).view(-1, 32, 7, 7) # reshape for transposed convs
+        x_hat = self.dec(h)                   # decode to reconstruction
+        return x_hat, z
+
+model = ConvAutoencoder().to(device)
+opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+</code></pre>
+      </div>
+
+      <p>Train to minimize reconstruction MSE. Note there are <strong>no labels</strong> — this is unsupervised.</p>
+
+      <div class="codeblock">
+        <div class="code-head">train.py <span class="lang">Python</span></div>
+<pre><code class="language-python">for epoch in range(5):
+    model.train()
+    running = 0.0
+    for x, _ in train_loader:          # the "_" is the label; we never use it
+        x = x.to(device)
+        x_hat, _ = model(x)
+        loss = F.mse_loss(x_hat, x)    # rebuild x as closely as possible
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+        running += loss.item() * x.size(0)
+    print(f"epoch {epoch+1}  recon MSE: {running/len(train_ds):.4f}")
+# -> epoch 1  recon MSE: 0.0461
+# -> epoch 5  recon MSE: 0.0118
+</code></pre>
+      </div>
+
+      <p>Visualize originals vs reconstructions — the proof the latent code captured the digit.</p>
+
+      <div class="codeblock">
+        <div class="code-head">visualize_recon.py <span class="lang">Python</span></div>
+<pre><code class="language-python">model.eval()
+x, _ = next(iter(DataLoader(test_ds, batch_size=8)))
+with torch.no_grad():
+    x_hat, _ = model(x.to(device))
+x_hat = x_hat.cpu()
+
+fig, axes = plt.subplots(2, 8, figsize=(12, 3))
+for i in range(8):
+    axes[0, i].imshow(x[i, 0], cmap="gray");      axes[0, i].axis("off")
+    axes[1, i].imshow(x_hat[i, 0], cmap="gray");  axes[1, i].axis("off")
+axes[0, 0].set_ylabel("original");  axes[1, 0].set_ylabel("rebuilt")
+plt.tight_layout(); plt.savefig("ae_recon.png")
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">👁️</span> What you should SEE</div>
+        <p>The bottom row recreates the digits from the top row — recognizable but slightly <em>softer</em> and blurrier, because 16 numbers can't store every pixel. That blur is the lossy compression working as intended.</p>
+      </div>
+
+      <h3 id="recon-error-anomalies">Reconstruction error flags anomalies</h3>
+
+      <p>Train on normals (all of MNIST is "normal" here), then feed it something it's never seen — random noise standing in for an off-distribution sensor frame. Its error will spike.</p>
+
+      <div class="codeblock">
+        <div class="code-head">anomaly_detect.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import torch
+
+def recon_error(batch):
+    """Per-sample reconstruction error e(x) = ||x - x_hat||^2."""
+    with torch.no_grad():
+        x_hat, _ = model(batch.to(device))
+        # sum squared error over all pixels, per image
+        return ((batch.to(device) - x_hat) ** 2).flatten(1).sum(dim=1).cpu()
+
+normal_x, _ = next(iter(DataLoader(test_ds, batch_size=512)))
+anom_x = torch.rand_like(normal_x)            # pure noise = clearly off-distribution
+
+e_normal = recon_error(normal_x)
+e_anom   = recon_error(anom_x)
+print(f"normal error: mean {e_normal.mean():.1f}")
+print(f"anomaly error: mean {e_anom.mean():.1f}")
+# -> normal error: mean 9.7
+# -> anomaly error: mean 92.4
+
+# A threshold between the two distributions separates them cleanly.
+threshold = e_normal.mean() + 3 * e_normal.std()
+print(f"threshold: {threshold:.1f}  |  flagged anomalies: "
+      f"{(e_anom &gt; threshold).float().mean()*100:.0f}% of noise frames")
+# -> threshold: 21.3  |  flagged anomalies: 100% of noise frames
+</code></pre>
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">plot_anomaly.py <span class="lang">Python</span></div>
+<pre><code class="language-python">plt.figure(figsize=(7, 4))
+plt.hist(e_normal.numpy(), bins=40, alpha=0.6, label="normal (digits)")
+plt.hist(e_anom.numpy(),   bins=40, alpha=0.6, label="anomaly (noise)")
+plt.axvline(threshold, color="k", ls="--", label="threshold")
+plt.xlabel("reconstruction error e(x)"); plt.ylabel("count"); plt.legend()
+plt.tight_layout(); plt.savefig("ae_anomaly.png")
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">👁️</span> What you should SEE</div>
+        <p>Two clearly separated humps — a tight low-error cluster for normal digits and a far-right cluster for anomalies — with the dashed threshold cleanly between them. That gap <em>is</em> the anomaly detector.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>Real Case</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>flag faults, synthesize data</small></div>
+
+      <h3 id="rov-anomaly">Anomaly detection on ROV sensor streams</h3>
+
+      <p>Your underwater <strong>ROV</strong> streams telemetry every tick: IMU accelerations and angular rates, depth, thruster currents, motor temperatures, battery voltage, sonar altimeter range — say a 24-D vector per timestep. Failures are <em>rare and unlabeled</em>: you can't collect a balanced "thruster-fouled-by-kelp" dataset, and you'll never enumerate every way the vehicle can go wrong. This is exactly where reconstruction-error anomaly detection shines: <strong>train only on healthy operation, flag anything that rebuilds badly.</strong></p>
+
+      <p>Swap the conv encoder/decoder for small MLPs (your data is a vector, not an image) and feed it sliding windows of telemetry:</p>
+
+      <div class="codeblock">
+        <div class="code-head">telemetry_ae.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import torch.nn as nn
+
+class TelemetryAE(nn.Module):
+    """Autoencoder over a flattened window of ROV telemetry."""
+    def __init__(self, window=50, n_sensors=24, latent_dim=8):
+        super().__init__()
+        d = window * n_sensors            # flatten time x sensors
+        self.enc = nn.Sequential(
+            nn.Linear(d, 128), nn.ReLU(),
+            nn.Linear(128, latent_dim),   # bottleneck: 8 numbers summarize 2s of flight
+        )
+        self.dec = nn.Sequential(
+            nn.Linear(latent_dim, 128), nn.ReLU(),
+            nn.Linear(128, d),
+        )
+
+    def forward(self, x):
+        z = self.enc(x)
+        return self.dec(z), z
+</code></pre>
+      </div>
+
+      <p>How it maps onto the method:</p>
+      <ul>
+        <li><strong>Train</strong> on logs from known-good dives only. The AE learns the manifold of <em>normal</em> ROV behavior — the correlations between thruster current and depth rate, the IMU's vibration signature at cruise.</li>
+        <li><strong>Deploy</strong> in your ROS2 stack: a node subscribes to the telemetry topic, buffers a sliding window, runs the AE every tick, and publishes $e(x)$. When $e(x)$ crosses the threshold — a thruster fouls, a leak shifts the buoyancy, a sensor drifts — the residual spikes because the model has never seen that pattern. Trip an alarm or trigger a controlled surface.</li>
+        <li><strong>Bonus — per-sensor diagnosis:</strong> the reconstruction error <em>per dimension</em> tells you <em>which</em> sensor went rogue, not just that something did. If only the motor-temp channel has a large residual, you've localized the fault.</li>
+      </ul>
+
+      <p>This is the same principle behind bearing-fault detection in industrial motors and ECG anomaly flagging — train on healthy, alarm on surprise.</p>
+
+      <h3 id="synthetic-data">Generating synthetic training data</h3>
+
+      <p>The flip side of generation: you have <strong>too few</strong> examples of a rare event (a specific sonar target, a particular sea-state) to train a downstream classifier. A <strong>VAE</strong> trained on the data you <em>do</em> have lets you sample the latent space and decode <strong>new, plausible variations</strong> — augmenting your dataset where simple flips/rotations aren't enough. Climbing the ladder: a <strong>GAN</strong> or a <strong>diffusion</strong> model produces sharper synthetic sonar/camera frames, increasingly used to bootstrap perception models for autonomous vehicles when real labeled data is expensive (every hour of ROV time costs ship time).</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Caveat</div>
+        <p>Synthetic data inherits the generator's blind spots — validate downstream models on <em>real</em> held-out data, never only on synthetic.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>Pitfalls &amp; Tips</h2>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> A too-wide bottleneck learns the identity function</div>
+        <p>If the latent dim approaches the input dim, the autoencoder just copies $x \to \hat{x}$, reconstruction error is near zero on <em>everything</em>, and anomaly detection dies. Keep $d$ genuinely small and confirm reconstructions are slightly lossy.</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Set the anomaly threshold on a validation set of normals</div>
+        <p>Don't eyeball it. Use a quantile (e.g. the 99th percentile of normal error) or <code>mean + 3·std</code>. And <strong>scale your sensors</strong> first — an autoencoder will obsess over the high-variance channel and ignore the rest if you skip standardization.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> VAEs blur, GANs collapse</div>
+        <p>VAE samples are smooth but soft (the MSE term averages). GANs are sharp but suffer <strong>mode collapse</strong>: the generator finds one or a few outputs that reliably fool $D$ and emits only those — your "diverse" generator quietly produces the same three digits. Watch sample diversity, not just realism.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> GAN training is a moving target, not a descent</div>
+        <p>You're seeking a <em>Nash equilibrium</em> between two networks, not a loss minimum. A falling generator loss can mean it's winning <em>or</em> that $D$ collapsed. Monitor sample quality directly; balance the two learning rates.</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Don't reach for diffusion/GANs when an autoencoder suffices</div>
+        <p>For anomaly detection and compression, a plain AE is faster, stable, and interpretable. Save the heavy generative artillery for when you genuinely need to <em>sample</em> sharp new data.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Reconstruction error ≠ probability</div>
+        <p>A low error means "looks like training data," not "is safe." An adversarial or subtly-shifted input can rebuild well yet still be wrong. Use the AE as one signal among several, not a sole safety gate.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>Check Your Understanding</h2>
+
+      <p><strong>Q1.</strong> Why does shrinking the bottleneck force the autoencoder to <em>learn</em> something useful, instead of just copying its input?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>The bottleneck has fewer dimensions than the input, so the network physically cannot pass every value through unchanged — there isn't enough room. To minimize reconstruction error under that constraint it must discover and keep only the <em>most informative</em> directions of variation and throw away the rest. That forced compression is the learning. A wide-enough bottleneck removes the constraint and the network degenerates to the identity map.</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> A VAE's loss has two terms: reconstruction and KL. What does each one do, and what breaks if you delete the KL term?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Reconstruction pushes the decoder to rebuild the input accurately. KL pulls every encoded Gaussian toward $\mathcal{N}(0,I)$, packing the latent codes into a smooth, gap-free blob so you can <em>sample</em> from it. Delete the KL term and you're left with a plain autoencoder: the latent space becomes a scatter of isolated points with empty regions between them, so sampling a random $z$ and decoding gives garbage. The model can reconstruct but can no longer <em>generate</em>.</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> Why can't you backprop through <code>z = sample(N(mu, sigma))</code> directly, and how does the reparameterization trick fix it?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Sampling is a non-differentiable stochastic operation — there's no gradient of a random draw with respect to $\mu$ and $\sigma$, so backprop can't flow into the encoder. The trick rewrites the sample as $z = \mu + \sigma \odot \varepsilon$ with $\varepsilon \sim \mathcal{N}(0,I)$ drawn <em>externally</em>. Now $z$ is a smooth, differentiable function of $\mu$ and $\sigma$; gradients flow straight through, and the only randomness ($\varepsilon$) sits outside the computation graph where it needs no gradient.</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> Your GAN's generated sonar frames look crisp and realistic, but on inspection they're nearly all the same handful of scenes. What's happening and what's it called?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p><strong>Mode collapse.</strong> The generator discovered a small set of outputs that reliably fool the discriminator and stopped exploring the rest of the data distribution — it optimizes "fool $D$," not "cover all of $p(x)$." Realism per-sample stays high while diversity craters. It's a classic symptom of the unstable adversarial game; mitigations include minibatch discrimination, feature matching, or switching to a more stable objective (e.g. Wasserstein GAN) or to diffusion.</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> For ROV fault detection you have terabytes of healthy-dive logs but almost no labeled failures. Why is a reconstruction-error autoencoder a better fit than training a supervised fault classifier?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>A supervised classifier needs labeled examples of <em>each</em> failure mode and enough of them to balance the classes — you have neither, and you can't enumerate every way the vehicle might fail. The autoencoder needs only the abundant <em>normal</em> data: it learns the manifold of healthy behavior and flags anything that reconstructs poorly, with no failure labels at all. It generalizes to <em>novel</em> faults it's never seen, precisely because it defines anomaly as "unlike normal" rather than "matches a known failure class."</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml16-discriminative-vs-generative">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">A plain autoencoder reconstructs digits beautifully, but when you sample a random $z \sim \mathcal{N}(0,I)$ and decode it you get garbage. Why — and what fixes it?</div>
+        <ul class="ex-options">
+          <li data-correct="false">The bottleneck is too narrow, so reconstruction lost too much detail.</li>
+          <li data-correct="true">Nothing organized the latent codes, so most of the latent space is "holes" the decoder never learned; a VAE's KL term packs the codes into a smooth blob you can sample.</li>
+          <li data-correct="false">The decoder needs more layers to handle random inputs.</li>
+          <li data-correct="false">You forgot to scale the inputs to $[0,1]$ before decoding.</li>
+        </ul>
+        <div class="ex-explain">A plain AE only ever sees codes its encoder produced, so it organizes nothing — the codes land as isolated points with empty gaps between them. Sample a random $z$ in one of those gaps and the decoder has no idea what to do. The VAE adds a KL-divergence term $D_{\text{KL}}(\mathcal{N}(\mu,\sigma^2)\Vert\mathcal{N}(0,I))$ that pulls every encoded Gaussian toward a standard normal, filling the gaps so the latent space becomes smooth and <em>samplable</em>. That is exactly what makes the VAE generative while the plain AE is not.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml16-gan-equilibrium" data-answer="-1.386" data-tol="0.01">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">At the GAN's ideal equilibrium the discriminator is fooled completely: $D(x) = D(G(z)) = \tfrac12$ everywhere. Evaluate the value function $V = \mathbb{E}[\log D(x)] + \mathbb{E}[\log(1 - D(G(z)))]$ at that point. Give the numeric value (natural log).</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">(unitless)</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">Plug in $D \equiv \tfrac12$: $V = \log\tfrac12 + \log(1 - \tfrac12) = \log\tfrac12 + \log\tfrac12 = 2\log\tfrac12 = -2\ln 2 \approx -1.386$. This is the minimax saddle point: $D$ can't do better than a coin flip, and $G$'s samples match the data distribution — exactly the equilibrium value the lesson quotes.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml16-anomaly-threshold">
+        <div class="ex-head"><span class="badge">Q3</span> Derivation — the anomaly threshold</div>
+        <div class="ex-q">In the code, normal MNIST gives reconstruction error with mean $9.7$ and the threshold is set to $\text{mean} + 3\cdot\text{std} = 21.3$. Work out what standard deviation that implies, and explain why this rule cleanly separated the noise frames (mean error $92.4$).</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Solve $9.7 + 3\sigma = 21.3$ for $\sigma$. Then ask how many standard deviations above the normal mean the anomaly cluster ($92.4$) sits.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p>From $9.7 + 3\sigma = 21.3$ we get $3\sigma = 11.6$, so $\sigma \approx 3.87$. The "$\text{mean} + 3\sigma$" rule places the threshold at the 3-sigma upper tail of the <em>normal</em> error distribution — under a roughly normal model that lets through only $\sim 0.1\%$ of healthy frames as false alarms. The anomaly cluster at mean $92.4$ sits about $(92.4 - 9.7)/3.87 \approx 21$ standard deviations above the normal mean — astronomically far past the $21.3$ threshold. That enormous gap is why <em>100%</em> of the noise frames were flagged: pure noise is so unlike anything the decoder was trained to rebuild that its error explodes, leaving the two distributions with no overlap. The lesson: set the threshold from a validation set of <em>normals</em> (a quantile or $\text{mean}+3\sigma$), never by eyeballing, and scale your sensors first so no single high-variance channel dominates the error.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Lesson recap</div>
+        <ul>
+          <li><strong>Generative models learn $p(x)$ so they can create, compress, and score</strong> — a different job from the discriminative classifiers of earlier lessons that only learn $p(y\mid x)$.</li>
+          <li>An <strong>autoencoder</strong> squeezes input through a bottleneck and rebuilds it; the bottleneck forces it to learn a compact, non-linear code (a curved PCA). <strong>Reconstruction error</strong> doubles as a powerful unsupervised <strong>anomaly detector</strong> — train on normal, alarm on surprise.</li>
+          <li>A <strong>VAE</strong> makes the latent space <em>probabilistic</em> (the <strong>reparameterization trick</strong> keeps it trainable) and balances <strong>reconstruction + KL</strong> in the <strong>ELBO</strong>, so you can sample genuinely new data.</li>
+          <li>A <strong>GAN</strong> pits a generator against a discriminator in a minimax game — sharpest samples, but watch for <strong>mode collapse</strong>. <strong>Diffusion</strong> learns to undo step-by-step noising and now dominates image generation by turning "create" into the easier task "denoise a little."</li>
+          <li>For your ROV: a small autoencoder over telemetry windows flags faults with zero failure labels and can even localize the rogue sensor; VAEs/GANs/diffusion can synthesize scarce training data (validate downstream on <em>real</em> data).</li>
+        </ul>
+        <p>Next we cap the course: standing on the shoulders of pretrained giants. How to fine-tune big models for your task with little data, what LLMs are doing under the hood, and how to actually ship a model into a running system. ➡️ <strong>Next:</strong> <a href="17-transfer-learning-llms-mlops.html">17 — Transfer Learning, LLMs &amp; Putting Models in Production</a></p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

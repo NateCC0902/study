@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Tuning &amp; Deploying to a Real USV (ROS 2) — PID Control for a USV</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-pid" data-course="pid" data-track="main" data-chapter="08-tuning-ros2">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> PID&nbsp;·&nbsp;USV</a>
+  <span class="spacer"></span>
+  <span class="track-pill">PID · Ch 08</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">PID Course · Chapter 08 · Tuning &amp; Deployment</div>
+        <h1>Tuning &amp; Deploying to a Real USV (ROS 2)</h1>
+        <p>You've met every term and every failure mode. Now we put it together: a repeatable <strong>P&nbsp;→&nbsp;D&nbsp;→&nbsp;I</strong> recipe that lands on <code>kp=2, ki=0.2, kd=3</code> for this boat, a side-by-side with Ziegler–Nichols, and then the unglamorous-but-critical step — mapping the sim into a real ROS 2 node without lighting your hardware on fire.</p>
+        <div class="meta"><span>⏱ ~35 min</span><span>🎛 P→D→I recipe</span><span>📐 Ziegler–Nichols</span><span>🤖 ROS 2 mapping</span><span>⚡ Live sim</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="the-recipe"><span class="sec-no">1</span>The recipe: P, then D, then I — in that order</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>why this order, not any other</small></div>
+      <p>Tuning is not a search over a 3-D gain space; that way lies madness. It's a <em>sequence</em>, and the sequence falls straight out of what each term does. P sets the aggression. D tames the overshoot P creates. I cleans up the steady offset that's left over once P and D have settled the transient. Touch them out of order and you'll be chasing your own tail — D has nothing to damp until P is doing the turning, and I will lie to you about offset while the transient is still ringing.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> One sentence per term</div>
+        <p><strong>P</strong> does the turn. <strong>D</strong> stops the turn from overshooting. <strong>I</strong> erases the leftover bias that neither P nor D can. Tune them in the order they take effect: fast (P), faster (D), slowest (I).</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    A["Start: ki=0, kd=0"] --> B["Raise kp to Ku≈5<br/>sustained oscillation"]
+    B --> C["Halve it:<br/>kp = 2 – 2.5"]
+    C --> D["Raise kd until<br/>overshoot gone: kd≈3"]
+    D --> E["Add smallest ki that<br/>kills offset: ki=0.2"]
+    E --> F["Done:<br/>kp=2, ki=0.2, kd=3"]
+</div>
+
+      <div class="layer"><span class="step">④</span> Real case <small>the gains we landed on</small></div>
+      <p>Every number below comes from <em>this</em> boat — the first-order Nomoto plant with $K=0.6$, $T=2.5$ s, a ±35° rudder slewing at 25 °/s, and a current that pushes the bow like 4° of stuck rudder. Run the recipe and you converge on the gains used all through Cases 3–7: <strong>$k_p=2$, $k_i=0.2$, $k_d=3$</strong>. The rest of this section is <em>how</em> you get there, step by step, so you can repeat it on any boat.</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="step-p"><span class="sec-no">2</span>Step 1 — Raise <span class="kt">$k_p$</span> to the ultimate gain, then halve</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>find the edge, back off</small></div>
+      <p>Set $k_i=0$ and $k_d=0$ — pure P. Now raise $k_p$ until the boat does <strong>sustained, constant-amplitude oscillation</strong>: not decaying, not growing, just ringing forever. That gain is the <strong>ultimate gain</strong> $K_u$, and the period of the ringing is the <strong>ultimate period</strong> $T_u$. On this boat that's $K_u \approx 5$ with $T_u \approx 9$ s. (Recall from Case 1: $k_p=2$ rings once and settles; $k_p=5$ never settles, oscillating ±16° forever; $k_p=8$ rings harder and faster, ±25°.)</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Why an ideal plant still oscillates</div>
+        <p>A bare Nomoto boat with a <em>perfect</em> rudder never goes unstable from $k_p$ alone — even $k_p=100$ would settle. Real boats oscillate because the actuator <strong>lags</strong>: our servo slews at 25 °/s, so at high $k_p$ the command flips rail-to-rail faster than the rudder can follow. That phase lag at high gain is the universal recipe for oscillation (Case 9). The slew limit is baked into the sim for exactly this reason.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>halve to get a usable gain</small></div>
+      <p>The ultimate gain is the <em>edge</em> of stability — useless on its own. Back off to half:</p>
+      <div class="math-box">$$ k_p = \tfrac{1}{2}\,K_u = \tfrac{1}{2}\times 5 = 2.5 \quad\Longrightarrow\quad \text{settle on } k_p \in [2,\,2.5] $$</div>
+      <p>Halving the ultimate gain is the oldest trick in the book — it's exactly what Ziegler–Nichols does for a pure-P controller ($k_p = 0.5\,K_u$). It buys you a comfortable stability margin: brisk response, one small overshoot, then it settles. We'll nudge it to $k_p=2$ for a touch more margin since D and I are still coming.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Don't try to crank $k_p$ to kill offset</div>
+        <p>You will be tempted: P leaves a steady offset (Case 2), and bigger $k_p$ shrinks it ($e_{ss} = -4°/k_p$). But $k_p \ge 5$ oscillates — so with any <em>usable</em> $k_p$ the offset is structural. Don't fight it with P. That's I's job, two steps from now.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="step-d"><span class="sec-no">3</span>Step 2 — Raise <span class="kt">$k_d$</span> until the overshoot dies</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>add the damper</small></div>
+      <p>Hold $k_p=2$. Now add D and sweep it up. D acts only on <em>change</em>: when the error is shrinking fast, the derivative is negative, so D opposes P during the approach and the boat eases off before it arrives. From Case 3:</p>
+      <ul>
+        <li><strong>$k_d=0$</strong> — overshoots to ~118°, rings.</li>
+        <li><strong>$k_d=1$</strong> — one small overshoot.</li>
+        <li><strong>$k_d=3$</strong> — glides in like a parking valet. No overshoot.</li>
+      </ul>
+      <p>Stop when the overshoot is gone. Push $k_d$ past that and you buy nothing but twitchiness and noise sensitivity (Case 7) — D differentiates compass noise into rudder garbage.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>the coasting condition</small></div>
+      <p>The controller goes neutral — coasts — when the P push and the D brake exactly cancel:</p>
+      <div class="math-box">$$ k_p\,e = k_d\,\dot e \quad\Longrightarrow\quad \dot e = \frac{k_p}{k_d}\,e = \frac{2}{3}\,e $$</div>
+      <p>So at $k_p=2,\ k_d=3$ the controller stops pushing once the closing rate (°/s) exceeds <strong>⅔ of the remaining error</strong> (°). 30° out, closing faster than 20 °/s → it's already easing off. That cancellation <em>is</em> damping — re-read the by-hand timestep in Ch 01 where P and D exactly cancel 60° apiece while the boat is still 30° from target.</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> D can't do everything</div>
+        <p>D only tames <em>motion</em>. Once you're on heading and steady, $\dot e = 0$ and D contributes nothing. It cannot do the turn (that's P) and it cannot fix the steady offset (that's I). If you find yourself raising $k_d$ to fix a constant bias, stop — you're using the wrong term.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="step-i"><span class="sec-no">4</span>Step 3 — Add the smallest <span class="kt">$k_i$</span> that erases the offset</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the trim tab</small></div>
+      <p>PD holds course by <em>staying wrong</em>: the P term can only output the −4° of rudder needed to cancel the current by keeping the error at −2°. I fixes this. The integral accumulates the persistent error and ramps the rudder to −4° on its own — it <strong>learns the current</strong>. With I carrying the trim, the error returns to zero and P relaxes to zero. On this boat $k_i=0.2$ trims the current out in ~30 s.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Smallest that works — and why</div>
+        <p>The integral is a <strong>memory</strong>, and it should be the <em>slowest</em> thing in the loop. Big $k_i$ = jumpy conclusions from a short memory = overshoot and slow weaving (try $k_i=2$ in the sim and watch it wander). Add only as much I as you need to kill the offset in a reasonable time. If you see slow weaving, <strong>halve $k_i$</strong>. That ~30 s settling isn't a bug — you want I to respond to things that <em>persist</em> (current, wind, trim), not to every wave.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>the offset I is paid to remove</small></div>
+      <p>To hold a steady heading the net yaw moment must be zero, so the rudder must hold −4° to cancel the current. A pure-P controller delivers that only through error:</p>
+      <div class="math-box">$$ k_p\,e_{ss} = -4° \quad\Longrightarrow\quad e_{ss} = -\frac{4°}{k_p} $$</div>
+      <p>At $k_p=2$ that's a stubborn −2° offset that P and D will never remove. The integral term, $k_i\sum e\,dt$, keeps growing as long as <em>any</em> error remains — so it can only stop growing when $e=0$. That's the whole trick: I is the only term that holds nonzero rudder at zero error.</p>
+
+      <div class="layer"><span class="step">⑤</span> Practice <small>do the whole recipe live</small></div>
+      <p>Here's the full playground. Run the recipe on it from scratch: zero out $k_i$ and $k_d$, raise $k_p$ until the heading trace rings without decaying (that's $K_u\approx5$), then halve it. Add $k_d$ and watch the overshoot collapse. Finally turn on the current toggle, add a pinch of $k_i$, and watch the steady offset crawl back to zero. Add noise and push $k_d$ to see the chatter Case 7 warns about.</p>
+
+      <div class="sim"><div class="sim-title"><span>🧭</span> Full playground — apply the tuning recipe live (kp, ki, kd, current, noise, toggles)</div><canvas id="sim-tune"></canvas></div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> What to drag, and what to watch</div>
+        <p>Drive $k_p$ alone first — the heading panel shows the spring (Case 1). When it rings at a fixed amplitude, read the <em>period</em> off the time axis (~9 s = $T_u$). Add $k_d$ and the overshoot in the top panel shrinks to nothing (Case 3). Flip on the current and a PD boat parks <em>below</em> the setpoint; sneak $k_i$ up and the trace climbs back to the line (Case 4). Then add noise and over-crank $k_d$: the rudder panel turns to fuzz (Case 7). That's the entire course in one canvas.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="ziegler-nichols"><span class="sec-no">5</span>Ziegler–Nichols: the same <span class="kt">$K_u, T_u$</span>, by formula</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>plug the ultimate values into the table</small></div>
+      <p>You already measured everything Ziegler–Nichols needs in Step 1: $K_u=5$ and $T_u=9$ s. The classic ZN tuning rules turn those two numbers directly into gains:</p>
+      <div class="math-box">$$ k_p = 0.6\,K_u, \qquad k_i = \frac{1.2\,K_u}{T_u}, \qquad k_d = 0.075\,K_u\,T_u $$</div>
+      <p>Run the arithmetic with $K_u=5,\ T_u=9$:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th></th><th>$k_p = 0.6\,K_u$</th><th>$k_i = 1.2\,K_u/T_u$</th><th>$k_d = 0.075\,K_u T_u$</th></tr></thead>
+        <tbody>
+          <tr><td>ZN classic</td><td>3.0</td><td>0.67</td><td>3.4</td></tr>
+          <tr><td>Our hand-tune</td><td>2.0</td><td>0.20</td><td>3.0</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Read the comparison</div>
+        <p>$k_d$ agrees almost exactly (3.4 vs 3.0) — both methods see the same damping need. But ZN's $k_p$ and especially its $k_i$ run <strong>hot</strong>: $k_i=0.67$ is more than triple ours. That's by design — ZN targets <em>fast disturbance rejection</em> and is willing to overshoot to get it. Our recipe targets a smooth approach. Treat ZN as a <strong>starting point</strong>, then de-tune toward smooth: the hand-tuned gains are essentially ZN with the integral pulled way back and a hair off the proportional.</p>
+      </div>
+
+      <div class="layer"><span class="step">④</span> Real case <small>when to reach for which</small></div>
+      <p>If your USV must reject a gusting crosswind <em>now</em> — a survey line where drift is the whole problem — start at ZN and live with the overshoot. If it's holding station for a sensor or threading a marina, take the smoother hand-tune. Either way you do the <em>same</em> measurement (raise $k_p$ to $K_u$, time $T_u$); the table is just a different opinion about how aggressive to be with what you measured.</p>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="sim-to-boat"><span class="sec-no">6</span>From the sim to your actual USV (ROS 2)</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>map every sim variable to a real signal</small></div>
+      <p>The controller you tuned doesn't change at all. What changes is where the numbers come from and where they go. Here is the exact mapping:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>In the sim</th><th>On the boat (ROS 2)</th></tr></thead>
+        <tbody>
+          <tr><td><code>psi</code></td><td>yaw from IMU / <code>/odometry/filtered</code> (already fused)</td></tr>
+          <tr><td><code>wrap(sp − psi)</code></td><td>same — do it in your node, <strong>every cycle</strong></td></tr>
+          <tr><td><code>DT = 0.05</code></td><td>timer callback ~20–50 Hz, but use <em>measured</em> dt</td></tr>
+          <tr><td>rudder $\delta$</td><td>rudder servo, or differential thrust: <code>left = base+u, right = base−u</code></td></tr>
+          <tr><td><code>RUDDER_MAX</code></td><td>your actuator limits — clamp in software too</td></tr>
+          <tr><td>current disturbance</td><td>real current / wind — your I term's job</td></tr>
+        </tbody>
+      </table></div>
+
+      <p>Two of these rows are landmines if you skim them. <strong>Measured dt:</strong> a timer "set to 20 Hz" does not fire at exactly 0.05 s — jitter, a busy CPU, or a dropped cycle changes the real interval, and both your I term ($\times dt$) and D term ($\div dt$) scale with it. Use the timestamp delta, not the nominal rate. <strong>Wrap every cycle:</strong> the angle-wrap bug (Case 8) is invisible until your test happens to cross north, then the boat turns 340° the long way around a dock. Wrap the error before it ever enters the PID.</p>
+
+      <div class="codeblock">
+        <div class="code-head">heading_node.py <span class="lang">Python · rclpy</span></div>
+<pre><code class="language-python">import math, rclpy
+from rclpy.node import Node
+from std_msgs.msg import Float64
+from nav_msgs.msg import Odometry
+from pid_controller import PID            # the class from Ch 01
+
+def wrap(a):                              # → (-pi, pi], used on EVERY error
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+class HeadingNode(Node):
+    def __init__(self):
+        super().__init__("heading_pid")
+        # the gains you tuned in the sim — unchanged
+        self.pid = PID(kp=2.0, ki=0.2, kd=3.0, output_limits=(-0.61, 0.61))  # ±35°
+        self.setpoint = 0.0              # rad, from a waypoint/teleop topic
+        self.last_t   = None            # for MEASURED dt
+        self.armed    = False           # kill-switch gate (see §7)
+
+        self.create_subscription(Odometry, "/odometry/filtered", self.on_odom, 10)
+        self.cmd = self.create_publisher(Float64, "/rudder_cmd", 10)
+
+    def on_odom(self, msg):
+        # 1. yaw straight out of the fused estimate (quaternion → heading)
+        q = msg.pose.pose.orientation
+        psi = math.atan2(2*(q.w*q.z + q.x*q.y),
+                         1 - 2*(q.y*q.y + q.z*q.z))
+
+        # 2. MEASURED dt, not the nominal 0.05 s
+        t  = self.get_clock().now().nanoseconds * 1e-9
+        if self.last_t is None:
+            self.last_t = t
+            return                       # need two samples for a dt
+        dt = t - self.last_t
+        self.last_t = t
+        if dt &lt;= 0.0 or dt &gt; 0.5:        # skip absurd gaps (dropped cycles)
+            return
+
+        # 3. wrap the error EVERY cycle, then run the same PID
+        error = wrap(self.setpoint - psi)
+        if not self.armed:               # kill switch open → no actuation
+            self.pid.reset()             # keep the integral clean while idle
+            return
+        u = self.pid.update(error, dt)   # rad of rudder, already clamped
+
+        self.cmd.publish(Float64(data=u))
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Clamp in software even though the servo clamps too</div>
+        <p><code>RUDDER_MAX</code> is not just a courtesy to the hardware. If you let the PID <em>command</em> beyond the physical stop, the integral keeps winding against a limit it can't see — that's exactly the windup of Case 5 (a saturated rudder + a still-accumulating integral = donuts forever). Clamp the output <em>and</em> protect the integral (anti-windup, Ch 05). The servo's mechanical stop is your last line of defense, not your first.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="safety"><span class="sec-no">7</span>Before you put it in the water: safety</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>the two rules that save your boat</small></div>
+      <p>Field-tuning order is identical to the sim: <strong>P → D → I, starting low.</strong> You do it on the water, but you start from the gains the sim handed you, so you're refining, not searching blind. Two non-negotiables before any autonomy test:</p>
+
+      <ol>
+        <li><strong>A hardware kill switch.</strong> Not a software flag — a physical interlock that cuts actuation regardless of what the code thinks. An RC override channel or a relay on the thruster power. The first time your tuning is wrong (and it will be), this is the difference between a debrief and a swim.</li>
+        <li><strong>Call <code>reset()</code> whenever the controller is re-engaged.</strong> A stale integral from five minutes ago — accumulated while the boat sat at the dock, or while the kill switch was open — is a windup bug waiting to fire the instant you arm. On re-engage, zero the integral and clear <code>prev_error</code> so there's no phantom derivative kick from a heading that "jumped" while you weren't looking.</li>
+      </ol>
+
+      <div class="codeblock">
+        <div class="code-head">arming / re-engage handler <span class="lang">Python</span></div>
+<pre><code class="language-python">def on_kill_switch(self, engaged: bool):
+    """Wired to the RC override / hardware interlock."""
+    if engaged and not self.armed:
+        self.pid.reset()        # &lt;-- the rule: clean integral on re-engage
+        self.last_t = None      # force a fresh dt; no derivative kick
+    self.armed = engaged
+    if not engaged:
+        self.cmd.publish(Float64(data=0.0))   # rudder to neutral, hands off
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Why <code>reset()</code> matters more on a boat than in the sim</div>
+        <p>In the sim the controller runs continuously from $t=0$. On the water it gets armed, disarmed for a manual correction, re-armed near a dock — and each disarm period is silent error the integral would have eaten if you'd let it. <code>reset()</code> on re-engage makes every autonomous segment start from a known-clean state. Pair it with the kill switch (which calls it for you) and you've closed the gap between "works in sim" and "works on the water."</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="pid08-order">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You're tuning a fresh boat. Why do we raise $k_p$ to oscillation and then add $k_d$, rather than tuning $k_d$ first or all three together?</div>
+        <ul class="ex-options">
+          <li data-correct="false">$k_d$ has the largest effect, so it must be set first to stay in range.</li>
+          <li data-correct="true">D only acts on motion, so there's nothing for it to damp until P is driving the turn — and I lies about offset while the transient still rings.</li>
+          <li data-correct="false">Ziegler–Nichols requires the gains to be set in alphabetical order.</li>
+          <li data-correct="false">Setting all three at once is fine; the order is just convention.</li>
+        </ul>
+        <div class="ex-explain">Each term takes effect on a different timescale and depends on the one before it. P (fast) does the turn; D (faster) can only oppose <em>change</em>, so it needs P's transient to act on; I (slowest) should only see the steady offset that's left once the transient has settled. Tune them in the order they take effect: P → D → I.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="pid08-zn-ki" data-answer="0.67" data-tol="0.02">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">Ziegler–Nichols classic gives $k_i = 1.2\,K_u/T_u$. With the measured $K_u = 5$ and $T_u = 9$ s, what integral gain does ZN prescribe? (Round to 2 decimals.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">rad/(rad·s)</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$k_i = 1.2 \times 5 / 9 = 6/9 = 0.667 \approx 0.67$. That's more than triple our hand-tuned $k_i=0.2$ — ZN runs the integral hot to reject disturbances fast, accepting overshoot. We de-tune it down for a smooth approach.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="pid08-measured-dt">
+        <div class="ex-head"><span class="badge">Q3</span> Design — why measured dt, and what breaks without it</div>
+        <div class="ex-q">Your ROS 2 timer is "set to 20 Hz" so you hardcode <code>dt = 0.05</code>. The CPU gets busy and a few callbacks fire at 0.08 s and 0.03 s instead. What goes wrong in the I and D terms, and how does measuring dt fix it?</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Write the discrete I and D terms and notice that one <em>multiplies</em> by dt and the other <em>divides</em> by it. Then ask what happens when the real interval differs from the 0.05 you assumed.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p>The integral adds $e\cdot dt$ and the derivative computes $(e_n - e_{n-1})/dt$. Hardcoding <code>dt=0.05</code> while the real interval is 0.08 s means the integral accumulates <strong>too little</strong> (you under-count the area, so I trims the current too slowly) and the derivative reports a swing rate that's <strong>too high</strong> by 0.08/0.05 = 1.6× (phantom damping, and noise amplified). At 0.03 s the errors flip the other way. The fix is to measure the actual interval from the message/clock timestamps — <code>dt = t - self.last_t</code> — so every term scales by the true elapsed time. As a bonus, you can reject absurd gaps (<code>dt &gt; 0.5</code> from a dropped cycle) instead of feeding a garbage derivative into the loop.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>Tune in order: raise $k_p$ to the ultimate gain $K_u\approx5$ (period $T_u\approx9$ s) and halve it; add $k_d\approx3$ until overshoot dies; add the smallest $k_i\approx0.2$ that erases the offset — landing on <strong>$k_p=2,\ k_i=0.2,\ k_d=3$</strong>. Ziegler–Nichols from the same $K_u,T_u$ gives a hotter $3.0 / 0.67 / 3.4$; use it as a starting point and de-tune toward smooth. Deploying to ROS 2 doesn't change the controller — it changes the plumbing: fused yaw from <code>/odometry/filtered</code>, wrap every cycle, use <em>measured</em> dt, clamp in software. And before the water: a hardware kill switch, and <code>reset()</code> on every re-engage. That's the whole course, on a real boat.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+<script src="../assets/pid-sim.js"></script>
+<script>EM.pidSim("sim-tune", EM.pidPresets.full());</script>
+</body>
+</html>

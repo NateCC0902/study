@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Attention &amp; Transformers — Machine Learning &amp; Deep Learning</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="15-attention-transformers">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 15</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL Course · 15</div>
+        <h1>Attention &amp; Transformers</h1>
+        <p>RNNs squeeze a whole sequence through one fixed hidden state, then make token 1 whisper down a 499-step chain to reach token 500. Attention deletes the bottleneck: every token looks directly at every other token in a single matrix multiply and decides, on the fly, how much each one matters. That one idea — a soft, learned database lookup — is the entire engine behind modern LLMs and adaptive sensor fusion.</p>
+        <div class="meta"><span>⏱ ~45 min</span><span>🧠 Self-attention</span><span>🔢 softmax(QKᵀ/√d)V</span><span>🤖 PyTorch</span><span>📦 Part 4 · Lesson 15</span></div>
+      </section>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Prerequisites &amp; what you'll be able to do</div>
+        <p><strong>Prerequisites:</strong> <a href="14-rnns-lstms.html">14 — Sequence Models: RNNs &amp; LSTMs</a> (you should know why recurrence struggles with long sequences and what a hidden state is). Helpful background: <a href="13-cnns.html">13 — CNNs</a>, <a href="12-training-deep-nets.html">12 — Training Deep Networks</a>, <a href="11-pytorch-fundamentals.html">11 — PyTorch Fundamentals</a>.</p>
+        <p><strong>By the end you can:</strong></p>
+        <ul>
+          <li>Explain attention as "each token queries every other token and takes a weighted average of their values."</li>
+          <li>Derive and implement <strong>scaled dot-product attention</strong> $\text{softmax}(QK^\top/\sqrt{d})V$ from scratch in PyTorch.</li>
+          <li>Build a full <strong>Transformer block</strong> (multi-head attention + feed-forward + residual + layer-norm) and add <strong>positional encodings</strong>.</li>
+          <li>Distinguish encoder, decoder, and causal masking, and explain why a stack of decoder blocks is the backbone of modern LLMs.</li>
+          <li>Articulate <em>why</em> attention beat RNNs: parallelism and direct long-range connections — and where that matters for multi-sensor fusion.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>Intuition</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>An RNN reads a sequence one step at a time and crams everything it has seen into a single fixed-size hidden state. To connect token 1 to token 500, the signal has to survive 499 sequential updates — gradients vanish, information gets overwritten, and you can't parallelize because step $t$ needs step $t-1$ first.</p>
+
+      <p><strong>Attention</strong> throws out the bottleneck. Instead of passing information down a chain, <strong>every token looks directly at every other token in one shot</strong> and decides how much each one matters to it.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> Attention is a soft database lookup</div>
+        <p>Each token issues a <strong>query</strong> ("I'm the word <em>it</em> — which earlier noun am I referring to?"). Every token also advertises a <strong>key</strong> ("I'm the noun <em>boat</em>, here's my signature"). The query is matched against all keys by similarity; the best matches get the most weight. Then you retrieve a blended answer — a weighted average of every token's <strong>value</strong> (its actual content). Unlike a hard dictionary lookup that returns exactly one row, attention returns a <em>soft</em> mixture: 70% boat, 20% water, 10% everything else.</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🌊</span> USV analogy</div>
+        <p>Imagine fusing readings from a sonar, a lidar, an IMU, and a GPS at one instant. The fusion "query" for <em>estimate my heading</em> should weight the IMU heavily and the sonar barely at all; the query for <em>estimate distance to the dock</em> should flip that. Attention learns those routing weights instead of hard-coding them.</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    subgraph Tokens
+      t1["token 1<br/>(value v₁)"]
+      t2["token 2<br/>(value v₂)"]
+      t3["token 3<br/>(value v₃)"]
+    end
+    q["query from<br/>token 2 (q₂)"]
+    q -->|"sim(q₂,k₁)=0.1"| t1
+    q -->|"sim(q₂,k₂)=0.2"| t2
+    q -->|"sim(q₂,k₃)=0.7"| t3
+    t1 --> out["output for token 2<br/>= 0.1·v₁ + 0.2·v₂ + 0.7·v₃"]
+    t2 --> out
+    t3 --> out
+</div>
+
+      <p>Three properties fall out of this design:</p>
+      <ul>
+        <li><strong>Order-agnostic.</strong> Attention is a weighted sum over a <em>set</em> — it has no built-in notion of position. We bolt order back on with <strong>positional encodings</strong> (Section 2).</li>
+        <li><strong>Parallel.</strong> All query-key comparisons are one big matrix multiply. No sequential dependency, so GPUs love it.</li>
+        <li><strong>Constant path length.</strong> Token 1 and token 500 are <em>one</em> attention step apart, not 499. Long-range dependencies become easy.</li>
+      </ul>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>The Math</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive scaled dot-product attention</small></div>
+
+      <h3 id="scaled-dot-product">Scaled dot-product attention</h3>
+      <p>Pack a sequence of $n$ tokens, each a $d$-dimensional vector, into a matrix $X \in \mathbb{R}^{n \times d}$. We project $X$ into three roles using learned weight matrices $W_Q, W_K, W_V$:</p>
+
+      <div class="math-box">$$ Q = X W_Q, \qquad K = X W_K, \qquad V = X W_V $$</div>
+
+      <ul>
+        <li>$Q \in \mathbb{R}^{n \times d_k}$ — <strong>queries</strong>, one per token ("what am I looking for?").</li>
+        <li>$K \in \mathbb{R}^{n \times d_k}$ — <strong>keys</strong>, one per token ("what do I offer, as a lookup signature?").</li>
+        <li>$V \in \mathbb{R}^{n \times d_v}$ — <strong>values</strong>, one per token ("what content do I actually contribute?").</li>
+      </ul>
+
+      <p>The attention output is:</p>
+
+      <div class="math-box">$$ \text{Attention}(Q,K,V) = \underbrace{\text{softmax}\!\left(\frac{QK^\top}{\sqrt{d_k}}\right)}_{\text{attention weights } A \,\in\, \mathbb{R}^{n\times n}} V $$</div>
+
+      <p>Let's read it left to right, because every piece has a reason:</p>
+      <ol>
+        <li><strong>$QK^\top$</strong> is an $n \times n$ matrix of dot products. Entry $(i,j)$ is $q_i \cdot k_j$ — how well token $i$'s query matches token $j$'s key. Dot product is the natural similarity score: it's large when two vectors point the same way.</li>
+        <li><strong>$/\sqrt{d_k}$ — the scaling.</strong> Where does this come from? If the entries of $q_i$ and $k_j$ are roughly independent with mean 0 and variance 1, their dot product $\sum_{m=1}^{d_k} q_{im}k_{jm}$ has variance $d_k$, so its standard deviation is $\sqrt{d_k}$. For large $d_k$ the raw scores get huge, softmax saturates into a near one-hot spike, and its gradient nearly vanishes. Dividing by $\sqrt{d_k}$ rescales the scores back to unit variance so softmax stays in a healthy, trainable regime.</li>
+        <li><strong>$\text{softmax}(\cdot)$</strong> is applied <strong>row-wise</strong>. Row $i$ becomes a probability distribution over all tokens $j$: $A_{ij} = \dfrac{\exp(s_{ij})}{\sum_{j'} \exp(s_{ij'})}$, where $s_{ij}$ is the scaled score. Each row sums to 1 — these are token $i$'s mixing weights.</li>
+        <li><strong>$A V$</strong> multiplies those weights by the values. Output row $i$ is $\sum_j A_{ij}\, v_j$ — a weighted average of all value vectors, weighted by relevance to token $i$. That's the soft lookup.</li>
+      </ol>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Self- vs. cross-attention</div>
+        <p><strong>Self-attention</strong> just means $Q$, $K$, $V$ all come from the same sequence $X$ (a sentence attending to itself). <strong>Cross-attention</strong> uses $Q$ from one sequence and $K,V$ from another (a decoder attending to an encoder's output).</p>
+      </div>
+
+      <h3 id="multi-head">Multi-head attention</h3>
+      <p>One attention computation forces all tokens to relate in a single way. Real relationships are multi-faceted: in language, one "head" might track subject–verb agreement while another tracks coreference. So we run $h$ attentions in parallel, each in its own lower-dimensional subspace:</p>
+
+      <div class="math-box">$$ \text{head}_i = \text{Attention}(X W_Q^{(i)},\, X W_K^{(i)},\, X W_V^{(i)}), \qquad i = 1,\dots,h $$</div>
+
+      <div class="math-box">$$ \text{MultiHead}(X) = \text{Concat}(\text{head}_1, \dots, \text{head}_h)\, W_O $$</div>
+
+      <p>Each head uses dimension $d_k = d_v = d_{\text{model}}/h$, so concatenating $h$ heads brings you back to $d_{\text{model}}$, and the output projection $W_O \in \mathbb{R}^{d_{\text{model}} \times d_{\text{model}}}$ mixes the heads. <strong>Same total compute as one big head, but $h$ independent relationship subspaces.</strong></p>
+
+      <h3 id="positional-encodings">Positional encodings</h3>
+      <p>Attention is a sum over a set — permute the input tokens and the outputs just permute the same way; the model literally cannot tell "dock then boat" from "boat then dock." We inject order by <strong>adding</strong> a position-dependent vector to each token embedding. The original Transformer uses fixed sinusoids:</p>
+
+      <div class="math-box">$$ PE_{(\text{pos},\, 2k)} = \sin\!\left(\frac{\text{pos}}{10000^{\,2k/d_{\text{model}}}}\right), \qquad PE_{(\text{pos},\, 2k+1)} = \cos\!\left(\frac{\text{pos}}{10000^{\,2k/d_{\text{model}}}}\right) $$</div>
+
+      <p>where $\text{pos}$ is the position index and $k$ indexes the embedding dimension. Each dimension is a sinusoid of a different wavelength (short wavelengths in low dims, long in high dims) — like the bits of a binary clock, the combination uniquely identifies a position. A useful bonus: $PE_{\text{pos}+\Delta}$ is a fixed linear function of $PE_{\text{pos}}$, so the model can learn to attend by <em>relative</em> offset. (Modern models often swap these for learned or rotary (RoPE) encodings, but the principle is identical: tell attention where each token sits.)</p>
+
+      <h3 id="transformer-block-math">The Transformer block</h3>
+      <p>Stack the pieces with two stabilizers from earlier lessons — <strong>residual connections</strong> (so gradients flow, see <a href="12-training-deep-nets.html">12 — Training Deep Networks</a>) and <strong>layer normalization</strong>:</p>
+
+      <div class="math-box">$$ \begin{aligned} Z &= \text{LayerNorm}\big(X + \text{MultiHead}(X)\big) \\ \text{Out} &= \text{LayerNorm}\big(Z + \text{FFN}(Z)\big) \end{aligned} $$</div>
+
+      <p>The <strong>feed-forward network</strong> $\text{FFN}(z) = W_2\,\sigma(W_1 z + b_1) + b_2$ is a per-token MLP (typically expanding to $4\times$ the width, e.g. GELU activation). Attention mixes information <em>across</em> tokens; the FFN then transforms each token <em>independently</em>. That alternation — mix, then process — is the whole engine.</p>
+
+      <div class="mermaid">
+flowchart TB
+    inp["Input embeddings + positional encoding"] --> mha["Multi-Head Self-Attention"]
+    inp -.residual.-> add1(("+"))
+    mha --> add1
+    add1 --> ln1["LayerNorm"]
+    ln1 --> ffn["Feed-Forward (MLP, 4x width)"]
+    ln1 -.residual.-> add2(("+"))
+    ffn --> add2
+    add2 --> ln2["LayerNorm"]
+    ln2 --> outp["Block output (same shape as input)"]
+</div>
+
+      <p>Because the block's output has the <strong>same shape</strong> as its input, you can stack $N$ of them (12, 96, ...) like Lego.</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>Code</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>build it from scratch in PyTorch</small></div>
+      <p>We'll build attention from scratch in PyTorch — first raw scaled dot-product on a toy sequence with a heatmap, then a reusable self-attention module, then a complete Transformer block. (Tested on PyTorch 2.8.)</p>
+
+      <h3 id="code-by-hand">3a. Scaled dot-product attention, by hand</h3>
+      <div class="codeblock">
+        <div class="code-head">scaled_dot_product.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import math
+import matplotlib.pyplot as plt
+
+torch.manual_seed(0)
+
+# Toy "sequence": 4 tokens, each a d_model-dimensional embedding.
+# Pretend these are 4 sensor readings or 4 words.
+seq_len, d_model = 4, 8
+x = torch.randn(seq_len, d_model)          # X : (n=4, d=8)
+
+# Learned-in-real-life projection matrices. Here just random, small.
+Wq = torch.randn(d_model, d_model) * 0.5
+Wk = torch.randn(d_model, d_model) * 0.5
+Wv = torch.randn(d_model, d_model) * 0.5
+
+Q = x @ Wq                                  # (4, 8) queries
+K = x @ Wk                                  # (4, 8) keys
+V = x @ Wv                                  # (4, 8) values
+
+# Step 1: raw similarity scores, every query vs every key -&gt; (4, 4)
+scores = Q @ K.T / math.sqrt(d_model)       # the /sqrt(d) scaling
+
+# Step 2: row-wise softmax -&gt; attention weights, each row sums to 1
+attn = F.softmax(scores, dim=-1)            # (4, 4)
+
+# Step 3: weighted average of values
+out = attn @ V                              # (4, 8)
+
+print("attention weights:\n", attn.round(decimals=2))
+print("row sums (must be 1):", attn.sum(dim=-1))
+print("output shape:", out.shape)
+# -&gt; row sums (must be 1): tensor([1., 1., 1., 1.])
+# -&gt; output shape: torch.Size([4, 8])
+</code></pre>
+      </div>
+
+      <h3 id="code-visualize">3b. Visualize the attention weight matrix</h3>
+      <div class="codeblock">
+        <div class="code-head">visualize_attention.py <span class="lang">Python</span></div>
+<pre><code class="language-python">plt.figure(figsize=(4, 4))
+plt.imshow(attn.detach(), cmap="viridis")
+plt.colorbar(label="attention weight")
+plt.xlabel("Key (token being looked AT)")
+plt.ylabel("Query (token doing the LOOKING)")
+plt.title("Attention weights  softmax(QKᵀ/√d)")
+for i in range(seq_len):
+    for j in range(seq_len):
+        plt.text(j, i, f"{attn[i,j]:.2f}", ha="center", va="center",
+                 color="white", fontsize=9)
+plt.tight_layout()
+plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">👁️</span> What you should see</div>
+        <p>A 4×4 grid where each <em>row</em> is a probability distribution (brightnesses in a row sum to 1). A bright cell at $(i,j)$ means "token $i$ pulls strongly from token $j$." With random weights it looks fairly uniform; after training on a real task, rows develop sharp peaks — that's the model deciding <em>who attends to whom</em>.</p>
+      </div>
+
+      <h3 id="code-self-attention">3c. A reusable self-attention module (with optional causal mask)</h3>
+      <div class="codeblock">
+        <div class="code-head">self_attention.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import torch.nn as nn
+
+class SelfAttention(nn.Module):
+    """Single-head scaled dot-product self-attention."""
+    def __init__(self, d_model):
+        super().__init__()
+        self.Wq = nn.Linear(d_model, d_model, bias=False)
+        self.Wk = nn.Linear(d_model, d_model, bias=False)
+        self.Wv = nn.Linear(d_model, d_model, bias=False)
+        self.scale = math.sqrt(d_model)
+
+    def forward(self, x, mask=None):
+        # x: (batch?, seq, d_model). Works on (seq, d_model) too.
+        Q, K, V = self.Wq(x), self.Wk(x), self.Wv(x)
+        scores = Q @ K.transpose(-2, -1) / self.scale       # (..., n, n)
+        if mask is not None:
+            # Set masked positions to -inf so softmax gives them ~0 weight.
+            scores = scores.masked_fill(mask == 0, float("-inf"))
+        attn = F.softmax(scores, dim=-1)
+        return attn @ V, attn
+
+# Causal mask: token i may only attend to tokens j &lt;= i (no peeking ahead).
+sl = 5
+causal = torch.tril(torch.ones(sl, sl))     # lower-triangular ones
+sa = SelfAttention(16)
+o, w = sa(torch.randn(sl, 16), mask=causal)
+print("token 0 attends to:", w[0].detach().round(decimals=2))
+# -&gt; token 0 attends to: tensor([1., 0., 0., 0., 0.])   # only itself
+print("token 4 attends to:", w[4].detach().round(decimals=2))
+# -&gt; token 4 attends to: e.g. tensor([0.27, 0.10, 0.07, 0.13, 0.44])  # a distribution over
+#    positions 0-4 that sums to 1 (exact values depend on the RNG/torch version; the point is
+#    no position is masked, unlike token 0). With these random weights the split is roughly even.
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The causal mask makes a generator</div>
+        <p>The <strong>causal mask</strong> is the single trick that turns self-attention into a left-to-right generator: each position can only use the past. That's exactly what a language model needs to predict the next token.</p>
+      </div>
+
+      <h3 id="code-transformer-block">3d. Full Transformer block (using PyTorch's multi-head attention)</h3>
+      <div class="codeblock">
+        <div class="code-head">transformer_block.py <span class="lang">Python</span></div>
+<pre><code class="language-python">class TransformerBlock(nn.Module):
+    """Post-norm Transformer encoder block: MHA -&gt; FFN, both with residuals.
+
+    This is the original 2017 (Vaswani) layout: LayerNorm is applied AFTER the
+    residual add, matching Section 2's Z = LayerNorm(X + MultiHead(X)). Modern
+    LLMs instead use *pre-norm* — norm INSIDE each sublayer, before attention/FFN,
+    e.g. x = x + drop(attn(norm1(x), ...)) — which trains more stably at depth.
+    """
+    def __init__(self, d_model, n_heads, d_ff, dropout=0.1):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(d_model, n_heads,
+                                          dropout=dropout, batch_first=True)
+        self.ff = nn.Sequential(
+            nn.Linear(d_model, d_ff), nn.GELU(),
+            nn.Dropout(dropout), nn.Linear(d_ff, d_model),
+        )
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x, attn_mask=None):
+        # Sublayer 1: self-attention + residual
+        a, _ = self.attn(x, x, x, attn_mask=attn_mask)   # Q=K=V=x
+        x = self.norm1(x + self.drop(a))
+        # Sublayer 2: position-wise feed-forward + residual
+        x = self.norm2(x + self.drop(self.ff(x)))
+        return x
+
+block = TransformerBlock(d_model=16, n_heads=4, d_ff=64)
+batch = torch.randn(2, 5, 16)               # (batch=2, seq=5, d_model=16)
+print("block output shape:", block(batch).shape)
+# -&gt; block output shape: torch.Size([2, 5, 16])   # same shape in == out
+</code></pre>
+      </div>
+
+      <p>Note <code>d_model=16</code> with <code>n_heads=4</code> gives each head $16/4 = 4$ dimensions — <code>n_heads</code> must divide <code>d_model</code>. Output shape equals input shape, so <code>nn.Sequential(*[TransformerBlock(...) for _ in range(N)])</code> stacks $N$ layers instantly. In real code you'd reach for <code>nn.TransformerEncoderLayer</code> / <code>nn.TransformerEncoder</code>, but building it once by hand is how it stops being magic.</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>Real Case</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>why this matters</small></div>
+
+      <h3 id="why-attention-beat-rnns">Why attention beat RNNs — and where it matters for you</h3>
+      <p>The 2017 paper that introduced Transformers ("Attention Is All You Need") trained on machine translation (the <strong>WMT English–German</strong> benchmark). Two practical wins, both visible in your own robotics work:</p>
+
+      <p><strong>1. Parallelism in training.</strong> An RNN over a length-$n$ sequence is $n$ sequential steps — it <em>cannot</em> be parallelized along time. A Transformer's $QK^\top$ is a single batched matrix multiply: all positions at once. On a GPU that's the difference between hours and minutes, which is why models scaled from millions to billions of parameters once recurrence was removed.</p>
+
+      <p><strong>2. Long-range dependencies.</strong> Connecting position 1 to position 1000 costs an RNN ~1000 lossy hops; attention does it in <strong>one</strong>. Concretely, in a path-following log where the USV's behavior at $t{=}900$ depends on an obstacle first seen at $t{=}10$, attention can route that information directly. The cost: attention is $O(n^2)$ in sequence length (the $n\times n$ matrix), whereas an RNN is $O(n)$ — so for <em>very</em> long sequences you trade memory for that direct access. (This $O(n^2)$ wall is what efficient-attention research keeps chipping at.)</p>
+
+      <h3 id="multi-sensor-fusion">Multi-sensor fusion mapping</h3>
+      <p>Suppose at each timestep your USV produces a token by concatenating features from sonar, lidar, IMU, and GPS, projected to $d_{\text{model}}$. Run a small Transformer encoder over a window of recent timesteps:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Transformer concept</th><th>USV fusion meaning</th></tr></thead>
+        <tbody>
+          <tr><td>Token</td><td>One timestep's fused feature vector (or one sensor channel)</td></tr>
+          <tr><td>Query of token $t$</td><td>"What context do I need to estimate state at $t$?"</td></tr>
+          <tr><td>Attention weights</td><td>Learned, <em>dynamic</em> sensor/time relevance — heavy IMU in a turn, heavy lidar near a dock</td></tr>
+          <tr><td>Positional encoding</td><td>The timestamp / ordering of readings (so the model knows recency)</td></tr>
+          <tr><td>Causal mask</td><td>Enforce <em>online</em> operation: only use past readings, never future ones</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🌊</span> The headline: attention weights are data-dependent</div>
+        <p>A Kalman filter's gains are fixed by your noise model; attention <em>learns</em> to up-weight whichever sensor is trustworthy in the current situation — exactly the adaptive fusion you'd otherwise hand-tune.</p>
+      </div>
+
+      <h3 id="bridge-to-llms">The bridge to LLMs</h3>
+      <p>A modern large language model (GPT-style) is, structurally, almost entirely the same kit you built in 3d: <strong>a deep stack of decoder Transformer blocks</strong> — self-attention with a causal mask, feed-forward, residuals, layer-norm — repeated dozens to hundreds of times, fed token embeddings plus positional encodings, with a final linear layer predicting the next token. The one tweak is the <em>placement</em> of the layer-norm: 3d uses the original post-norm layout, while modern LLMs move the norm inside each sublayer (<strong>pre-norm</strong>, as the 3d docstring notes) for training stability at depth — same components, reordered. Train that to predict the next token over a few trillion tokens of text and the in-context routing you saw in the heatmap becomes grammar, facts, and reasoning. There's no new mechanism beyond this lesson — just scale, data, and the causal mask. We'll see how such models are adapted and deployed in <a href="17-transfer-learning-llms-mlops.html">17 — Transfer Learning, LLMs &amp; MLOps</a>.</p>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>Pitfalls &amp; Tips</h2>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> The mistakes that quietly break Transformers</div>
+        <ul>
+          <li><strong>Forgetting positional information.</strong> Drop positional encodings and your model treats input as a bag of tokens — it can't distinguish "boat hits dock" from "dock hits boat." Always add positions (or use RoPE) before the first block.</li>
+          <li><strong>Skipping the $\sqrt{d_k}$ scaling.</strong> Without it, scores blow up with dimension, softmax saturates to one-hot, gradients vanish, and training stalls. It's one line; don't omit it.</li>
+          <li><strong><code>n_heads</code> must divide <code>d_model</code>.</strong> PyTorch will raise an error otherwise. Each head gets $d_{\text{model}}/h$ dimensions.</li>
+          <li><strong>Wrong mask, silent leakage.</strong> A decoder/generator <em>must</em> use a causal mask. If you forget it, the model "cheats" by attending to future tokens, trains to near-zero loss, then fails completely at inference when the future isn't available. Sanity-check that token $i$'s weights are zero for $j&gt;i$ (like the 3c output).</li>
+          <li><strong>Confusing the padding mask with the causal mask.</strong> Real batches pad variable-length sequences; you need a <em>padding</em> mask to zero out attention to pad tokens, separate from the causal mask. PyTorch separates <code>attn_mask</code> (causal) from <code>key_padding_mask</code>.</li>
+          <li><strong>$O(n^2)$ memory surprise.</strong> Attention's memory grows with the <em>square</em> of sequence length. Doubling a 4k-token context to 8k roughly quadruples the attention matrix — a common out-of-memory trap. Use shorter windows or efficient-attention variants for long logs.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>Check Your Understanding</h2>
+
+      <p><strong>Q1.</strong> In $\text{softmax}(QK^\top/\sqrt{d_k})V$, what does a single <em>row</em> of the $n\times n$ attention matrix represent, and why must it sum to 1?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Row $i$ holds the mixing weights that token $i$ assigns to every token $j$ (including itself). Because each row is produced by a softmax, its entries are non-negative and sum to 1 — so the output for token $i$, $\sum_j A_{ij} v_j$, is a <em>convex combination</em> (weighted average) of all value vectors. It's a soft, normalized lookup, not an arbitrary sum.</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> Why divide the scores by $\sqrt{d_k}$ specifically, rather than some other constant?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>If query and key entries are ~independent with unit variance, their dot product over $d_k$ dimensions has variance $d_k$ and standard deviation $\sqrt{d_k}$. Dividing by $\sqrt{d_k}$ restores unit variance, keeping softmax inputs in a moderate range where it isn't saturated and gradients stay healthy. Any other constant wouldn't track how the spread grows with dimension.</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> Self-attention is permutation-equivariant (shuffle the tokens, the outputs shuffle identically). Why is that a problem, and how do Transformers fix it?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>It means the raw mechanism can't use word/timestep order — "A then B" looks identical to "B then A." That's fatal for language and time series. The fix is <strong>positional encodings</strong>: a position-dependent vector added to each token embedding (fixed sinusoids, learned, or rotary) so each token carries where it sits in the sequence.</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> What concrete advantage does multi-head attention give over a single attention head of the same total width?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>It lets the model attend to information in <strong>multiple independent representation subspaces simultaneously</strong> — one head can track one type of relationship (e.g. syntactic agreement, or "which sensor matters for heading") while another tracks a different one. A single head must compress all relationship types into one averaged attention pattern. The compute cost is essentially the same because each head is correspondingly narrower.</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> You're building an <em>online</em> state estimator for a USV that must never use future sensor readings. Which masking do you apply inside self-attention, and what bug appears if you forget it?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>A <strong>causal (lower-triangular) mask</strong>, so position $t$ only attends to positions $\le t$. Forget it and the model attends to future readings during training, drives loss artificially low, then collapses at deployment when the future genuinely isn't available — a classic train/serve leakage bug.</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml15-causal-mask">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You train a next-token language model but forget the causal mask. Training loss drops to nearly zero, yet at generation time the model is useless. What happened?</div>
+        <ul class="ex-options">
+          <li data-correct="false">The $\sqrt{d_k}$ scaling saturated the softmax, so no information flowed.</li>
+          <li data-correct="true">Each position attended to future tokens during training, so it "cheated" by peeking at the answer — at inference the future isn't available, so it collapses.</li>
+          <li data-correct="false">Positional encodings were missing, so the model couldn't order the tokens.</li>
+          <li data-correct="false">The $O(n^2)$ attention matrix ran out of memory and silently truncated.</li>
+        </ul>
+        <div class="ex-explain">Without a lower-triangular mask, position $t$ can attend to positions $&gt;t$ — including the very token it is supposed to predict. The model learns to read the answer rather than infer it, so training loss collapses. At generation the future genuinely doesn't exist, the crutch vanishes, and predictions fall apart. This is a classic train/serve leakage bug; always sanity-check that token $i$'s weights are zero for $j&gt;i$.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml15-scale-factor" data-answer="8" data-tol="0.001">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">A Transformer uses $d_{\text{model}} = 512$ and $h = 8$ heads, with $d_k = d_v = d_{\text{model}}/h$. By what number do you divide $QK^\top$ inside each head before the softmax? (Hint: the scale is $\sqrt{d_k}$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit"></span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">Each head's key dimension is $d_k = d_{\text{model}}/h = 512/8 = 64$. The scaling factor is $\sqrt{d_k} = \sqrt{64} = 8$. (Note the scale uses the <em>per-head</em> $d_k$, not the full $d_{\text{model}}$ — a common slip. Had you forgotten to split across heads, you'd have wrongly used $\sqrt{512} \approx 22.6$.)</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml15-attention-by-hand">
+        <div class="ex-head"><span class="badge">Q3</span> Derivation — one attention row by hand</div>
+        <div class="ex-q">A query $q$ produces raw (already-scaled) scores against three keys: $s = [2,\, 0,\, 0]$. The three value vectors are $v_1 = [1,0]$, $v_2 = [0,1]$, $v_3 = [0,0]$. Compute the softmax attention weights for this row, then the output $\sum_j A_{j} v_j$. (Use $e^2 \approx 7.389$.)</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Softmax of $s$ is $A_j = e^{s_j} / \sum_{j'} e^{s_{j'}}$. The denominator here is $e^2 + e^0 + e^0$. Then the output is a weighted average: $A_1 v_1 + A_2 v_2 + A_3 v_3$.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p>Denominator: $e^2 + e^0 + e^0 = 7.389 + 1 + 1 = 9.389$.</p>
+          <p>Weights: $A_1 = 7.389/9.389 \approx 0.787$, $A_2 = 1/9.389 \approx 0.107$, $A_3 = 1/9.389 \approx 0.107$. They sum to 1, as a softmax row must.</p>
+          <p>Output: $0.787\,[1,0] + 0.107\,[0,1] + 0.107\,[0,0] = [0.787,\ 0.107]$.</p>
+          <p>Notice the soft lookup at work: the high-score key 1 dominates the mixture (≈79%) but the others still leak in. Raise $s_1$ further and the softmax sharpens toward a near one-hot pull from $v_1$ — which is exactly the over-saturation the $\sqrt{d_k}$ scaling exists to prevent.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Lesson recap</div>
+        <ul>
+          <li><strong>Attention</strong> is a soft, learned lookup: each token forms a <strong>query</strong>, matches it against all <strong>keys</strong>, and retrieves a softmax-weighted average of all <strong>values</strong> — $\text{softmax}(QK^\top/\sqrt{d_k})V$.</li>
+          <li>The $\sqrt{d_k}$ scaling keeps softmax trainable; <strong>multi-head</strong> attention runs several lookups in parallel subspaces; <strong>positional encodings</strong> restore the order that attention is blind to.</li>
+          <li>A <strong>Transformer block</strong> alternates "mix across tokens" (attention) with "process each token" (feed-forward), glued by residual connections and layer-norm — and it stacks cleanly because input shape equals output shape.</li>
+          <li>Attention beat RNNs by being <strong>parallel</strong> and giving <strong>constant-length</strong> paths between any two positions; the price is $O(n^2)$ cost in sequence length. For robotics this enables adaptive, data-dependent multi-sensor fusion.</li>
+          <li>A modern <strong>LLM is a deep stack of causal decoder blocks</strong> — nothing in its core beyond this lesson, just scale and data.</li>
+        </ul>
+        <p>Next, we use attention and the building blocks from Parts 3–4 to <em>create</em> data rather than classify it — autoencoders, VAEs, GANs, and diffusion models: <a href="16-generative-models.html">16 — Generative Models</a>.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

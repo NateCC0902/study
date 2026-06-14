@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Angle Wrapping &amp; Real Actuators — PID Control for a USV</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-pid" data-course="pid" data-track="main" data-chapter="07-wrapping-actuators">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> PID&nbsp;·&nbsp;USV</a>
+  <span class="spacer"></span>
+  <span class="track-pill">PID · Ch 07</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">PID Course · Chapter 07 · Reality bites</div>
+        <h1>Angle Wrapping &amp; Real Actuators</h1>
+        <p>Two bugs that never show up in the clean math but always show up on the water. First: a controller that does flawless PID and still turns 340° the long way around, because nobody told it that 350° and 10° are neighbours. Second: the reason "raise $k_p$ until it oscillates" actually works on a real boat — when our idealized model swore it never would.</p>
+        <div class="meta"><span>⏱ ~25 min</span><span>🧭 Angle wrapping</span><span>⚡ Live sim</span><span>🐌 Servo slew &amp; phase lag</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="the-340-degree-bug"><span class="sec-no">1</span>The 340° bug: when subtraction lies</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>picture the compass</small></div>
+      <p>The boat is heading <strong>350°</strong> — just west of north. You hand it a new setpoint: <strong>10°</strong> — just east of north. To a sailor that's trivial: nudge the bow 20° to starboard and you're done. To a naive controller it's a disaster, because the controller doesn't know the compass is a <em>circle</em>. It does the one thing it knows how to do — subtract.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The whole bug in one line</div>
+        <p>$e = 10° - 350° = -340°$. The controller reads that as "turn 340° clockwise" and commits to the scenic route — all the way around the compass — to reach a heading that was <em>20° away</em>.</p>
+      </div>
+
+      <p>This is Case 8 from the notes, and it is the single most famous bug in vehicle control. It hides perfectly: every test you run that doesn't straddle north passes clean. Then on the day a waypoint sits just past the 360°/0° seam, the boat spins like a confused dog chasing its tail. On open water it's comedy; ten metres from a dock it's a hull repair.</p>
+
+      <div class="mermaid">
+flowchart LR
+    SP["setpoint 10°"] --> SUB["raw subtract<br/>10 − 350"]
+    H["heading 350°"] --> SUB
+    SUB --> RAW["e = −340°<br/>(turn the long way)"]
+    SUB --> WR["wrap(·) → (−π, π]"]
+    WR --> OK["e = +20°<br/>(turn the short way)"]
+</div>
+
+      <p>Notice the error doesn't enter the boat anywhere yet — this is purely the arithmetic the controller does <em>before</em> the first P, I, or D term. Get this wrong and a perfectly tuned PID faithfully executes a catastrophic command. The gains are innocent; the <em>error definition</em> is the bug.</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="wrap-to-pi"><span class="sec-no">2</span>Wrapping to (−π, π]: the math that fixes it</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>one modulo, done right</small></div>
+      <p>Heading lives on a circle, so an error of $-340°$ and an error of $+20°$ point the bow at exactly the same place — they differ by a full turn, $360°$. The fix is to take whichever representative of the angle lands in the half-open interval $(-\pi, \pi]$. That interval is the set of "shortest signed turns": at most a half-circle either way.</p>
+
+      <div class="math-box">$$ \mathrm{wrap}(\theta) \;=\; \big((\theta + \pi)\bmod 2\pi\big) - \pi \;\in\; (-\pi,\,\pi] $$</div>
+
+      <p>Walk it through with our numbers. The raw error is $\theta = -340° = -5.934$ rad. Add $\pi$, take the modulo by $2\pi$, subtract $\pi$:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Step</th><th>Computation</th><th>Result</th></tr></thead>
+        <tbody>
+          <tr><td>raw error</td><td>$10° - 350°$</td><td>$-340° = -5.9341$ rad</td></tr>
+          <tr><td>shift by $\pi$</td><td>$-5.9341 + 3.1416$</td><td>$-2.7925$ rad</td></tr>
+          <tr><td>$\bmod\,2\pi$</td><td>$-2.7925 \bmod 6.2832$</td><td>$3.4907$ rad</td></tr>
+          <tr><td>shift back</td><td>$3.4907 - 3.1416$</td><td><strong>$0.3491$ rad $= +20°$</strong></td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Why the $+\pi \ldots -\pi$ sandwich</div>
+        <p>A bare $\theta \bmod 2\pi$ maps everything into $[0, 2\pi)$ — so $-340°$ becomes $+20°$ ✅, but $+190°$ stays $+190°$ instead of collapsing to $-170°$ ❌, and you've fixed half the cases. Shifting by $\pi$ first <em>centres</em> the wrap window on zero, so both over- and under-shoots fold to the nearest equivalent. One caveat: the language's modulo must return a non-negative result for negative inputs. Python's <code>%</code> does; C's <code>fmod</code> and JavaScript's <code>%</code> do <em>not</em> — for those, add $2\pi$ and take the modulo again, or use <code>atan2(sin θ, cos θ)</code>, which is branch-free and handles the sign for you.</p>
+      </div>
+
+      <p>That last trick is worth memorising. Since $\sin$ and $\cos$ are periodic, $\operatorname{atan2}(\sin\theta, \cos\theta)$ returns the canonical angle in $(-\pi, \pi]$ regardless of how many turns $\theta$ has accumulated, with no modulo-sign surprises:</p>
+
+      <div class="math-box">$$ \mathrm{wrap}(\theta) \;=\; \operatorname{atan2}\!\big(\sin\theta,\; \cos\theta\big) $$</div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="see-it-spin"><span class="sec-no">3</span>See it spin: the live boat</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>watch the bug, then kill it</small></div>
+      <p>Here is the exact scenario from Case 8: the boat starts at <strong>350° heading</strong>, the setpoint is <strong>10°</strong>, and you can toggle the angle-wrap fix on and off. With the fix <em>off</em> you're watching a naive controller; with it <em>on</em>, the same gains do the sane thing.</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>🧭</span> Start at 350° heading for 10° — toggle the angle-wrap fix</div>
+        <canvas id="sim-wrap"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What to drag, what to watch</div>
+        <p><strong>Toggle the wrap fix off.</strong> The error reads $-340°$, the rudder slams to its $-35°$ stop, and the bow swings <em>away</em> from 10° — it grinds the entire long way around the compass to arrive at a heading it was 20° from. The heading trace climbs (or plunges) by hundreds of degrees. <strong>Now toggle it on.</strong> The error snaps to $+20°$, the rudder takes a gentle starboard bite, and the boat settles on 10° in seconds. Same plant, same $k_p,k_i,k_d$ — the <em>only</em> difference is one line of arithmetic on the error.</p>
+      </div>
+
+      <p>Push it further: nudge the setpoint a few degrees either side of north and watch the error never exceed $\pm 180°$ once wrapping is on. That bounded error is the whole point — the controller now always knows the shortest way home.</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="wrap-in-code"><span class="sec-no">4</span>The fix in code (and where it goes)</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>one function, every cycle</small></div>
+      <p>The wrap function is four characters of logic and belongs on <em>every</em> error before it touches the PID — not just at setpoint changes. Heading drifts continuously, so the seam can be crossed at any sample, not only when you command a new waypoint.</p>
+
+      <div class="codeblock">
+        <div class="code-head">wrap.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import math
+
+def wrap(angle):
+    """Fold any angle into (-pi, pi] — the shortest signed turn."""
+    return (angle + math.pi) % (2 * math.pi) - math.pi
+
+# --- inside the control loop, EVERY cycle ---
+error = wrap(setpoint - heading)        # rad, never larger than +/- pi
+u     = pid.update(error, dt)           # the PID never sees a raw angle
+</code></pre>
+      </div>
+
+      <p>Demonstrating the bug and the fix side by side makes the failure visceral. Both controllers below are identical except one wraps:</p>
+
+      <div class="codeblock">
+        <div class="code-head">demo_wrap.py <span class="lang">Python</span></div>
+<pre><code class="language-python">heading, setpoint = math.radians(350), math.radians(10)
+
+naive  = setpoint - heading                 # -5.934 rad  = -340 deg
+fixed  = wrap(setpoint - heading)           #  0.349 rad  =  +20 deg
+
+print(f"naive error: {math.degrees(naive):+.0f} deg")   # naive error: -340 deg
+print(f"wrapped err: {math.degrees(fixed):+.0f} deg")   # wrapped err:  +20 deg
+
+# The naive boat commands kp * (-5.934) of rudder -> pinned at the -35 deg stop,
+# and turns 340 deg the WRONG way. The wrapped boat asks for a 20-deg nudge.
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> The places people forget to wrap</div>
+        <p>It's not enough to wrap once. Wrap the error feeding <strong>P and I</strong>; if you do derivative-on-error you must wrap that difference too (Ch 06 made you switch to derivative-on-<em>measurement</em>, which sidesteps it). And in ROS 2, your yaw from <code>/odometry/filtered</code> is already in $(-\pi, \pi]$ from the quaternion — but the moment you do any math on it, re-wrap. The bug is invisible until your test crosses north.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="why-high-kp-oscillates"><span class="sec-no">5</span>Why high $k_p$ oscillates on a real boat</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>an honest confession</small></div>
+      <p>Now Case 9, and it starts with an embarrassing admission about our model. A bare first-order Nomoto boat with an <em>ideal</em> rudder <strong>never goes unstable from $k_p$ alone</strong>. In early tests, even $k_p = 100$ settled fine. So if you've been told all course "crank $k_p$ until it rings, then back off" — on this idealized plant, that recipe shouldn't work at all. Yet it works on every real boat. What gives?</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-word answer</div>
+        <p><strong>Lag.</strong> Real actuators can't move instantly. Our rudder servo slews at $25°/\text{s}$ — it physically takes time to swing. At high $k_p$ the controller demands rail-to-rail flips faster than the servo can follow, so the rudder is always executing what the boat needed a second ago. That stale correction is <em>phase lag</em>, and phase lag plus high gain is the universal recipe for oscillation.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>slew rate becomes delay</small></div>
+      <p>The servo's stop-to-stop travel is the full rudder range, $\pm 35° = 70°$. At a slew rate of $25°/\text{s}$ it cannot do that move faster than</p>
+
+      <div class="math-box">$$ t_{\text{stop-to-stop}} \;=\; \frac{70°}{25°/\text{s}} \;=\; 2.8\ \text{s} $$</div>
+
+      <p>So when a hot P controller commands a square wave — slam to $+35°$, then $-35°$, then back — the actual rudder traces a <em>sawtooth</em> chasing it, never arriving before the command flips again. The rudder angle the boat actually feels is delayed relative to the command. Approximate the slew limiter as a pure transport delay $\tau_d$; for fast oscillation it adds phase $-\omega\tau_d$ to the loop. When the accumulated phase from the hull lag $T$ plus this delay reaches $-180°$ at a frequency where the gain still exceeds 1, the loop sustains oscillation. More $k_p$ raises that crossover frequency, where the delay's phase penalty $-\omega\tau_d$ is larger — so past some gain it always tips over.</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Why the idealized model fooled us</div>
+        <p>A single pole (the hull's $T = 2.5$ s lag) contributes at most $-90°$ of phase — it can <em>never</em> reach the $-180°$ that a pure-gain loop needs to oscillate. That's why ideal $k_p = 100$ settled. Add the servo's transport-delay phase $-\omega\tau_d$, which grows without bound as frequency rises, and you finally get to $-180°$. Reality always brings extra lag: sensor filtering, comms latency, thruster spin-up, hull hydrodynamics. <strong>More lag → lower usable $k_p$.</strong></p>
+      </div>
+
+      <div class="layer"><span class="step">④</span> Real case <small>the sawtooth that eats servos</small></div>
+      <p>This is exactly Case 9's plot: command (thin) is a square wave; the actual rudder (thick) is a lagging sawtooth. The boat oscillates not because the math is unstable, but because the actuator is always a beat behind. And it's why our sim has the $25°/\text{s}$ slew limit baked in — tuning against an unrealistically perfect plant teaches you gains that fall apart the instant you hit the water.</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> The practical takeaway for tuning</div>
+        <p>The "raise $k_p$ until sustained oscillation" recipe (the ultimate-gain method) <em>works precisely because</em> your real actuator supplies the missing phase lag. On this boat that ultimate gain is $K_u \approx 5$ with period $T_u \approx 9$ s; back off to half, $k_p \approx 2$–$2.5$. Tune against the real plant — slew limit and all — never the textbook ideal.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="two-bugs-one-lesson"><span class="sec-no">6</span>Two bugs, one lesson</h2>
+      <p>These cases look unrelated — one is arithmetic, one is hardware — but they teach the same thing: <strong>the clean model is a lie of omission, and the omissions bite.</strong></p>
+      <ol>
+        <li><strong>Angle wrapping</strong> is the model forgetting that heading is <em>circular</em>. Fix: $\mathrm{wrap}(\theta) \in (-\pi,\pi]$ on every error, every cycle.</li>
+        <li><strong>Actuator slew</strong> is the model forgetting that the rudder is <em>physical</em>. It adds phase lag, which is what makes high $k_p$ oscillate — and what makes the tuning recipe valid.</li>
+      </ol>
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> The meta-bug</div>
+        <p>Both failures are <em>invisible in clean testing</em>. The wrap bug hides until you cross north; the slew bug hides until you tune against a real servo. The discipline is to put reality into your tests — cross the seam on purpose, and tune the plant you'll actually deploy on.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>Your turn</h2>
+
+      <div class="layer"><span class="step">⑤</span> Practice <small>prove you can spot both bugs</small></div>
+
+      <div class="exercise" data-ex="quiz" data-id="pid07-why-wrap">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">A boat at 350° is told to hold 10°. With no angle wrapping, what does the naive controller do, and <em>why</em>?</div>
+        <ul class="ex-options">
+          <li data-correct="false">Settles correctly on 10° — subtraction always gives the right turn.</li>
+          <li data-correct="true">Computes $e=-340°$, so it turns nearly all the way around the compass the long way to reach a heading 20° away.</li>
+          <li data-correct="false">Blows up because the Nomoto model is unstable at any setpoint near north.</li>
+          <li data-correct="false">Stalls — the error is so large the integral windup cancels the P term.</li>
+        </ul>
+        <div class="ex-explain">Raw subtraction gives $10°-350°=-340°$. The controller has no idea heading is circular, so it commands a huge negative correction — full rudder the wrong way — and grinds 340° around to reach a point that was a 20° nudge to starboard. Wrapping to $(-\pi,\pi]$ turns that $-340°$ into $+20°$.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="pid07-slew-time" data-answer="2.8" data-tol="0.1">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">The rudder travels $\pm 35°$ (so $70°$ stop-to-stop) and slews at $25°/\text{s}$. How long, in <strong>seconds</strong>, does it take the servo to swing from one stop to the other? (This delay is the phase lag that makes high $k_p$ oscillate.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">s</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$t = \dfrac{70°}{25°/\text{s}} = 2.8$ s. When a hot P controller flips the command rail-to-rail faster than that, the actual rudder traces a lagging sawtooth — always doing what the boat needed almost three seconds ago. That transport delay is the missing phase that an ideal single-pole plant never had, and it's why "crank $k_p$ until it rings" works on real hardware.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="pid07-wrap-derive">
+        <div class="ex-head"><span class="badge">Q3</span> Derivation — wrap 200° by hand</div>
+        <div class="ex-q">Using $\mathrm{wrap}(\theta) = \big((\theta+\pi)\bmod 2\pi\big)-\pi$, wrap an error of $+200°$. Show each step, give the answer in degrees, and explain why the naive $\theta \bmod 2\pi$ would get this case wrong.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Work in degrees with $\pi \to 180°$ and $2\pi \to 360°$: add $180$, take mod $360$ (result must be non-negative), subtract $180$. Then ask: what does $200° \bmod 360°$ give, and is that the <em>shortest</em> turn?</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p>Step by step in degrees: shift, $200 + 180 = 380$; modulo, $380 \bmod 360 = 20$; shift back, $20 - 180 = \mathbf{-160°}$. So a $+200°$ error wraps to $\mathbf{-160°}$ — turn $160°$ the <em>other</em> way, which is shorter than $200°$.</p>
+          <p>The naive $\theta \bmod 2\pi$ would give $200° \bmod 360° = 200°$ — unchanged, and <em>not</em> the shortest turn (the boat would swing $200°$ when $160°$ the other way reaches the same heading). The $+\pi\ldots-\pi$ sandwich centres the wrap window on zero so over-shoots like this fold to the near side. That's the whole reason for the two extra shifts.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>Heading is circular, so define error as $\mathrm{wrap}(\text{setpoint}-\psi) \in (-\pi,\pi]$ — every cycle, before P/I/D, or a perfect PID will turn 340° the wrong way (Case 8). And the reason "raise $k_p$ until it oscillates" works isn't in the ideal model — a single hull pole can't reach $-180°$ phase. It's the real actuator: the $25°/\text{s}$ servo needs $2.8$ s stop-to-stop, and that delay is the phase lag that destabilizes high gain (Case 9). Both bugs hide in clean tests; put reality into your tests and tune the plant you'll deploy. That closes the loop on a controller that survives the water — next, the full tuning walkthrough.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+<script src="../assets/pid-sim.js"></script>
+<script>EM.pidSim("sim-wrap", EM.pidPresets.wrap());</script>
+</body>
+</html>

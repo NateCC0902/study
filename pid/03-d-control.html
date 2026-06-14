@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>D Control: The Damper — PID Control for a USV</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-pid" data-course="pid" data-track="main" data-chapter="03-d-control">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> PID&nbsp;·&nbsp;USV</a>
+  <span class="spacer"></span>
+  <span class="track-pill">PID · Ch 03</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">PID Course · Chapter 03 · The D term</div>
+        <h1>D Control: The Damper</h1>
+        <p>P alone overshoots and rings — it's a spring with no friction. In this chapter we keep $k_p=2$ fixed and add the derivative term. We'll watch D fight P on the way in, pin down the exact instant the controller decides to coast, and prove the one thing D can never do.</p>
+        <div class="meta"><span>⏱ ~30 min</span><span>🧭 PD heading hold</span><span>⚡ Live sim</span><span>🛑 Damping</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="why-add-d"><span class="sec-no">1</span>Why P needs a partner</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>where we left off</small></div>
+      <p>Last chapter the P-only boat behaved like a mass on a spring. Command a turn from 0° to 90° and the rudder pulls harder the further you are from the setpoint — exactly like a spring pulls harder the more you stretch it. The trouble is what a lightly-damped spring does: it <em>oscillates</em>. The bow swings to 90°, but it arrives moving fast, sails straight through, and rings.</p>
+
+      <p>Concretely, with the gains we settled on, $k_p=2$ rings once and settles near 92°. Push to $k_p=5$ and it never stops — that's the ultimate gain $K_u$ of this boat, a $\pm16°$ oscillation forever. The fix is <strong>not</strong> more spring. It's friction. That's the derivative term.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence model of D</div>
+        <p>P reacts to <strong>where you are</strong> (the error). D reacts to <strong>how fast that's changing</strong> (the error's rate). A shock absorber doesn't care where the car is — only how fast the suspension is moving. D is the shock absorber.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>the term we're adding</small></div>
+      <p>We keep the same discrete control law from Chapter 01 and simply switch on $k_d$. The derivative is a finite difference of the (already wrapped) error:</p>
+      <div class="math-box">$$ u_n = \underbrace{k_p\,e_n}_{\text{P: position}} \;+\; \underbrace{k_d\,\frac{e_n - e_{n-1}}{dt}}_{\text{D: velocity}}, \qquad e_n = \psi_\text{set} - \psi_n $$</div>
+      <p>Read the sign carefully. When the boat is swinging <em>toward</em> the setpoint, the error is shrinking, so $e_n &lt; e_{n-1}$ and the finite difference is <strong>negative</strong>. With $k_d &gt; 0$, D therefore comes out negative — it pushes the rudder the <em>opposite</em> way to P. D opposes P on the approach. That opposition is the whole mechanism.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Phase of the maneuver</th><th>$e$</th><th>$\dot e$</th><th>D term</th><th>Effect</th></tr></thead>
+        <tbody>
+          <tr><td>far out, just started turning</td><td>large +</td><td>small −</td><td>small −</td><td>P dominates, full turn</td></tr>
+          <tr><td>closing fast, near target</td><td>small +</td><td>large −</td><td>large −</td><td>D dominates, brakes hard</td></tr>
+          <tr><td>on heading, holding</td><td>0</td><td>0</td><td>0</td><td>D vanishes entirely</td></tr>
+        </tbody>
+      </table></div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-sim"><span class="sec-no">2</span>Drive it: add the damper yourself</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>feel it before you trust the math</small></div>
+      <p>Same boat as always: $K=0.6$, $T=2.5$ s, 20 Hz loop, $\pm35°$ rudder. The P gain is pinned at $k_p=2$. The only knob that matters here is $k_d$. Run a 0° → 90° step and watch the heading panel.</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>🧭</span> PD heading hold (add the damper kd)</div>
+        <canvas id="sim-pd"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What to drag, what to watch</div>
+        <p>Sweep $k_d$ and reproduce the three cases from the notes:</p>
+        <ul>
+          <li><strong>$k_d=0$</strong> — pure P. It overshoots to roughly 118° and rings. This is your baseline ugliness.</li>
+          <li><strong>$k_d=1$</strong> — one small, polite overshoot. The damper is biting.</li>
+          <li><strong>$k_d=3$</strong> — it glides in like a parking valet. No overshoot at all.</li>
+        </ul>
+        <p>Now watch the <em>rudder</em> panel as the bow nears 90°: with $k_d=3$ the command actually goes <strong>negative</strong> — counter-rudder — well before the boat arrives. That negative blip is D braking. P would never command counter-rudder while still short of the target; only D does.</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Push it too far</div>
+        <p>Crank $k_d$ toward 8–10. The approach gets sluggish and the rudder starts to look twitchy. Too much damper makes the boat afraid of its own motion — and (foreshadowing Ch 07) it amplifies sensor noise into rudder chatter. There's a sweet spot, and $k_d=3$ is it for this hull.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="d-opposes-p"><span class="sec-no">3</span>D opposes P: the worked example, re-read</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>the cancellation in numbers</small></div>
+      <p>The cleanest proof that D fights P lives in the worked timestep from Chapter 01. Recall the mid-maneuver snapshot — heading 60°, setpoint 90°, previous error 31°, gains $k_p=2,\ k_d=3$:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Step</th><th>Computation</th><th>Result</th></tr></thead>
+        <tbody>
+          <tr><td>error $e_n$</td><td>wrap(90°−60°)=30°</td><td>0.5236 rad</td></tr>
+          <tr><td>P</td><td>$2 \times 0.5236$</td><td><strong>+1.047 rad</strong> (+60°)</td></tr>
+          <tr><td>$\dot e$</td><td>$(0.5236 - 0.5411)/0.05$</td><td>−0.349 rad/s (bow closing at 20 °/s)</td></tr>
+          <tr><td>D</td><td>$3 \times (-0.349)$</td><td><strong>−1.047 rad</strong> (−60°)</td></tr>
+          <tr><td>sum (P + D)</td><td>$1.047 - 1.047$</td><td>≈ 0 rad → controller coasts</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Read that again</div>
+        <p>The boat is still <strong>30° short</strong> of the setpoint, and yet P (+60° of rudder) and D (−60°) <em>exactly cancel</em>. The controller commands essentially zero rudder. Why? Because the bow is already swinging in at 20 °/s. Pushing harder wouldn't get there sooner — it would only build more momentum to overshoot with. <strong>That cancellation is damping.</strong> Compare the P-only world: P alone would have demanded +60°, clamped to the +35° stop, full speed into the wall.</p>
+      </div>
+
+      <p>This is why the PD boat in the sim eases off long before it arrives. D is reading the closing rate and quietly subtracting it from the demand. The faster you're closing, the more it subtracts.</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="coasting-rule"><span class="sec-no">4</span>The coasting rule: when does it go neutral?</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive the threshold</small></div>
+      <p>The cancellation above wasn't luck. The controller goes neutral — P + D = 0 — exactly when the two terms are equal and opposite. Set them against each other:</p>
+      <div class="math-box">$$ k_p\,e = k_d\,\dot e \quad\Longrightarrow\quad \dot e = \frac{k_p}{k_d}\,e $$</div>
+      <p>(I'm writing $\dot e$ as a positive closing rate here; on the approach $\dot e$ is actually negative and it's the magnitudes that balance.) Plug in our gains, $k_p=2$ and $k_d=3$:</p>
+      <div class="math-box">$$ \dot e = \frac{k_p}{k_d}\,e = \frac{2}{3}\,e $$</div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The rule of thumb</div>
+        <p>At $k_p=2,\ k_d=3$, the controller stops pushing once the <strong>closing rate (°/s) exceeds ⅔ of the remaining error (°)</strong>. So at 30° out, the threshold is $\tfrac{2}{3}\times 30 = 20$ °/s — close faster than that and D wins, the rudder eases off. That's <em>precisely</em> the worked example: 30° out, closing at 20 °/s, exactly on the knife-edge where P and D cancel.</p>
+      </div>
+
+      <p>The ratio $k_p/k_d$ <em>is</em> the controller's idea of a safe approach speed per degree remaining. Lower it (more $k_d$, or less $k_p$) and the boat insists on creeping in slowly — heavily damped. Raise it (less $k_d$) and it's willing to arrive fast — under-damped, overshoots. Tuning D is choosing how aggressively the boat is allowed to coast into its target.</p>
+
+      <div class="mermaid">
+flowchart TD
+    A["error e, closing rate ė"] --> B{"ė &gt; kp/kd · e ?"}
+    B -->|"yes — closing too fast"| C["D beats P<br/>net rudder eases / reverses<br/>BRAKE"]
+    B -->|"no — closing slowly"| D["P beats D<br/>net rudder still pushing<br/>KEEP TURNING"]
+    C --> E["glide to setpoint, no overshoot"]
+    D --> E
+</div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="d-on-change"><span class="sec-no">5</span>D acts on change only — and what that costs</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>D's blind spot</small></div>
+      <p>Here is the single most important limitation, and it falls straight out of the math. D is proportional to $\dot e$, the rate of change of error. The moment the boat settles onto a heading and holds it, the error stops changing: $\dot e = 0$, so <strong>D = 0</strong>. The damper disappears the instant the motion stops. That's exactly what you want from a damper — but it means D contributes <em>nothing</em> to holding a steady heading.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> D cannot fix offset, and it cannot do the turn</div>
+        <p>Recall Case 2: the current pushes the bow like 4° of stuck rudder, and a P controller settles with a standing offset because at zero error it commands zero rudder. <strong>Adding D changes none of this.</strong> When the boat sits at its (wrong) steady heading, the error is constant, $\dot e=0$, and D = 0 — it has nothing to grab. D only tames <em>motion</em>; it cannot supply the constant rudder a steady disturbance demands. Killing that offset is a different term's job entirely (the integral — next chapter).</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>two boundary conditions</small></div>
+      <p>Both failures of D are the same fact seen twice. At a steady offset heading the error is some constant $e_\text{ss} \neq 0$:</p>
+      <div class="math-box">$$ \dot e = 0 \;\Rightarrow\; \text{D} = k_d\,\dot e = 0, \qquad u_\text{ss} = k_p\,e_\text{ss} + 0 = k_p\,e_\text{ss} $$</div>
+      <p>The steady-state rudder is set by P alone — D added nothing. So PD lands on the <em>same</em> offset as P-only against a current. D makes the journey smooth; it does not change the destination. Hold that thought: it's the cliffhanger for the I term.</p>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="in-code"><span class="sec-no">6</span>The D term in code</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>This is the same <code>PID</code> class from Chapter 01 — we're just looking hard at the two lines that <em>are</em> the derivative. Note the guard on the very first sample: with no <code>prev_error</code> yet, the finite difference is undefined, so D is forced to zero. Skip that guard and your first timestep computes a garbage derivative against <code>None</code> and slams the rudder.</p>
+      <div class="codeblock">
+        <div class="code-head">pid_controller.py <span class="lang">Python</span></div>
+<pre><code class="language-python">def update(self, error, dt):
+    """One PD step. error is already angle-wrapped (rad)."""
+    p = self.kp * error
+
+    # --- the derivative term ---------------------------------
+    # First sample: no previous error, so the rate is undefined.
+    # Force D = 0 rather than differencing against None.
+    if self.prev_error is None:
+        d = 0.0
+    else:
+        de = error - self.prev_error          # change in error this step
+        d  = self.kd * de / dt                # rad rudder; negative while closing in
+    self.prev_error = error                    # remember for next call
+    # ---------------------------------------------------------
+
+    u = p + d                                  # (ki*integral added in Ch 04)
+    return max(self.out_min, min(self.out_max, u))   # clamp to rudder stops
+</code></pre>
+      </div>
+
+      <div class="layer"><span class="step">④</span> Real case <small>verify the worked example</small></div>
+      <p>Drive the same numbers through it as a sanity check — this should reproduce the hand calculation exactly. Notice we wrap every error <em>before</em> it reaches the controller (that angle-wrap bug is its own chapter), and we pass the real loop period as <code>dt</code>.</p>
+      <div class="codeblock">
+        <div class="code-head">check_worked_example.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import math
+
+pid = PID(kp=2.0, ki=0.0, kd=3.0, output_limits=(-0.611, 0.611))  # ±35°
+DT  = 0.05
+
+# Seed the controller with the "previous" sample: heading 59°, sp 90°
+prev_heading = math.radians(59.0)
+pid.update(math.radians(90.0) - prev_heading, DT)   # prev_error = 31° = 0.5411 rad
+
+# Now the snapshot step: heading 60°, setpoint 90°
+e = math.radians(90.0) - math.radians(60.0)         # 30° = 0.5236 rad
+u = pid.update(e, DT)
+
+print(f"P  = {pid.kp * e:+.3f} rad   ({math.degrees(pid.kp*e):+.1f}°)")
+print(f"de = {e - math.radians(31.0):+.4f} rad   over dt = {DT}s")
+print(f"u  = {u:+.3f} rad   ({math.degrees(u):+.1f}°)")
+# P  = +1.047 rad   (+60.0°)
+# de = -0.0175 rad  -&gt; D = 3 * (-0.0175/0.05) = -1.047 rad (-60.0°)
+# u  = +0.000 rad   (+0.0°)   &lt;- P and D cancel: the boat coasts
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">⚓</span> On the real USV</div>
+        <p>On the water, $\dot e$ comes from differencing a noisy compass at 20 Hz — and the derivative of noise is enormous (two adjacent 0.5° readings can imply 14 °/s of phantom swing). That's why production code differentiates the <em>measurement</em>, not the error, and low-pass filters it. Both are decisions you make right here in <code>update()</code>; we'll meet the bugs that force them in Ch 06–07. For now, ideal sensor, clean D.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>Your turn</h2>
+
+      <div class="layer"><span class="step">⑤</span> Practice <small>make the rules yours</small></div>
+
+      <div class="exercise" data-ex="quiz" data-id="pid03-why-no-offset-fix">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">The PD boat ($k_p=2,\ k_d=3$) holds a steady heading against the current but settles 2° off the setpoint — the same offset the P-only boat had. Why didn't adding D remove the offset?</div>
+        <ul class="ex-options">
+          <li data-correct="false">$k_d=3$ is too small; a larger $k_d$ would close the gap.</li>
+          <li data-correct="true">At a steady heading the error is constant, so $\dot e = 0$ and D = 0 — D contributes nothing while holding, leaving P alone to fight the current.</li>
+          <li data-correct="false">D adds its own offset that happens to cancel out.</li>
+          <li data-correct="false">The current grew while the boat settled.</li>
+        </ul>
+        <div class="ex-explain">D is proportional to $\dot e$. Once the boat is steady, $\dot e = 0$, so $u_\text{ss} = k_p e_\text{ss} + k_d\cdot 0 = k_p e_\text{ss}$ — identical to P-only. D smooths the <em>approach</em> but cannot supply the constant rudder a steady disturbance demands. That's the integral's job (Ch 04). No amount of $k_d$ changes the destination.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="pid03-coasting-rate" data-answer="13.3" data-tol="0.5">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">Using the coasting rule $\dot e = \tfrac{k_p}{k_d}\,e$ with $k_p=2,\ k_d=3$: the boat is <strong>20° short</strong> of its setpoint. Above what closing rate (in °/s) does D start to beat P and the controller eases off the rudder?</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">°/s</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$\dot e = \tfrac{2}{3}\times 20° = 13.33$ °/s. Below this, P still dominates and the rudder keeps pushing into the turn; above it, D dominates and the controller starts braking. Notice the threshold scales with how far out you are — at 30° it was 20 °/s, at 20° it's 13.3 °/s. The closer you get, the more cautious the controller becomes about your speed.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="pid03-counter-rudder">
+        <div class="ex-head"><span class="badge">Q3</span> Reasoning — the negative rudder blip</div>
+        <div class="ex-q">In the sim with $k_d=3$, the rudder command goes briefly <strong>negative</strong> (counter-rudder) while the boat is still short of 90° and turning toward it. Explain why, and explain why a pure-P controller could never do this.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Write out $u = k_p e + k_d \dot e$ near the end of the approach. The error $e$ is still positive (you haven't arrived). What sign is $\dot e$, and how big is D relative to P when the bow is swinging in fast?</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p>Near the end of the approach the error is small but positive ($e &gt; 0$, still short) while the closing rate is large, so $\dot e$ is strongly negative. Then $\text{D} = k_d\dot e$ is a large negative number and $\text{P} = k_p e$ is a small positive one. Their sum $u = k_p e + k_d\dot e$ goes <strong>negative</strong>: the controller commands counter-rudder to brake the swing before the boat reaches the setpoint, killing the momentum that would otherwise cause overshoot.</p>
+          <p>A pure-P controller computes $u = k_p e$. While $e &gt; 0$ (short of target), $u$ is always positive — it <em>cannot</em> command counter-rudder until the boat has already overshot and $e$ flips sign. By then the momentum is built and you ring. Anticipatory braking is uniquely D's contribution: it acts on the <em>rate</em>, so it can react before the position error tells it to.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>D is the damper: $\text{D}=k_d\,\dot e$. On the approach the error is shrinking, so $\dot e &lt; 0$ and D <strong>opposes P</strong>, braking the swing before the boat arrives — that's the P+D cancellation in the worked example (30° out, 20 °/s in, P and D both ±60°, net zero). The coasting rule $k_p e = k_d\dot e$ gives the neutral threshold: at $k_p=2,\,k_d=3$, ease off once closing faster than ⅔ of the remaining error. But D acts on <em>change only</em>: once steady, $\dot e=0$ and D=0, so it cannot fix the standing offset against a current and cannot do the turn — it only tames motion. Holding the rudder while error is zero needs the integral. Next: I, the trim tab.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+<script src="../assets/pid-sim.js"></script>
+<script>EM.pidSim("sim-pd", EM.pidPresets.pd());</script>
+</body>
+</html>

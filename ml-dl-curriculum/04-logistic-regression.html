@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Logistic Regression &amp; Classification — Machine Learning &amp; Deep Learning</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="04-logistic-regression">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 04</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL Course · 04</div>
+        <h1>Logistic Regression &amp; Classification</h1>
+        <p>You already know how to predict a <em>number</em>. Now we bend that exact linear model into a classifier: keep the dot product, squash it through a sigmoid, train it with the one loss whose gradient collapses back to the clean residual you've already memorized. By the end you'll have built a mine-vs-rock sonar detector from scratch in numpy.</p>
+        <div class="meta"><span>⏱ ~40 min</span><span>📐 Sigmoid + log-loss</span><span>🧮 numpy from scratch</span><span>🌊 Sonar mines</span></div>
+      </section>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Prerequisites</div>
+        <p>You should be comfortable with the gradient of a loss, the update rule $\theta \leftarrow \theta - \eta \nabla J$, and vectorized numpy from <a href="03-gradient-descent.html">03 — Gradient Descent</a>. Linear regression from <a href="02-linear-regression.html">02 — Linear Regression</a> is the model we're about to bend into a classifier.</p>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> By the end you can</div>
+        <ul>
+          <li>Explain why a linear model's raw output is the wrong tool for predicting a <em>class</em>, and how the <strong>sigmoid</strong> fixes it.</li>
+          <li>Derive <strong>binary cross-entropy</strong> (log-loss) and show its gradient collapses to the same clean form as linear regression: $\frac{1}{m}X^\top(\hat{y}-y)$.</li>
+          <li>Implement logistic regression from scratch in numpy with gradient descent.</li>
+          <li>Plot and interpret the <strong>decision boundary</strong> and the sigmoid curve.</li>
+          <li>Sketch how <strong>softmax</strong> generalizes this to more than two classes.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>Intuition</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>In linear regression you predicted a <em>number</em>: house price, water depth from a pressure reading, distance-to-waypoint. Now you want a <strong>class</strong>: is this sonar return a <strong>mine</strong> or a <strong>rock</strong>? Should the drone <strong>launch</strong> or <strong>abort</strong>?</p>
+
+      <p>The obvious hack is to fit a line and threshold it: predict class 1 if the line is above some cutoff. That mostly works — but the line itself outputs values in $(-\infty, +\infty)$, and we want something that behaves like a <strong>probability</strong>: bounded in $(0, 1)$, confidently near 0 or 1 in clear cases, hovering near 0.5 when the model is unsure.</p>
+
+      <p>The trick: keep the linear part $z = w^\top x + b$ (the same dot product you already know), then <strong>squash</strong> it through the <strong>sigmoid</strong> function $\sigma(z) = 1/(1+e^{-z})$. The linear part decides <em>which side of a boundary</em> you're on and <em>how far</em>; the sigmoid turns "how far" into "how confident."</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> Analogy from your world</div>
+        <p>Think of $z$ as a <strong>signed margin</strong> — like a control error or a signed distance to a path. A USV's lateral error tells you both the side (port/starboard) and the magnitude. The sigmoid is a soft gate that says "the further off the centerline, the more certain I am which side you're on," saturating to a firm yes/no once you're clearly committed.</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    X["features x<br/>(sonar bands,<br/>wind, etc.)"] --> Z["linear score<br/>z = wᵀx + b"]
+    Z --> S["sigmoid<br/>σ(z) ∈ (0,1)"]
+    S --> P["P(class=1 | x)"]
+    P --> D{"≥ 0.5 ?"}
+    D -->|yes| C1["predict 1 (mine)"]
+    D -->|no| C0["predict 0 (rock)"]
+</div>
+
+      <p>The set of points where $z = 0$ (equivalently $\sigma(z) = 0.5$) is the <strong>decision boundary</strong>. Because $z$ is linear in $x$, that boundary is a straight line (in 2D), a plane (in 3D), or a hyperplane in general. Logistic regression is a <strong>linear classifier</strong> — the <em>nonlinearity is only in how it reports confidence</em>, not in the shape of the boundary.</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>The Math</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive it</small></div>
+      <p><strong>Symbols.</strong> $x \in \mathbb{R}^n$ is a feature vector for one example ($n$ features). $w \in \mathbb{R}^n$ are the weights, $b \in \mathbb{R}$ the bias. $y \in \{0, 1\}$ is the true label. We stack $m$ examples into a design matrix $X \in \mathbb{R}^{m \times n}$ (one row per example) and labels $y \in \{0,1\}^m$.</p>
+
+      <h3 id="the-model">The model</h3>
+      <div class="math-box">$$z = w^\top x + b, \qquad \hat{y} = \sigma(z) = \frac{1}{1 + e^{-z}}$$</div>
+
+      <p>$\hat{y}$ is interpreted as $P(y=1 \mid x)$, and $P(y=0 \mid x) = 1 - \hat{y}$. The sigmoid comes from inverting the <strong>log-odds</strong> (logit): if you assume the log-odds of class 1 are linear in $x$,</p>
+
+      <div class="math-box">$$\log\frac{P(y=1)}{P(y=0)} = z \;\;\Longrightarrow\;\; P(y=1) = \frac{1}{1+e^{-z}} = \sigma(z).$$</div>
+
+      <p>That's <em>where the sigmoid comes from</em> — it is the unique function that maps a linear log-odds score back to a probability.</p>
+
+      <p>A fact we'll use twice: the sigmoid's derivative is delightfully clean,</p>
+
+      <div class="math-box">$$\sigma'(z) = \sigma(z)\,(1 - \sigma(z)).$$</div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Quick origin</div>
+        <p>$\sigma = (1+e^{-z})^{-1}$, so $\sigma' = e^{-z}(1+e^{-z})^{-2} = \sigma \cdot \frac{e^{-z}}{1+e^{-z}} = \sigma(1-\sigma)$.</p>
+      </div>
+
+      <h3 id="why-not-mse">Why not just use MSE?</h3>
+      <p>You might be tempted to reuse mean squared error $\frac{1}{m}\sum(\hat{y}-y)^2$ from linear regression. Two problems:</p>
+      <ol>
+        <li><strong>It's non-convex in $w$.</strong> Plug $\hat{y}=\sigma(w^\top x + b)$ into MSE and the loss surface gets wavy with local minima. Gradient descent can get stuck. Cross-entropy (below) is <strong>convex</strong> for logistic regression — one global minimum.</li>
+        <li><strong>Vanishing gradients on confident-but-wrong predictions.</strong> The MSE gradient carries a factor $\sigma'(z)=\sigma(1-\sigma)$, which is ~0 when $\hat{y}$ is near 0 or 1. So a confidently <em>wrong</em> prediction (say $\hat{y}=0.99$ when $y=0$) produces an almost-zero gradient and the model barely learns. That's exactly backwards — you want a big push when you're confidently wrong.</li>
+      </ol>
+
+      <h3 id="binary-cross-entropy">Binary cross-entropy (log-loss)</h3>
+      <p>The right loss comes from <strong>maximum likelihood</strong>. For one example, the probability the model assigns to the <em>true</em> label is $\hat{y}^{\,y}(1-\hat{y})^{1-y}$ (this equals $\hat{y}$ when $y=1$ and $1-\hat{y}$ when $y=0$). Maximizing the log-likelihood over all examples = minimizing its negative average, the <strong>binary cross-entropy</strong>:</p>
+
+      <div class="math-box">$$J(w,b) = -\frac{1}{m}\sum_{i=1}^{m}\Big[\, y_i \log \hat{y}_i + (1-y_i)\log(1-\hat{y}_i)\,\Big].$$</div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> Why it works</div>
+        <p>If $y=1$, the term is $-\log\hat{y}$ — zero when $\hat{y}=1$, blowing up toward $+\infty$ as $\hat{y}\to 0$. The loss <strong>punishes confident wrong answers harshly</strong>, which is precisely what fixes problem (2) above.</p>
+      </div>
+
+      <h3 id="the-gradient">The gradient (the punchline)</h3>
+      <p>Differentiate $J$ w.r.t. $z_i$. The $\sigma'$ from the chain rule <strong>cancels</strong> against the $\frac{1}{\hat{y}(1-\hat{y})}$ from the log terms:</p>
+
+      <div class="math-box">$$\frac{\partial J}{\partial z_i} = \hat{y}_i - y_i.$$</div>
+
+      <p>So the gradients w.r.t. the parameters are</p>
+
+      <div class="math-box">$$\boxed{\;\frac{\partial J}{\partial w} = \frac{1}{m}X^\top(\hat{y}-y), \qquad \frac{\partial J}{\partial b} = \frac{1}{m}\sum_i(\hat{y}_i - y_i).\;}$$</div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Look familiar?</div>
+        <p>It's the <strong>exact same form</strong> as the linear-regression gradient from Lesson 02 — the only difference is that $\hat{y}=\sigma(Xw+b)$ instead of $\hat{y}=Xw+b$. That's not a coincidence: both linear and logistic regression are <strong>generalized linear models</strong>, and for the matching loss (MSE for Gaussian, cross-entropy for Bernoulli) the gradient is always "design matrix transpose times residual." Memorize $X^\top(\hat{y}-y)$ once and you've got both.</p>
+      </div>
+
+      <h3 id="softmax-preview">From two classes to many: softmax (preview)</h3>
+      <p>For $K > 2$ classes, replace the single score with one score per class, $z_k = w_k^\top x + b_k$, and replace sigmoid with <strong>softmax</strong>:</p>
+
+      <div class="math-box">$$\hat{y}_k = \frac{e^{z_k}}{\sum_{j=1}^{K} e^{z_j}}, \qquad \sum_k \hat{y}_k = 1.$$</div>
+
+      <p>The loss becomes <strong>categorical cross-entropy</strong> $-\sum_k y_k \log \hat{y}_k$ (with $y$ one-hot), and — wonderfully — the gradient is <em>still</em> $\hat{y}-y$. Sigmoid is just the $K=2$ special case of softmax. We'll lean on this again when we build neural nets in <a href="09-neural-networks-mlp.html">09 — Neural Networks</a>; a logistic regression is literally a one-layer net with a sigmoid output.</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>Code</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>We'll build it from scratch with numpy: sigmoid, loss, gradient, a fit loop, and two plots. Everything is vectorized.</p>
+
+      <div class="codeblock">
+        <div class="code-head">logistic_regression.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+rng = np.random.default_rng(0)
+
+# ---------- core pieces ----------
+def sigmoid(z):
+    # Numerically stable sigmoid: avoid overflow in exp for large negative z.
+    # For z >= 0 use 1/(1+e^-z); for z &lt; 0 use e^z/(1+e^z). Same value, no overflow.
+    out = np.empty_like(z, dtype=float)
+    pos = z &gt;= 0
+    out[pos] = 1.0 / (1.0 + np.exp(-z[pos]))
+    ez = np.exp(z[~pos])
+    out[~pos] = ez / (1.0 + ez)
+    return out
+
+def bce_loss(y, y_hat, eps=1e-12):
+    # Binary cross-entropy. Clip to avoid log(0) -&gt; -inf.
+    y_hat = np.clip(y_hat, eps, 1 - eps)
+    return -np.mean(y * np.log(y_hat) + (1 - y) * np.log(1 - y_hat))
+
+class LogisticRegression:
+    """Logistic regression trained with full-batch gradient descent."""
+    def __init__(self, lr=0.1, n_iters=2000):
+        self.lr = lr
+        self.n_iters = n_iters
+        self.w = None
+        self.b = 0.0
+        self.history = []          # loss per iteration, for plotting
+
+    def fit(self, X, y):
+        m, n = X.shape
+        self.w = np.zeros(n)        # start at the origin; loss is convex so this is fine
+        self.b = 0.0
+        for _ in range(self.n_iters):
+            z = X @ self.w + self.b           # linear score, shape (m,)
+            y_hat = sigmoid(z)                # probabilities, shape (m,)
+            error = y_hat - y                 # the residual that drives everything
+            # Gradients: the X^T (y_hat - y) form we derived.
+            grad_w = (X.T @ error) / m        # shape (n,)
+            grad_b = error.mean()             # scalar
+            self.w -= self.lr * grad_w
+            self.b -= self.lr * grad_b
+            self.history.append(bce_loss(y, y_hat))
+        return self
+
+    def predict_proba(self, X):
+        return sigmoid(X @ self.w + self.b)
+
+    def predict(self, X, threshold=0.5):
+        return (self.predict_proba(X) &gt;= threshold).astype(int)
+
+# ---------- a toy 2D dataset: two clouds we can see ----------
+m = 200
+# Class 0 centered low-left, class 1 centered high-right, with overlap.
+X0 = rng.normal(loc=[-1.5, -1.0], scale=1.0, size=(m // 2, 2))
+X1 = rng.normal(loc=[ 1.5,  1.2], scale=1.0, size=(m // 2, 2))
+X = np.vstack([X0, X1])
+y = np.hstack([np.zeros(m // 2), np.ones(m // 2)])
+
+# Standardize features (mean 0, std 1) -- GD converges far faster on scaled inputs.
+X_mean, X_std = X.mean(axis=0), X.std(axis=0)
+Xs = (X - X_mean) / X_std
+
+model = LogisticRegression(lr=0.5, n_iters=2000).fit(Xs, y)
+acc = (model.predict(Xs) == y).mean()
+print(f"final loss: {model.history[-1]:.3f}   train accuracy: {acc:.3f}")
+# -&gt; final loss: 0.098   train accuracy: 0.965
+</code></pre>
+      </div>
+
+      <p><strong>Plot 1 — the sigmoid itself.</strong> This is the squashing function in isolation, so you can see what the linear score gets pushed through.</p>
+
+      <div class="codeblock">
+        <div class="code-head">plot_sigmoid.py <span class="lang">Python</span></div>
+<pre><code class="language-python">z = np.linspace(-8, 8, 200)
+plt.figure(figsize=(5, 3))
+plt.plot(z, sigmoid(z))
+plt.axhline(0.5, ls="--", c="gray"); plt.axvline(0, ls="--", c="gray")
+plt.xlabel("z = wᵀx + b"); plt.ylabel("σ(z) = P(y=1)")
+plt.title("Sigmoid: linear score → probability"); plt.tight_layout(); plt.show()
+</code></pre>
+      </div>
+      <p><em>What you should see:</em> a smooth S-curve passing through $(0, 0.5)$, flattening toward 0 on the left and 1 on the right. The flat tails are exactly where MSE's gradient would vanish — and where cross-entropy keeps the pressure on.</p>
+
+      <p><strong>Plot 2 — the decision boundary.</strong> We draw the data and the line where $\hat{y}=0.5$. In standardized space the boundary is $w_1 x_1 + w_2 x_2 + b = 0$, i.e. $x_2 = -(w_1 x_1 + b)/w_2$.</p>
+
+      <div class="codeblock">
+        <div class="code-head">plot_boundary.py <span class="lang">Python</span></div>
+<pre><code class="language-python">plt.figure(figsize=(5, 4))
+plt.scatter(Xs[y == 0, 0], Xs[y == 0, 1], s=18, label="class 0 (rock)")
+plt.scatter(Xs[y == 1, 0], Xs[y == 1, 1], s=18, label="class 1 (mine)")
+
+# Boundary line from the learned weights.
+x1 = np.linspace(Xs[:, 0].min(), Xs[:, 0].max(), 100)
+x2 = -(model.w[0] * x1 + model.b) / model.w[1]
+plt.plot(x1, x2, "k-", lw=2, label="decision boundary (p=0.5)")
+
+# Optional: shade the probability field so you see the soft gradient, not just the line.
+xx, yy = np.meshgrid(np.linspace(Xs[:,0].min(), Xs[:,0].max(), 200),
+                     np.linspace(Xs[:,1].min(), Xs[:,1].max(), 200))
+grid = np.c_[xx.ravel(), yy.ravel()]
+probs = model.predict_proba(grid).reshape(xx.shape)
+plt.contourf(xx, yy, probs, levels=20, cmap="coolwarm", alpha=0.25)
+
+plt.xlabel("feature 1 (std)"); plt.ylabel("feature 2 (std)")
+plt.legend(); plt.title("Logistic regression decision boundary"); plt.tight_layout(); plt.show()
+</code></pre>
+      </div>
+      <p><em>What you should see:</em> the two clouds separated by a <strong>straight</strong> black line, with a smooth blue→red color wash crossing it. The line is where the model is maximally uncertain (p=0.5); confidence ramps up as you move away — the 2D shadow of that S-curve.</p>
+
+      <p><strong>Plot 3 — loss going down.</strong> A sanity check that GD is actually learning.</p>
+
+      <div class="codeblock">
+        <div class="code-head">plot_loss.py <span class="lang">Python</span></div>
+<pre><code class="language-python">plt.figure(figsize=(5, 3))
+plt.plot(model.history)
+plt.xlabel("iteration"); plt.ylabel("BCE loss")
+plt.title("Training loss"); plt.tight_layout(); plt.show()
+</code></pre>
+      </div>
+      <p><em>What you should see:</em> a smooth monotonic decay flattening out — convex loss, no bumps. If you see oscillation, your learning rate is too high.</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>Real Case</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>why this matters</small></div>
+
+      <h3 id="sonar-mines">Mine vs. rock from sonar — the classic Sonar dataset</h3>
+      <p>The <strong>Connectionist Bench (Sonar, Mines vs. Rocks)</strong> dataset (Gorman &amp; Sejnowski, 1988; UCI repository) is the canonical example for exactly this problem. A sonar chirp is bounced off an object on the seabed; the <strong>returned energy is binned into 60 frequency bands</strong>, each normalized to $[0,1]$. The label is <code>M</code> (metal cylinder = mine) or <code>R</code> (rock). 208 examples, 60 features.</p>
+
+      <p>This is a real ROV/USV mine-countermeasures task in miniature: given a spectral signature of a return, decide whether to flag it. The feature vector $x \in \mathbb{R}^{60}$ is the energy spectrum; logistic regression learns one weight per band — effectively <em>which frequencies discriminate metal from stone</em> — plus a bias.</p>
+
+      <div class="codeblock">
+        <div class="code-head">sonar_classifier.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+from urllib.request import urlopen
+
+# UCI Sonar dataset: 60 numeric bands + a final label column 'M' or 'R'.
+URL = ("https://archive.ics.uci.edu/ml/machine-learning-databases/"
+       "undocumented/connectionist-bench/sonar/sonar.all-data")
+raw = urlopen(URL).read().decode().strip().splitlines()
+rows = [r.split(",") for r in raw]
+X = np.array([[float(v) for v in r[:60]] for r in rows])      # (208, 60)
+y = np.array([1 if r[60] == "M" else 0 for r in rows])         # 1 = mine
+
+# Standardize (each band to mean 0, std 1) -- essential before GD.
+X = (X - X.mean(0)) / X.std(0)
+
+# Simple train/test split (we cover proper CV in lesson 05).
+rng = np.random.default_rng(1)
+idx = rng.permutation(len(y))
+cut = int(0.75 * len(y))
+tr, te = idx[:cut], idx[cut:]
+
+model = LogisticRegression(lr=0.3, n_iters=3000).fit(X[tr], y[tr])
+train_acc = (model.predict(X[tr]) == y[tr]).mean()
+test_acc  = (model.predict(X[te]) == y[te]).mean()
+print(f"train acc: {train_acc:.2f}   test acc: {test_acc:.2f}")
+# -&gt; train acc: 0.97   test acc: 0.83   (deterministic here: seed and split are pinned)
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Mind the train/test gap</div>
+        <p>Notice the <strong>gap between train and test accuracy</strong> — ~14 points (0.97 vs. 0.83) here. 60 features on 156 training examples is fertile ground for <strong>overfitting</strong>, which is the entire subject of the next lesson. The decision in deployment isn't really "0.5 or bust" either: for mine detection a <strong>false negative</strong> (missed mine) is far costlier than a <strong>false positive</strong> (re-scan a rock), so you'd lower the threshold to, say, 0.3 to catch more mines at the cost of more false alarms. Logistic regression hands you a <em>calibrated probability</em>, so you can tune that threshold to your operational risk — a luxury a bare yes/no classifier doesn't give you.</p>
+      </div>
+
+      <h3 id="uav-go-no-go">UAV go/no-go — the same model, fewer features</h3>
+      <p>The identical machinery decides a drone launch from weather telemetry: $x = [\text{wind speed}, \text{gust}, \text{visibility}, \text{precip prob}, \text{battery temp}]$, label = launched-and-completed-safely (1) vs. aborted/incident (0). With ~5 interpretable features the learned weights become a readable safety rule — negative weight on wind speed, positive on visibility — and the probability output drives a graded response: green &gt; 0.8, caution 0.5–0.8, scrub &lt; 0.5.</p>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>Pitfalls &amp; Tips</h2>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> The field guide</div>
+        <ul>
+          <li><strong>Always standardize your features before GD.</strong> Sonar band 3 might span $[0, 0.03]$ and band 50 span $[0, 0.9]$; on raw scales the loss surface is a stretched ravine and gradient descent crawls. Mean-0/std-1 makes it round and fast. (Tree models in lesson 06 won't care, but every gradient-based model does.)</li>
+          <li><strong>Clip inside the log.</strong> $\log(0) = -\infty$. When the model gets very confident, $\hat{y}$ can hit exactly 0 or 1 in floating point and your loss becomes <code>nan</code>. Clip $\hat{y}$ to $[\varepsilon, 1-\varepsilon]$ as in <code>bce_loss</code>.</li>
+          <li><strong>Use a numerically stable sigmoid.</strong> <code>1/(1+np.exp(-z))</code> overflows for very negative <code>z</code> (huge <code>exp</code>). The branched version above (or <code>scipy.special.expit</code>) avoids the warning and the wrong answer.</li>
+          <li><strong>Don't report accuracy alone on imbalanced data.</strong> If 95% of sonar returns are rocks, a model that always says "rock" scores 95% accuracy and catches zero mines. Use precision/recall, the confusion matrix, and ROC-AUC — all covered in <a href="05-overfitting-evaluation.html">05 — Overfitting &amp; Evaluation</a>.</li>
+          <li><strong>The 0.5 threshold is a choice, not a law.</strong> It's only optimal when false positives and false negatives cost the same and classes are balanced. Move it to match your risk profile.</li>
+          <li><strong>Logistic regression can only draw a straight boundary.</strong> If your classes interleave (XOR-like), no line separates them and accuracy stalls. The fix is either engineered nonlinear features (e.g. add $x_1^2$, $x_1 x_2$) or a model with a learned nonlinear boundary — which is the road to neural nets in lesson 09.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>Check Your Understanding</h2>
+
+      <p><strong>Q1.</strong> Why does swapping MSE for cross-entropy matter, beyond convexity? Think about a confidently-wrong prediction.</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>MSE's gradient carries a factor $\sigma'(z) = \sigma(1-\sigma)$, which is ~0 when $\hat{y}$ is near 0 or 1. A confidently wrong prediction ($\hat{y}=0.99$, $y=0$) therefore produces a near-zero gradient — the model barely corrects. Cross-entropy's gradient is just $\hat{y}-y$, which is large (≈1) for exactly that case, so the model gets a strong corrective push. Cross-entropy punishes confident mistakes; MSE shrugs at them.</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> The gradient of cross-entropy w.r.t. the weights is $\frac{1}{m}X^\top(\hat{y}-y)$, identical in form to linear regression. Where did the sigmoid's derivative go?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>It cancelled. By the chain rule the $w$-gradient picks up $\sigma'(z)=\hat{y}(1-\hat{y})$, but differentiating the log terms in the loss produces a $\frac{1}{\hat{y}(1-\hat{y})}$ factor. They multiply to 1, leaving $\partial J/\partial z = \hat{y}-y$. This cancellation is exactly <em>why</em> cross-entropy is the "natural" loss for the sigmoid (and softmax) — it's the matched loss for the Bernoulli likelihood in a generalized linear model.</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> In a 2D problem, why is the decision boundary a straight line even though the sigmoid is curved?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>The boundary is the set where $\hat{y}=0.5$, i.e. $\sigma(z)=0.5$, i.e. $z=0$. Since $z=w_1x_1+w_2x_2+b$ is linear in $x$, the set $z=0$ is a straight line (a hyperplane in higher dimensions). The sigmoid only bends <em>how confidence changes as you move away from the line</em> — it doesn't bend the line itself. Logistic regression is a linear classifier.</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> You train a mine detector and get 97% train / 83% test accuracy. In deployment, would you keep the 0.5 threshold? Why or why not?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Two issues. First, the ~14-point train/test gap signals overfitting (60 features, few samples) — you'd want regularization and cross-validation (lesson 05). Second, the 0.5 threshold assumes equal cost for both error types. For mines, a missed detection (false negative) is catastrophic while a false alarm just means re-scanning a rock. You'd <em>lower</em> the threshold (e.g. 0.3) to raise recall on mines, accepting more false positives. Logistic regression's calibrated probability output is what makes this tuning possible.</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> How does softmax relate to the sigmoid, and what changes in the gradient?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Sigmoid is the two-class special case of softmax. Softmax computes one score $z_k$ per class and normalizes $\hat{y}_k = e^{z_k}/\sum_j e^{z_j}$ so the outputs sum to 1. Paired with categorical cross-entropy on one-hot labels, the gradient w.r.t. the scores is <em>still</em> $\hat{y}-y$ — the same clean residual form, just vector-valued per class. Nothing about the optimization story changes; you just have $K$ weight vectors instead of one.</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml04-mse-vs-bce">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You train a sigmoid classifier with <strong>MSE</strong> and feed it an example that is confidently wrong: $\hat{y}=0.99$ while the true label is $y=0$. Why does the model barely learn from this mistake?</div>
+        <ul class="ex-options">
+          <li data-correct="false">MSE has no minimum, so gradient descent never updates the weights.</li>
+          <li data-correct="true">The MSE gradient carries a $\sigma'(z)=\sigma(1-\sigma)$ factor that is ~0 in the saturated tails, so the update is tiny exactly when it should be large.</li>
+          <li data-correct="false">The example is an outlier, so numpy clips its gradient to zero.</li>
+          <li data-correct="false">MSE is convex, so it has already converged and refuses to move.</li>
+        </ul>
+        <div class="ex-explain">When $\hat{y}$ is near 0 or 1, $\sigma'(z)=\sigma(1-\sigma)\approx 0$. The MSE chain rule multiplies the residual by that factor, so a confidently-wrong prediction yields an almost-zero gradient — the model shrugs. Cross-entropy's gradient is simply $\hat{y}-y$ (here $\approx +0.99$), giving a strong corrective push exactly when you need it. (And MSE on a sigmoid is non-convex, not convex.)</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml04-sigmoid-deriv" data-answer="0.25" data-tol="0.01">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">A linear score of $z=0$ gives $\sigma(0)=0.5$. Using the clean identity $\sigma'(z)=\sigma(z)\,(1-\sigma(z))$, what is the value of the sigmoid's derivative at $z=0$? (This is its <strong>maximum</strong> slope.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">slope</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$\sigma'(0) = \sigma(0)\,(1-\sigma(0)) = 0.5 \times 0.5 = 0.25$. The derivative peaks at $0.25$ when $z=0$ (the middle of the S-curve) and decays toward 0 in both saturated tails — which is precisely why MSE's gradient vanishes there. (A tolerance band is given to accept rounding; the exact value is $0.25$.)</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml04-gradient-cancellation">
+        <div class="ex-head"><span class="badge">Q3</span> Derivation — where the sigmoid's derivative goes</div>
+        <div class="ex-q">Show that for binary cross-entropy on a single example, $\frac{\partial J}{\partial z} = \hat{y} - y$, even though $\hat{y}=\sigma(z)$ is nonlinear. Explain why this makes the parameter gradient collapse to $\frac{1}{m}X^\top(\hat{y}-y)$.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Write the per-example loss $J = -[\,y\log\hat{y} + (1-y)\log(1-\hat{y})\,]$ and use the chain rule $\frac{\partial J}{\partial z} = \frac{\partial J}{\partial \hat{y}}\cdot\frac{\partial \hat{y}}{\partial z}$. Recall $\frac{\partial \hat{y}}{\partial z} = \sigma'(z) = \hat{y}(1-\hat{y})$.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p>Differentiate the loss w.r.t. $\hat{y}$: $\frac{\partial J}{\partial \hat{y}} = -\frac{y}{\hat{y}} + \frac{1-y}{1-\hat{y}} = \frac{\hat{y}-y}{\hat{y}(1-\hat{y})}$ (common denominator). Multiply by $\frac{\partial \hat{y}}{\partial z} = \hat{y}(1-\hat{y})$:</p>
+          <p>$$\frac{\partial J}{\partial z} = \frac{\hat{y}-y}{\hat{y}(1-\hat{y})}\cdot \hat{y}(1-\hat{y}) = \hat{y}-y.$$</p>
+          <p>The $\hat{y}(1-\hat{y})$ from $\sigma'$ <strong>cancels</strong> the $\frac{1}{\hat{y}(1-\hat{y})}$ from the log terms. Since $z = w^\top x + b$, the chain rule gives $\frac{\partial J}{\partial w} = (\hat{y}-y)\,x$ for one example; averaging over $m$ examples stacks into $\frac{1}{m}X^\top(\hat{y}-y)$, and $\frac{\partial J}{\partial b} = \frac{1}{m}\sum_i(\hat{y}_i-y_i)$. That cancellation is exactly why cross-entropy is the matched ("natural") loss for the sigmoid — it leaves the same clean residual gradient as linear regression.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Lesson recap</div>
+        <ul>
+          <li><strong>Logistic regression = linear score $z=w^\top x+b$ squashed by the sigmoid</strong> into a probability in $(0,1)$; threshold at 0.5 (or your chosen risk level) to get a class.</li>
+          <li>The decision boundary is <strong>linear</strong> ($z=0$); only the <em>confidence</em> is nonlinear.</li>
+          <li><strong>MSE is wrong for classification</strong> (non-convex, vanishing gradient on confident errors); <strong>binary cross-entropy</strong> is the maximum-likelihood loss and behaves correctly.</li>
+          <li>Its gradient is the same beautiful $\frac{1}{m}X^\top(\hat{y}-y)$ as linear regression — both are generalized linear models. <strong>Softmax</strong> extends it to $K$ classes with the same gradient form.</li>
+          <li>We measured accuracy crudely and saw a train/test gap — a cliffhanger for evaluation done right. Next: <strong>why models overfit, how regularization reins them in, and how to honestly measure a classifier</strong> — see <a href="05-overfitting-evaluation.html">05 — Overfitting, Regularization &amp; Evaluation</a>.</li>
+        </ul>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

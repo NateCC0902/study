@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Neural Networks &amp; the Forward Pass — Machine Learning &amp; Deep Learning</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="09-neural-networks-mlp">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 09</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL Course · 09</div>
+        <h1>Neural Networks &amp; the Forward Pass</h1>
+        <p>A neural network is not an exotic new model — it's logistic regression repeated and wired together. In this chapter we build a neuron from the linear models you already know, stack them into layers, and run the one-directional sweep called the <em>forward pass</em>. Then we prove, with one line of algebra, why the bend between layers is the whole game.</p>
+        <div class="meta"><span>⏱ ~40 min</span><span>🧠 MLP from scratch</span><span>🔢 numpy, no autograd</span><span>🌊 USV sensor fusion</span></div>
+      </section>
+
+      <p class="prereq"><strong>Prerequisites:</strong> <a href="08-kmeans-pca.html">08 — Unsupervised Learning: k-Means &amp; PCA</a> · and you should be comfortable with <a href="02-linear-regression.html">02 — Linear Regression</a> and <a href="04-logistic-regression.html">04 — Logistic Regression &amp; Classification</a>, since a neural network is built out of those pieces.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎯</span> By the end you can</div>
+        <ul>
+          <li>Explain how a neuron generalizes the linear models you already know, and why <strong>stacking</strong> them into layers buys you new power.</li>
+          <li>State the <strong>forward pass</strong> as a repeated <code>matmul → add bias → activate</code> and implement it in numpy.</li>
+          <li>Explain <em>mathematically</em> why <strong>non-linear activations</strong> are non-negotiable — without them a deep net collapses to a single linear map.</li>
+          <li>Compare <strong>sigmoid, tanh, and ReLU</strong> and pick one with reasons.</li>
+          <li>Build a 2-layer MLP from scratch and visualize the curved decision region it carves out.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>Intuition</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Everything you built so far — linear regression, logistic regression, the SVM's linear boundary — is one <strong>neuron</strong>. A neuron takes inputs, weights them, sums, adds a bias, and squashes the result through some function:</p>
+
+      <div class="math-box">$$ \text{neuron}(\mathbf{x}) = f\!\left(\mathbf{w}^\top \mathbf{x} + b\right) $$</div>
+
+      <p>Logistic regression <em>is</em> a single neuron with a sigmoid $f$. That's the whole secret: a neural network is not an exotic new model, it's <strong>logistic regression repeated and wired together</strong>.</p>
+
+      <p>So why stack them? Because one neuron can only draw a single straight cut through input space (lesson 04). Real signals aren't linearly separable. A sonar return that means "obstacle" vs "open water" lives in a tangled, curved region of feature space. One straight line can't fence it off.</p>
+
+      <p>The trick: feed the outputs of one layer of neurons into another layer. Each layer is a linear map followed by a <em>bend</em> (the activation). Stack a few bends and you can trace any curve you like.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> Analogy — the origami sheet</div>
+        <p>Think of input space as a flat sheet of paper with two colors of dots scrambled on it. A linear model can only cut the sheet with one straight scissor stroke. Each non-linear layer is like <em>folding</em> the paper. After a couple of folds, dots that were hopelessly mixed line up so that a single straight cut separates them. The network learns <em>where to fold</em>; the final layer does the easy straight cut. Take away the folds (the non-linearity) and no amount of stacking helps — you're back to one straight cut.</p>
+      </div>
+
+      <p>This is the <strong>perceptron</strong> (Rosenblatt, 1958), the original single neuron, scaled up into the <strong>multilayer perceptron (MLP)</strong> — also called a fully-connected or dense network.</p>
+
+      <div class="mermaid">
+graph LR
+    subgraph Input
+        x1((x1))
+        x2((x2))
+    end
+    subgraph "Hidden layer (4 neurons, tanh)"
+        h1((h1))
+        h2((h2))
+        h3((h3))
+        h4((h4))
+    end
+    subgraph Output
+        y((y))
+    end
+    x1 --> h1 & h2 & h3 & h4
+    x2 --> h1 & h2 & h3 & h4
+    h1 & h2 & h3 & h4 --> y
+</div>
+
+      <p>Every arrow is a learnable weight. Every neuron also has a bias (not drawn). Data flows strictly left → right: that one-directional sweep is the <strong>forward pass</strong>.</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>The Math</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive the layer, then the net</small></div>
+
+      <h3>A layer is a matrix multiply plus a bend</h3>
+      <p>Bundle one layer's neurons together. If layer $\ell$ has $n_\ell$ neurons and receives input $\mathbf{a}^{(\ell-1)} \in \mathbb{R}^{n_{\ell-1}}$, then:</p>
+
+      <div class="math-box">$$ \mathbf{z}^{(\ell)} = W^{(\ell)} \mathbf{a}^{(\ell-1)} + \mathbf{b}^{(\ell)}, \qquad \mathbf{a}^{(\ell)} = f^{(\ell)}\!\left(\mathbf{z}^{(\ell)}\right) $$</div>
+
+      <ul>
+        <li>$W^{(\ell)} \in \mathbb{R}^{n_\ell \times n_{\ell-1}}$ — the <strong>weight matrix</strong>. Row $i$ is one neuron's weight vector $\mathbf{w}_i^\top$, so the matrix-vector product just stacks all neurons' dot products at once.</li>
+        <li>$\mathbf{b}^{(\ell)} \in \mathbb{R}^{n_\ell}$ — the <strong>bias</strong> vector, one offset per neuron.</li>
+        <li>$\mathbf{z}^{(\ell)}$ — the <strong>pre-activation</strong> (also "logits" at the output).</li>
+        <li>$f^{(\ell)}$ — the <strong>activation function</strong>, applied element-wise.</li>
+        <li>$\mathbf{a}^{(\ell)}$ — the <strong>activation</strong> (the layer's output). We set $\mathbf{a}^{(0)} = \mathbf{x}$, the raw input.</li>
+      </ul>
+
+      <p><em>Where it comes from:</em> one neuron is $f(\mathbf{w}_i^\top \mathbf{a} + b_i)$. Stack $n_\ell$ of them and the dot products $\mathbf{w}_i^\top \mathbf{a}$ become the rows of $W\mathbf{a}$. The matrix form is just bookkeeping — nothing new beyond lesson 02's linear model, applied $n_\ell$ times in parallel.</p>
+
+      <h3>The forward pass = compose layers</h3>
+      <p>For an $L$-layer net the prediction is the composition</p>
+
+      <div class="math-box">$$ \hat{\mathbf{y}} = f^{(L)}\!\Big(W^{(L)} f^{(L-1)}\big(\cdots f^{(1)}(W^{(1)}\mathbf{x} + \mathbf{b}^{(1)}) \cdots\big) + \mathbf{b}^{(L)}\Big). $$</div>
+
+      <p>In practice you don't write that monster — you loop: <code>z = W @ a + b; a = f(z)</code>, layer by layer. That loop <strong>is</strong> the forward pass.</p>
+
+      <h3>Why non-linearity is the whole game</h3>
+      <p>Suppose we drop the activations (use $f = \text{identity}$). Then two layers compose as:</p>
+
+      <div class="math-box">$$ \mathbf{z}^{(2)} = W^{(2)}\big(W^{(1)}\mathbf{x} + \mathbf{b}^{(1)}\big) + \mathbf{b}^{(2)} = \underbrace{W^{(2)}W^{(1)}}_{\tilde W}\,\mathbf{x} + \underbrace{(W^{(2)}\mathbf{b}^{(1)} + \mathbf{b}^{(2)})}_{\tilde{\mathbf b}}. $$</div>
+
+      <p>The product of two matrices is <em>one</em> matrix; the combined bias is <em>one</em> vector. So a linear net of any depth is <strong>exactly equivalent to a single linear layer</strong> $\tilde W \mathbf{x} + \tilde{\mathbf b}$. Ten hidden layers, a million parameters — still just a line (or hyperplane). The non-linear $f$ is what breaks this collapse and lets depth add real expressive power.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Remember this</div>
+        <p>Stacking linear maps gains you nothing; the bend between them is everything.</p>
+      </div>
+
+      <h3>Three activations you'll meet constantly</h3>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Name</th><th>$f(z)$</th><th>Range</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Sigmoid</strong></td><td>$\sigma(z)=\dfrac{1}{1+e^{-z}}$</td><td>$(0,1)$</td><td>Squashes to a probability; saturates (flat) for large $\lvert z\rvert$.</td></tr>
+          <tr><td><strong>Tanh</strong></td><td>$\tanh(z)=\dfrac{e^z-e^{-z}}{e^z+e^{-z}}$</td><td>$(-1,1)$</td><td>Zero-centered sigmoid; usually better in hidden layers.</td></tr>
+          <tr><td><strong>ReLU</strong></td><td>$\max(0,z)$</td><td>$[0,\infty)$</td><td>Cheap, doesn't saturate for $z&gt;0$; the default for deep nets.</td></tr>
+        </tbody>
+      </table></div>
+
+      <p>Sigmoid and tanh are smooth S-curves; you met sigmoid as logistic regression's link function in lesson 04. <strong>ReLU</strong> (Rectified Linear Unit) is brutally simple — pass positives, zero out negatives — yet it's the workhorse of modern deep learning because it keeps gradients alive (you'll feel why in lesson 10). The key property all three share: they are <strong>non-linear</strong>, so they create the folds.</p>
+
+      <h3>Universal approximation — the reassuring theorem</h3>
+      <p>The <strong>universal approximation theorem</strong> says: an MLP with a <em>single</em> hidden layer and a non-polynomial activation (sigmoid, tanh, ReLU all qualify) can approximate <strong>any</strong> continuous function on a bounded region to arbitrary accuracy — given enough hidden neurons.</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Intuition, not proof</div>
+        <p>Picture two opposing sigmoid steps. Subtract them and you get a localized "bump." Place enough bumps of the right height side by side and you can trace any curve, like building a smooth shape out of LEGO. Width = number of bumps you can afford.</p>
+      </div>
+
+      <p>Two caveats so you don't over-believe it: (1) "enough neurons" can be astronomically many for a shallow net — <strong>depth</strong> is usually far more parameter-efficient than width; (2) the theorem says a fit <em>exists</em>, not that gradient descent will <em>find</em> it. Existence ≠ trainability. Lessons 10–12 are about actually finding it.</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>Code</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>Pure numpy, no autograd. We build a 2-layer MLP ($2 \to 8 \to 1$) and run <strong>only the forward pass</strong> — weights are fixed (random or hand-set), because training is next lesson. Goal: see that a forward pass is just <code>matmul → bias → activate</code>, twice, and that it can represent a curved boundary.</p>
+
+      <div class="codeblock">
+        <div class="code-head">mlp_forward.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+rng = np.random.default_rng(0)  # reproducible randomness
+
+# ---- Activation functions (element-wise) -----------------------------------
+def sigmoid(z):
+    return 1.0 / (1.0 + np.exp(-z))
+
+def tanh(z):
+    return np.tanh(z)
+
+def relu(z):
+    return np.maximum(0.0, z)
+
+# ---- One dense layer: z = a @ W.T + b, then activate -----------------------
+# NOTE on shapes: we process a BATCH of N samples at once.
+#   a has shape (N, n_in)  -&gt; rows are samples.
+#   W has shape (n_out, n_in), b has shape (n_out,).
+#   a @ W.T -&gt; (N, n_out): each row is that sample's pre-activations.
+# Batching = the same math as the per-sample equation in section 2,
+# just with N samples stacked as rows (vectorized, no Python loop over data).
+def dense(a, W, b, activation):
+    z = a @ W.T + b           # (N, n_in) @ (n_in, n_out) + (n_out,) -&gt; (N, n_out)
+    return activation(z)
+
+# ---- A 2-layer MLP: input(2) -&gt; hidden(8, tanh) -&gt; output(1, sigmoid) ------
+class MLP:
+    def __init__(self, n_in, n_hidden, n_out, rng):
+        # He-ish init scaled by fan-in so pre-activations aren't huge.
+        # (Init strategy matters for TRAINING — covered properly in lesson 12.
+        #  For a forward-pass demo we just want sane magnitudes.)
+        self.W1 = rng.standard_normal((n_hidden, n_in)) * np.sqrt(2.0 / n_in)
+        self.b1 = np.zeros(n_hidden)
+        self.W2 = rng.standard_normal((n_out, n_hidden)) * np.sqrt(2.0 / n_hidden)
+        self.b2 = np.zeros(n_out)
+
+    def forward(self, X):
+        # THE FORWARD PASS: layer by layer, each is matmul -&gt; bias -&gt; activate.
+        a1 = dense(X,  self.W1, self.b1, tanh)     # hidden activations  (N, 8)
+        a2 = dense(a1, self.W2, self.b2, sigmoid)  # output probability  (N, 1)
+        return a2
+
+net = MLP(n_in=2, n_hidden=8, n_out=1, rng=rng)
+
+# Sanity check on a single point:
+x = np.array([[0.5, -0.3]])          # one sample, shape (1, 2)
+print("forward(x) =", net.forward(x))
+# -&gt; forward(x) = [[0.505...]]   (a probability in (0,1); exact value depends on seed)
+</code></pre>
+      </div>
+
+      <p>The entire model is two <code>dense</code> calls. That's a neural network's forward pass — no magic.</p>
+
+      <h3>Random weights already carve curves</h3>
+      <p>The point of an MLP is the <em>shape</em> of region it can represent. Let's color the plane by the network's output. Even with <strong>random, untrained</strong> weights the boundary is curved — proof that the non-linearity is doing geometric work.</p>
+
+      <div class="codeblock">
+        <div class="code-head">plot_boundary.py <span class="lang">Python</span></div>
+<pre><code class="language-python"># Build a fine grid over the input plane.
+xs = np.linspace(-3, 3, 300)
+ys = np.linspace(-3, 3, 300)
+gx, gy = np.meshgrid(xs, ys)
+grid = np.column_stack([gx.ravel(), gy.ravel()])   # (90000, 2)
+
+probs = net.forward(grid).reshape(gx.shape)         # (300, 300) probabilities
+
+plt.figure(figsize=(5, 5))
+plt.contourf(gx, gy, probs, levels=20, cmap="RdBu")
+plt.colorbar(label="network output  σ(...)")
+plt.contour(gx, gy, probs, levels=[0.5], colors="k", linewidths=2)  # decision line
+plt.title("Forward pass of a random 2-&gt;8-&gt;1 MLP")
+plt.xlabel("x1"); plt.ylabel("x2")
+plt.tight_layout()
+plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">👀</span> What you should SEE</div>
+        <p>A smooth red↔blue gradient with a <em>wiggly, curved</em> black 0.5 contour — not a straight line. Each of the 8 tanh hidden units contributes one soft "fold," and they sum into a bent boundary. Now flip <code>tanh</code> → identity in <code>dense</code> and rerun: the black contour snaps to a perfectly <strong>straight line</strong>, visually confirming the section-2 collapse. That single experiment is the most important takeaway of the lesson.</p>
+      </div>
+
+      <h3>Counting parameters</h3>
+      <div class="codeblock">
+        <div class="code-head">count_params.py <span class="lang">Python</span></div>
+<pre><code class="language-python">def count_params(net):
+    return sum(a.size for a in [net.W1, net.b1, net.W2, net.b2])
+
+print("params:", count_params(net))
+# -&gt; params: 33
+# W1: 8*2=16, b1: 8, W2: 1*8=8, b2: 1  -&gt;  16+8+8+1 = 33
+</code></pre>
+      </div>
+
+      <p>33 numbers fully define this network. Training (lesson 10) is the search for the <em>best</em> 33 numbers; the forward pass just evaluates whatever numbers you currently have.</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case-usv"><span class="sec-no">4</span>Real Case — sensor fusion for a USV thruster command</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>where this pays off</small></div>
+      <p>You're driving a <strong>USV</strong> (unmanned surface vehicle). You want a reactive collision-avoidance controller: given the boat's situation, output a steering/thrust correction. The mapping from sensors to the right command is <strong>nonlinear</strong> — a small obstacle dead ahead at speed demands a hard turn, the same obstacle far off the beam demands nothing. A linear controller (one neuron) can't capture that interaction; an MLP can.</p>
+
+      <p><strong>Inputs (the feature vector $\mathbf{x}$):</strong></p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Feature</th><th>Meaning</th><th>Source</th></tr></thead>
+        <tbody>
+          <tr><td>$x_1$</td><td>range to nearest obstacle (m)</td><td>sonar / lidar</td></tr>
+          <tr><td>$x_2$</td><td>bearing to obstacle (rad, signed)</td><td>sonar / lidar</td></tr>
+          <tr><td>$x_3$</td><td>current surge speed (m/s)</td><td>GPS / IMU</td></tr>
+          <tr><td>$x_4$</td><td>heading error to waypoint (rad)</td><td>path-follower</td></tr>
+        </tbody>
+      </table></div>
+
+      <p><strong>Output:</strong> $y \in (-1, 1)$, a normalized rudder command (tanh output: $-1$ = full port, $+1$ = full starboard).</p>
+
+      <p>The net is $4 \to 16 \to 16 \to 1$. The forward pass maps four scalars to one command in microseconds — fast enough for a ROS2 control loop at 20 Hz.</p>
+
+      <div class="codeblock">
+        <div class="code-head">usv_controller.py <span class="lang">Python</span></div>
+<pre><code class="language-python"># A 3-layer reactive controller: 4 sensors -&gt; 16 -&gt; 16 -&gt; 1 rudder command.
+# Weights are RANDOM here (untrained) — we are only demonstrating the forward
+# pass / shape of computation. In practice you'd train these on logged
+# expert-helmsman data (behavior cloning) or via RL. Training = next lessons.
+rng = np.random.default_rng(7)
+W1 = rng.standard_normal((16, 4)) * np.sqrt(2/4);  b1 = np.zeros(16)
+W2 = rng.standard_normal((16, 16)) * np.sqrt(2/16); b2 = np.zeros(16)
+W3 = rng.standard_normal((1, 16)) * np.sqrt(2/16);  b3 = np.zeros(1)
+
+def controller(x):
+    a1 = relu(x @ W1.T + b1)    # ReLU hidden layers: cheap, deep-net default
+    a2 = relu(a1 @ W2.T + b2)
+    out = tanh(a2 @ W3.T + b3)  # tanh output -&gt; bounded rudder in (-1, 1)
+    return out
+
+# A scenario: obstacle 8 m ahead, 0.1 rad off bow, 2 m/s, slight heading error.
+state = np.array([[8.0, 0.10, 2.0, 0.05]])
+print("rudder command:", controller(state))
+# -&gt; rudder command: [[ 0.xx ]]   (some value in (-1, 1); meaningless until trained)
+</code></pre>
+      </div>
+
+      <p>How the method maps on:</p>
+      <ul>
+        <li><strong>Feature vector</strong> = whatever your sensors/state estimator publish on a ROS2 topic. Normalize each channel (range in meters vs bearing in radians live on wildly different scales — see Pitfalls).</li>
+        <li><strong>Hidden layers</strong> learn the nonlinear interactions ("close AND ahead AND fast → turn hard").</li>
+        <li><strong>Bounded output</strong> (tanh) keeps the actuator command in a physically valid range — a built-in safety clamp.</li>
+        <li>The forward pass is the <strong>inference</strong> step: trained weights live on the vehicle, and every control tick you run one forward pass to get the command. No optimization happens onboard at runtime.</li>
+      </ul>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🌊</span> Grounding against a classic dataset</div>
+        <p>The same $2 \to H \to 1$ architecture from section 3 is exactly what solves the famous <strong>two-moons</strong> / XOR-style toy problems that defeat linear models — the curved boundary you plotted is precisely what's needed to separate two interleaved crescents.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>Pitfalls &amp; Tips</h2>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Forgetting the non-linearity</div>
+        <p>If you stack <code>Linear → Linear</code> with no activation between, you have wasted a layer — it algebraically collapses to one linear map (section 2). Always check there's a bend between weight layers.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Shape bugs are the #1 numpy error</div>
+        <p>Decide a convention and hold it: here rows = samples, so $\mathbf{a} \in (N, n_{in})$ and $W \in (n_{out}, n_{in})$, giving <code>a @ W.T</code>. Print <code>.shape</code> at every layer the first time you wire a net.</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Unnormalized inputs</div>
+        <p>Feeding raw features on different scales (range ~100 m, bearing ~0.1 rad) drives some pre-activations huge and saturates sigmoid/tanh flat — the neuron stops responding. Standardize inputs (zero mean, unit variance) before the first layer.</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Sigmoid in hidden layers</div>
+        <p>It's zero-<em>not</em>-centered and saturates easily; prefer <strong>tanh</strong> or, for deep nets, <strong>ReLU</strong>. Reserve sigmoid for a single output that must be a probability.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Reading too much into untrained output</div>
+        <p>A random-weight forward pass produces <em>some</em> number, but it's meaningless. The architecture defines what's <em>representable</em>; training (next lesson) decides what's actually <em>computed</em>.</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Confusing width and depth</div>
+        <p>Universal approximation lets one wide layer fit anything <em>in theory</em>, but in practice depth is far more parameter-efficient and trains better. Don't solve everything by widening one layer.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>Check Your Understanding</h2>
+
+      <p><strong>Q1.</strong> You build a 5-layer network but accidentally use the identity (no activation) everywhere. How many <em>effectively distinct</em> linear regions can its decision boundary have, and why?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>One — the boundary is a single straight hyperplane. With identity activations the whole net collapses to $\tilde W \mathbf{x} + \tilde{\mathbf b}$ where $\tilde W = W^{(5)}\cdots W^{(1)}$. Depth adds nothing without a non-linear bend between layers.</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> For the layer equation $\mathbf{z}^{(\ell)} = W^{(\ell)}\mathbf{a}^{(\ell-1)} + \mathbf{b}^{(\ell)}$, what are the shapes of $W^{(\ell)}$ and $\mathbf{b}^{(\ell)}$ if layer $\ell-1$ has 10 neurons and layer $\ell$ has 4?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>$W^{(\ell)}$ is $4 \times 10$ (rows = output neurons, columns = input dimension), and $\mathbf{b}^{(\ell)}$ is length 4 (one bias per output neuron). The product $W\mathbf{a}$ maps a 10-vector to a 4-vector.</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> Logistic regression and a single sigmoid neuron — same model or different?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Same model. Logistic regression <em>is</em> one neuron: $\hat y = \sigma(\mathbf{w}^\top\mathbf{x}+b)$. A neural network is just many of these wired together across layers — which is exactly what unlocks non-linear boundaries one neuron can't draw.</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> The universal approximation theorem says one hidden layer can fit any continuous function. So why does anyone build deep networks?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Two reasons. (1) Efficiency: a shallow net may need <em>exponentially</em> more neurons than a deep one to represent the same function, so depth is far more parameter-efficient. (2) The theorem guarantees a good fit <em>exists</em>, not that gradient descent will <em>find</em> it from data. Existence ≠ trainability.</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> In the section-3 demo the weights were random and untrained, yet the plotted boundary was already curved. What does that tell you about the role of architecture vs. training?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Architecture (layers + non-linear activations) determines the <em>class of shapes</em> the network can represent — here, curved boundaries. Training only selects <em>which specific</em> curve fits your data by tuning the weights. A random forward pass shows the capability; it says nothing about correctness.</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml09-collapse">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You wire up <code>Linear → Linear → Linear</code> with <strong>no activation</strong> between the layers. What does this three-layer network compute?</div>
+        <ul class="ex-options">
+          <li data-correct="false">A curved (non-linear) decision boundary, because depth alone adds expressive power.</li>
+          <li data-correct="true">Exactly one linear map $\tilde W \mathbf{x} + \tilde{\mathbf b}$ — equivalent to a single linear layer.</li>
+          <li data-correct="false">Three independent linear classifiers whose votes are averaged.</li>
+          <li data-correct="false">A network that fails to run because the shapes don't compose.</li>
+        </ul>
+        <div class="ex-explain">The product of weight matrices is itself a single matrix, and the combined biases are a single vector: $W^{(3)}W^{(2)}W^{(1)}\mathbf{x} + \tilde{\mathbf b} = \tilde W\mathbf{x} + \tilde{\mathbf b}$. Without a non-linear bend between layers, any depth collapses to one linear hyperplane. The folds — not the layers — are what buy you curves.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml09-param-count" data-answer="369" data-tol="0">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">Count the parameters in the USV controller from section 4: a $4 \to 16 \to 16 \to 1$ MLP. Include <strong>all weights and all biases</strong>. (Hint: a layer with $n_{in}$ inputs and $n_{out}$ neurons has $n_{out}\times n_{in}$ weights plus $n_{out}$ biases.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">params</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">Layer 1 ($4\to16$): $16\times4 = 64$ weights $+ 16$ biases $= 80$. Layer 2 ($16\to16$): $16\times16 = 256$ weights $+ 16$ biases $= 272$. Layer 3 ($16\to1$): $1\times16 = 16$ weights $+ 1$ bias $= 17$. Total $= 80 + 272 + 17 = \mathbf{369}$. (Compare the tiny $2\to8\to1$ net in section 3, which had just 33.)</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml09-pick-activation">
+        <div class="ex-head"><span class="badge">Q3</span> Reasoning — choose the activations</div>
+        <div class="ex-q">You're designing a classifier MLP whose <em>output</em> must be a probability in $(0,1)$, with two hidden layers in between. Which activation goes on the hidden layers and which on the output, and why? Then say what goes wrong if you put sigmoid on the hidden layers instead.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Match the output's <em>range</em> to what the prediction must mean, and pick hidden activations that keep gradients healthy and stay zero-centered. Recall which activation saturates flat and is not zero-centered.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p><strong>Output:</strong> sigmoid — its range is exactly $(0,1)$, so the output reads directly as a probability (this is just logistic regression sitting on top of the learned features).</p>
+          <p><strong>Hidden layers:</strong> ReLU (or tanh). ReLU is cheap and doesn't saturate for $z&gt;0$, keeping gradients alive in a deep stack; tanh is the zero-centered S-curve alternative.</p>
+          <p><strong>What goes wrong with sigmoid on hidden layers:</strong> sigmoid is <em>not</em> zero-centered (its outputs are all positive) and it <em>saturates flat</em> for large $\lvert z\rvert$, where its slope is near zero. Stacked across layers this strangles the gradient signal during training (the vanishing-gradient problem, lesson 10) and the neurons stop responding. Reserve sigmoid for the single probability output.</p>
+        </div></details>
+      </div>
+
+      <!-- ============================================================ recap -->
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Lesson recap</div>
+        <p>A neuron is the linear model from lesson 02/04 plus an activation; an <strong>MLP</strong> stacks neurons into layers. The <strong>forward pass</strong> is the repeated <code>matmul → add bias → activate</code>, composed layer by layer — that's all inference is. <strong>Non-linear activations are mandatory</strong>: without them any depth collapses to a single linear map. Sigmoid, tanh, and ReLU are your everyday choices (ReLU for deep hidden layers, sigmoid/tanh for bounded outputs). <strong>Universal approximation</strong> says a wide-enough net can fit any continuous function — but depth is more efficient and existence isn't the same as trainability. We implemented a 2-layer net in numpy and saw random weights already carve a curved decision region; flipping off the non-linearity flattens it to a line. We can <em>evaluate</em> a network but its weights are still random garbage — next we make it <strong>learn</strong>: compute the loss, push gradients backward through every layer, and update the weights. ➡️ Next: <a href="10-backpropagation.html">10 — Backpropagation from Scratch</a>.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

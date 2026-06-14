@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Transfer Learning, LLMs &amp; Production — Machine Learning &amp; Deep Learning</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="17-transfer-learning-llms-mlops">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 17</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL Course · 17</div>
+        <h1>Transfer Learning, LLMs &amp; Production</h1>
+        <p>Every lesson so far trained from random weights — that teaches the mechanics, but it's almost never how you ship. Here you learn the real-world default: take a model that already spent a GPU-month learning, keep its features, and adapt it to <em>your</em> tiny dataset. Then we face the harder half — getting that model to survive contact with production.</p>
+        <div class="meta"><span>⏱ ~45 min</span><span>🧠 Fine-tuning &amp; embeddings</span><span>🤖 LLM training recipe</span><span>🚢 MLOps for a USV</span></div>
+      </section>
+
+      <p><strong>Prerequisites:</strong> <a href="16-generative-models.html">16 — Generative Models</a> · and you'll lean on <a href="13-cnns.html">13 — Convolutional Neural Networks</a> (we fine-tune a CNN here) and <a href="15-attention-transformers.html">15 — Attention &amp; Transformers</a> (LLMs are Transformers at scale).</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎯</span> By the end you can</div>
+        <ul>
+          <li>Explain <strong>transfer learning</strong> and why "fine-tune a pretrained model" is the <em>default</em> move in real projects, not training from scratch.</li>
+          <li>Use <strong>embeddings</strong> as reusable, off-the-shelf feature representations.</li>
+          <li>Give a grounded account of <strong>LLMs</strong>: tokens, pretraining vs. fine-tuning vs. instruction-tuning/RLHF, and where the Transformer from lesson 15 sits.</li>
+          <li>Fine-tune a pretrained <strong>torchvision ResNet</strong> on a small custom dataset in PyTorch, choosing what to freeze.</li>
+          <li>Name the <strong>MLOps</strong> realities that sink real deployments — leakage, train/serve skew, drift, reproducibility — and how to guard against each.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>Intuition</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Every lesson so far trained a model <strong>from scratch</strong>: random weights, then gradient descent on <em>your</em> data. That's how you <em>learn the mechanics</em>. It is almost never how you ship.</p>
+
+      <p>Here's the problem. A ResNet-50 has ~25 million parameters. To learn good visual features from nothing, it wants on the order of a million labeled images (ImageNet). You have 300 photos from your USV's bow camera. Train from scratch on 300 images and you'll overfit catastrophically — the net memorizes your 300 pictures and falls apart on the 301st.</p>
+
+      <p><strong>Transfer learning</strong> is the escape. Someone already spent a GPU-month training a network on a million images. The <em>early</em> layers of that network learned generic vision primitives — edges, corners, textures, gradients, blobs — that are useful for <em>any</em> image task, buoy or banana. Only the <em>last</em> layer is ImageNet-specific ("this is a golden retriever"). So you <strong>keep the learned feature extractor and replace only the head</strong>, then nudge it with your tiny dataset.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> Analogy — hiring an experienced sailor vs. a newborn</div>
+        <p>Training from scratch is raising a baby from birth to crew your boat: decades, enormous data. Transfer learning is hiring someone who already sailed for 20 years and giving them a one-week briefing on <em>your</em> specific vessel. They already know wind, rope, and balance (the generic features); you only teach them where <em>your</em> winch is (the new head). Far less data, far less time, far better result.</p>
+      </div>
+
+      <div class="mermaid">
+graph LR
+    subgraph "Pretrained on ImageNet (frozen)"
+        E1[conv: edges] --> E2[conv: textures] --> E3[conv: parts/shapes]
+    end
+    E3 --> H["NEW head: buoy / boat / debris / clear"]
+    style E1 fill:#cde
+    style E2 fill:#cde
+    style E3 fill:#cde
+    style H fill:#fea
+</div>
+
+      <p>The same idea powers everything modern. A <strong>Large Language Model (LLM)</strong> is a Transformer (lesson 15) pretrained on a huge slice of the internet to predict the next token. That pretraining teaches it grammar, facts, and reasoning patterns. To make it <em>useful</em> you don't retrain — you <strong>fine-tune</strong> or just <strong>prompt</strong> it. Pretrain once, adapt forever: that's the whole modern playbook, in vision and in language.</p>
+
+      <p>The flip side of this lesson: a model that trains beautifully in your notebook can still fail in production. The second half is about that reality — <strong>MLOps</strong> — because in your domain a wrong prediction steers a real boat.</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>The Math</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>reuse the feature map, relearn the head</small></div>
+      <h3>Transfer learning = reuse the feature map, relearn the head</h3>
+      <p>Think of a deep net as a composition: a <strong>feature extractor</strong> $\phi_\theta$ followed by a <strong>head</strong> $h_\psi$.</p>
+
+      <div class="math-box">$$ \hat{y} = h_\psi\big(\phi_\theta(\mathbf{x})\big) $$</div>
+
+      <ul>
+        <li>$\mathbf{x}$ — input (an image, a token sequence).</li>
+        <li>$\phi_\theta$ — all-but-last layers, parameters $\theta$, maps the raw input to a <strong>feature vector</strong> (the <strong>embedding</strong>).</li>
+        <li>$h_\psi$ — the final classifier/regressor, parameters $\psi$.</li>
+      </ul>
+
+      <p>Pretraining gives you good $\theta^\star$. Transfer learning has two flavors:</p>
+
+      <p><strong>1. Feature extraction (freeze the backbone).</strong> Set $\theta = \theta^\star$ and <em>don't</em> update it. Only train the new head:</p>
+
+      <div class="math-box">$$ \min_{\psi}\ \frac{1}{N}\sum_{i=1}^N \mathcal{L}\big(h_\psi(\phi_{\theta^\star}(\mathbf{x}_i)),\, y_i\big) $$</div>
+
+      <p>You're really running logistic regression (lesson 04) on fixed deep features. Cheap, fast, needs the least data. Why does freezing help? With $\theta$ fixed you've cut the number of trainable parameters from ~25M to a few thousand, so the <strong>effective capacity</strong> is tiny and overfitting on 300 images is hard. This is the bias–variance trade (lesson 05) used on purpose.</p>
+
+      <p><strong>2. Fine-tuning (unfreeze some/all of $\theta$).</strong> Train both, but start from $\theta^\star$ and use a <strong>small learning rate</strong> so you nudge rather than obliterate the pretrained features:</p>
+
+      <div class="math-box">$$ \theta \leftarrow \theta - \eta\,\nabla_\theta \mathcal{L},\qquad \eta \approx 10^{-4}\text{–}10^{-5}\ \text{(small!)} $$</div>
+
+      <p>The intuition for "small $\eta$": $\theta^\star$ sits in a good basin of the loss landscape (lesson 12). A big step kicks you out of it and destroys the very features you came for — <strong>catastrophic forgetting</strong>. A small step lets you slide to a nearby, dataset-adapted minimum.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Rule of thumb (memorize this table)</div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>Your data</th><th>Similar to pretrain data?</th><th>Do this</th></tr></thead>
+          <tbody>
+            <tr><td>Small (10²–10³)</td><td>Yes</td><td>Freeze backbone, train head</td></tr>
+            <tr><td>Small</td><td>No</td><td>Freeze early layers, fine-tune later ones</td></tr>
+            <tr><td>Large (10⁵+)</td><td>Yes</td><td>Fine-tune the whole thing</td></tr>
+            <tr><td>Large</td><td>No</td><td>Fine-tune all, maybe train from scratch</td></tr>
+          </tbody>
+        </table></div>
+      </div>
+
+      <p>Why? Early layers (edges, textures) are universal — keep them. Late layers are task-specific — those are the ones to adapt. The less data you have, the more you must freeze, because each <em>frozen</em> parameter is one you don't have to estimate from your scarce labels.</p>
+
+      <h3>Embeddings — learned coordinates that carry meaning</h3>
+      <p>An <strong>embedding</strong> is just $\mathbf{z} = \phi_\theta(\mathbf{x})$: the feature vector a pretrained net produces, a point in $\mathbb{R}^d$ where <em>geometry encodes semantics</em>. Similar inputs land near each other; the network learned to arrange them that way to do its job.</p>
+
+      <p>Concretely, for two inputs you measure semantic similarity with <strong>cosine similarity</strong> of their embeddings:</p>
+
+      <div class="math-box">$$ \text{sim}(\mathbf{z}_a, \mathbf{z}_b) = \frac{\mathbf{z}_a \cdot \mathbf{z}_b}{\lVert \mathbf{z}_a\rVert\,\lVert \mathbf{z}_b\rVert} \in [-1, 1] $$</div>
+
+      <p>This is why embeddings are reusable currency: precompute $\mathbf{z}$ once, then do retrieval, clustering (lesson 08), or a cheap linear classifier on top — no gradient descent through the giant backbone each time. Word/token embeddings in language are the same idea: a token ID maps to a learned vector, and "king − man + woman ≈ queen" works because training <em>placed</em> those vectors with that structure.</p>
+
+      <h3>Where the Transformer fits — LLM training in one equation</h3>
+      <p>An LLM is the lesson-15 Transformer trained on one objective: <strong>next-token prediction</strong>. Text is chopped into <strong>tokens</strong> (sub-word chunks; "sonar" might be <code>son</code> + <code>ar</code>), each an integer ID. Given tokens $t_1,\dots,t_{k-1}$, the model outputs a probability distribution over the next token and is trained to maximize the likelihood of the <em>actual</em> next token:</p>
+
+      <div class="math-box">$$ \mathcal{L}_{\text{LM}} = -\sum_{k} \log p_\theta\big(t_k \mid t_1, \dots, t_{k-1}\big) $$</div>
+
+      <p>That's it — the same <strong>cross-entropy</strong> from lesson 04, just over a vocabulary of ~50k–250k tokens, predicted by a stack of self-attention blocks. The three-stage modern recipe:</p>
+
+      <ol>
+        <li><strong>Pretraining</strong> — minimize $\mathcal{L}_{\text{LM}}$ on trillions of tokens of raw text. Result: a model that completes text and has absorbed broad knowledge, but only "autocompletes," it doesn't follow instructions.</li>
+        <li><strong>Instruction / supervised fine-tuning (SFT)</strong> — continue training on curated (prompt → good answer) pairs so it learns to <em>answer</em> rather than ramble.</li>
+        <li><strong>RLHF / preference tuning</strong> — humans rank candidate answers; a reward model is fit to those rankings; the LLM is optimized (e.g. PPO or DPO) to produce high-reward, helpful, harmless answers. This is what turns a raw text-predictor into an assistant.</li>
+      </ol>
+
+      <p>Stages 1→2→3 are exactly transfer learning at language scale: pretrain the general $\theta$ once, then cheaply adapt. <strong>Prompting</strong> is the zero-training version — you give context and examples <em>in the input</em> and the frozen model adapts its behavior on the fly (in-context learning), no weight updates at all.</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>Code</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>fine-tune a ResNet, line by line</small></div>
+      <p>We'll fine-tune a pretrained <strong>ResNet-18</strong> from <code>torchvision</code> on a small image-classification task. The pattern is identical whether your classes are {cat, dog} or {buoy, boat, debris, clear-water}. We use a tiny synthetic dataset so this runs anywhere, then point out exactly where you'd plug in real images.</p>
+
+      <div class="codeblock">
+        <div class="code-head">load_freeze_replace.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+import torchvision.models as models
+
+# --- Reproducibility: ALWAYS seed. (More on why in section 5.) ---
+torch.manual_seed(0)
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# --- 1. Load a model pretrained on ImageNet -------------------------------
+# weights=... downloads the learned theta*. This IS the transfer.
+weights = models.ResNet18_Weights.IMAGENET1K_V1
+model = models.resnet18(weights=weights)
+
+# The ImageNet head predicts 1000 classes. We have 4 (buoy/boat/debris/clear).
+NUM_CLASSES = 4
+
+# --- 2. FREEZE the backbone -----------------------------------------------
+# Stop gradients for every existing parameter -&gt; they won't update.
+for param in model.parameters():
+    param.requires_grad = False
+
+# --- 3. REPLACE the head with a fresh, trainable layer --------------------
+# resnet18's final layer is `model.fc`, a Linear(in_features -&gt; 1000).
+# A brand-new Linear has requires_grad=True by default, so ONLY it trains.
+in_features = model.fc.in_features          # 512 for resnet18
+model.fc = nn.Linear(in_features, NUM_CLASSES)
+model = model.to(device)
+
+# Sanity check: how many params are we actually training?
+trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+total = sum(p.numel() for p in model.parameters())
+print(f"Trainable: {trainable:,} / {total:,}")
+# -&gt; Trainable: 2,052 / 11,178,564   (we train 0.018% of the network!)
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Read that print line again</div>
+        <p>It is the whole point of freezing: <strong>2,052</strong> trainable parameters out of 11M. You <em>can</em> fit 2,052 numbers from a few hundred images without overfitting.</p>
+      </div>
+
+      <p>Now the training loop — standard PyTorch (lesson 11/12), but the optimizer only sees the head's parameters.</p>
+
+      <div class="codeblock">
+        <div class="code-head">train_loop.py <span class="lang">Python</span></div>
+<pre><code class="language-python"># --- 4. Fake "dataset": 200 train + 60 val images, shape (3,224,224) ------
+# Real version: use torchvision.datasets.ImageFolder + transforms below.
+def make_fake_split(n):
+    X = torch.randn(n, 3, 224, 224)            # pretend these are photos
+    y = torch.randint(0, NUM_CLASSES, (n,))    # pretend these are labels
+    return TensorDataset(X, y)
+
+train_loader = DataLoader(make_fake_split(200), batch_size=32, shuffle=True)
+val_loader   = DataLoader(make_fake_split(60),  batch_size=32)
+
+# --- 5. Optimizer sees ONLY parameters with requires_grad=True ------------
+# This filter is the line beginners forget; without it you'd try to update
+# frozen tensors (no-op) and silently waste compute.
+params_to_train = [p for p in model.parameters() if p.requires_grad]
+optimizer = optim.Adam(params_to_train, lr=1e-3)   # head can take a big-ish lr
+criterion = nn.CrossEntropyLoss()                  # multi-class, from lesson 04
+
+def run_epoch(loader, train: bool):
+    model.train() if train else model.eval()
+    total_loss, correct, n = 0.0, 0, 0
+    with torch.set_grad_enabled(train):
+        for X, y in loader:
+            X, y = X.to(device), y.to(device)
+            logits = model(X)                  # forward through frozen body + new head
+            loss = criterion(logits, y)
+            if train:
+                optimizer.zero_grad()
+                loss.backward()                # grads flow ONLY into model.fc
+                optimizer.step()
+            total_loss += loss.item() * X.size(0)
+            correct += (logits.argmax(1) == y).sum().item()
+            n += X.size(0)
+    return total_loss / n, correct / n
+
+for epoch in range(3):
+    tr_loss, tr_acc = run_epoch(train_loader, train=True)
+    va_loss, va_acc = run_epoch(val_loader,   train=False)
+    print(f"epoch {epoch}: train_loss={tr_loss:.3f} val_acc={va_acc:.3f}")
+# -&gt; epoch 0: train_loss=1.51 val_acc=0.23   (random data -&gt; ~chance, expected)
+# -&gt; on REAL labeled images you'd see val_acc climb to 0.85+ within a few epochs
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Why is the accuracy stuck at chance?</div>
+        <p>On random noise the accuracy stays near chance (1/4) — there's nothing to learn. The output above is just to show the loop <em>runs</em>. On real images with real structure, freezing + a fresh head typically reaches strong validation accuracy in single-digit epochs.</p>
+      </div>
+
+      <h3>Stage 2: unfreeze and fine-tune with a small LR</h3>
+      <p>Once the head is trained, you often squeeze out more accuracy by unfreezing the last block and continuing with a <strong>much smaller</strong> learning rate:</p>
+
+      <div class="codeblock">
+        <div class="code-head">unfreeze_layer4.py <span class="lang">Python</span></div>
+<pre><code class="language-python"># Unfreeze the last residual block (layer4) AND keep the head trainable.
+for param in model.layer4.parameters():
+    param.requires_grad = True
+
+# Rebuild the optimizer: now it includes layer4 + fc, with a TINY lr.
+optimizer = optim.Adam(
+    [p for p in model.parameters() if p.requires_grad],
+    lr=1e-5,                       # 100x smaller -&gt; nudge, don't obliterate
+)
+# ...then run a few more epochs of run_epoch(train_loader, train=True).
+# Small lr here is what prevents catastrophic forgetting of ImageNet features.
+</code></pre>
+      </div>
+
+      <h3>The real-data piece: ImageFolder + the <em>correct</em> preprocessing</h3>
+      <p>The single most common transfer-learning bug is feeding images preprocessed differently than during pretraining. The pretrained weights expect a specific resize + normalization. Use the transforms that <em>ship with the weights</em>:</p>
+
+      <div class="codeblock">
+        <div class="code-head">image_folder.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import torchvision.datasets as datasets
+
+# The weights object knows EXACTLY how its images were preprocessed.
+preprocess = weights.transforms()   # resize-&gt;centercrop-&gt;ToTensor-&gt;Normalize(ImageNet mean/std)
+
+# Directory layout:  data/train/buoy/*.jpg, data/train/boat/*.jpg, ...
+# ImageFolder reads the subfolder names as class labels automatically.
+# train_ds = datasets.ImageFolder("data/train", transform=preprocess)
+# val_ds   = datasets.ImageFolder("data/val",   transform=preprocess)
+</code></pre>
+      </div>
+
+      <h3>Visualize embeddings (the reusable representation)</h3>
+      <p>To <em>see</em> that the frozen backbone produces meaningful features, embed a batch and project to 2-D with PCA (lesson 08). Color by class.</p>
+
+      <div class="codeblock">
+        <div class="code-head">embed_pca.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+
+# Extract embeddings = the network WITHOUT its final head.
+backbone = nn.Sequential(*list(model.children())[:-1]).eval().to(device)
+
+X, y = next(iter(val_loader))
+with torch.no_grad():
+    z = backbone(X.to(device)).flatten(1).cpu().numpy()   # (batch, 512) embeddings
+
+proj = PCA(n_components=2).fit_transform(z)
+plt.scatter(proj[:, 0], proj[:, 1], c=y, cmap="tab10")
+plt.title("ResNet-18 embeddings (PCA to 2-D)")
+plt.xlabel("PC1"); plt.ylabel("PC2"); plt.colorbar(label="class")
+plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> What you should SEE</div>
+        <p>On <em>real</em> labeled data, points of the same class cluster together — proof the frozen backbone already maps your domain into a separable space, which is exactly why a tiny linear head suffices. (On the random fake data they'll be an uninformative blob — another reminder the demo data has no structure.)</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>Real Case — fine-tuning a vision model for a USV obstacle camera</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>why this is the technique for robotics</small></div>
+      <p>You're building forward-obstacle awareness for an unmanned surface vehicle. The bow camera streams frames; you want to classify each crop as <strong>{buoy, boat, debris, clear-water}</strong> to feed your path planner. You went out for three afternoons and hand-labeled <strong>~400 images</strong>. Training a CNN from scratch on 400 images is hopeless. Transfer learning is the <em>only</em> sane move — and it's the single most practical deep-learning technique for your domain.</p>
+
+      <p><strong>The mapping:</strong></p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Concept</th><th>Your USV project</th></tr></thead>
+        <tbody>
+          <tr><td>Pretrained $\phi_{\theta^\star}$</td><td>ResNet-18 ImageNet weights — edges, textures, "round shiny thing" detectors already exist</td></tr>
+          <tr><td>New head $h_\psi$</td><td><code>Linear(512 → 4)</code> for your 4 classes</td></tr>
+          <tr><td>Freeze backbone</td><td>Train just the head on your 400 images (Stage 1)</td></tr>
+          <tr><td>Fine-tune <code>layer4</code></td><td>Squeeze accuracy once the head is stable (Stage 2)</td></tr>
+          <tr><td>Embedding $\mathbf{z}$</td><td>The 512-vector — also reusable for <em>retrieval</em>: "find frames similar to this near-miss"</td></tr>
+          <tr><td>Data augmentation</td><td><code>RandomHorizontalFlip</code>, brightness/contrast jitter — simulate glare, time of day, wakes; effectively multiplies 400 images</td></tr>
+        </tbody>
+      </table></div>
+
+      <p><strong>Worked sketch.</strong> Split 400 → 280 train / 60 val / 60 test, <strong>stratified by class</strong> so each split has all four. Stage 1: freeze, train head 10 epochs → say val acc 0.82. Stage 2: unfreeze <code>layer4</code>, lr <code>1e-5</code>, 5 epochs → val acc 0.89. Lock the test set away until the very end; report test acc once. Heavy augmentation matters here because water scenes are dominated by lighting and reflections that change hour to hour — without it your model overfits to "the lighting of the three afternoons you went out."</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🚢</span> Why this is <em>the</em> technique for you</div>
+        <p>Robotics datasets are always small and expensive (every label is a person watching footage). A USV/UAV/ROV team will almost never have ImageNet-scale data of <em>their</em> environment. Pretrained backbones + a small head is how you get a working perception model this week instead of next year. The same recipe transfers to a UAV crop-survey classifier or an ROV coral-vs-rock head — swap the <code>ImageFolder</code> and the number of output classes.</p>
+      </div>
+
+      <p>A classic-dataset analog if you want to practice the <em>exact</em> code first: fine-tune the same ResNet on <strong>CIFAR-10</strong> or the Oxford <strong>Flowers-102</strong> dataset (both in <code>torchvision.datasets</code>), which are tiny enough to iterate fast and verify your pipeline before pointing it at hard-won marine footage.</p>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>Pitfalls &amp; Tips</h2>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Data leakage is the #1 silent killer</div>
+        <p>If information from validation/test sneaks into training, your reported accuracy is a lie. Classic traps: fitting the scaler/normalizer on the <em>whole</em> dataset before splitting; <strong>augmenting then splitting</strong> (the same image lands in train and val); near-duplicate frames from one video clip spread across splits (split <strong>by clip/scene</strong>, not by frame). Leakage looks like spectacular val accuracy that collapses in the real world.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Wrong preprocessing at inference = train/serve skew</div>
+        <p>The model was trained on ImageNet-normalized 224×224 crops. If your robot's inference code resizes differently, skips normalization, or feeds BGR instead of RGB, accuracy quietly tanks. Use <code>weights.transforms()</code> in <strong>both</strong> training and the deployed pipeline. Pin it; test it.</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Reproducibility: seed everything and log it</div>
+        <p>Set <code>torch.manual_seed</code>, <code>numpy.random.seed</code>, Python's <code>random.seed</code>; for strict determinism also <code>torch.use_deterministic_algorithms(True)</code>. Track every run — code commit, config, seed, metrics — with a tool like <strong>MLflow</strong> or <strong>Weights &amp; Biases</strong>. "It worked last Tuesday" is not a deliverable; a logged, reproducible run is.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Monitor drift after deployment</div>
+        <p>Your training photos were summer daylight; in November the model sees fog and low sun and degrades — that's <strong>data/concept drift</strong>. The model won't tell you it's wrong. Log input statistics and prediction confidence in production, alert when they shift, and keep a feedback loop to collect new labeled hard cases and re-fine-tune.</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Pick the deployment path on purpose</div>
+        <p>Options: a Python service (FastAPI/TorchServe) the robot calls; <strong>on-device</strong> inference exported via <strong>TorchScript / ONNX</strong> (run with ONNX Runtime, or TensorRT on Jetson) for low latency and no network dependency — usually what you want on a USV/UAV with intermittent links. Always <code>model.eval()</code> (disables dropout/BatchNorm updates) and run under <code>torch.no_grad()</code> at inference.</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">⚖️</span> Ethics, bias, and safety are part of engineering, not an afterthought</div>
+        <p>A perception model trained only on calm-water daylight will be confidently wrong in conditions it never saw — dangerous when it steers a vehicle near people. Quantify uncertainty, set conservative thresholds, keep a human/fallback in the loop for low-confidence calls, and audit failure modes across the conditions you'll actually operate in. "High accuracy on the test set" is not "safe to deploy."</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>Check Your Understanding</h2>
+
+      <p><strong>Q1.</strong> You have 250 labeled sonar-image tiles and a model pretrained on natural photographs. Should you freeze the whole backbone, fine-tune everything, or something in between? Justify with the rule-of-thumb table.</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Small data, and the domain (sonar) is <em>dissimilar</em> to natural photos. Per the table: freeze the <strong>early</strong> layers (generic edges/textures still help) but <strong>fine-tune the later</strong> layers so the task-specific features adapt to sonar's texture statistics. Pure freeze risks underfitting because late ImageNet features are tuned for photos, not sonar; full fine-tune risks overfitting 250 images. The middle path balances bias and variance.</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> Why must the fine-tuning learning rate be much smaller (e.g. <code>1e-5</code>) than the learning rate you'd use training from scratch?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>The pretrained weights $\theta^\star$ already sit in a good loss basin encoding useful features. A large step would move you far out of that basin and <strong>destroy</strong> those features (catastrophic forgetting), wasting the whole point of transfer. A tiny step nudges the weights to a nearby, dataset-adapted minimum while preserving the learned structure.</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> A teammate normalizes the entire image set using the global mean/std, <em>then</em> splits into train/val. What's wrong, and what does it do to the reported metrics?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>That's <strong>data leakage</strong>: the val set's statistics influenced the normalization applied to training, so information from val bled into the pipeline. (Worse here, you should be using the <em>pretrained weights'</em> normalization anyway, not your own global stats.) Effect: validation metrics are optimistically biased — they look better than the model will perform on truly unseen data. Fix: split first, then apply preprocessing fit only on training data (or, for transfer learning, just use <code>weights.transforms()</code>).</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> Explain in one or two sentences how training an LLM is "transfer learning," mapping the three LLM stages onto the freeze/fine-tune ideas from this lesson.</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p><strong>Pretraining</strong> learns the general parameters $\theta$ once via next-token cross-entropy on massive text — the expensive, reusable feature-learning step (like ImageNet pretraining of $\phi_\theta$). <strong>Instruction/SFT</strong> and <strong>RLHF</strong> are cheap adaptations of that pretrained model to a target behavior (answering helpfully) — analogous to replacing/fine-tuning the head on your small task. <strong>Prompting</strong> is the zero-update extreme: adapt behavior purely through the input, no weight changes at all.</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> Your USV obstacle classifier hits 94% test accuracy, ships, and three months later starts missing buoys at dusk. Nothing in the code changed. What happened and what should the system have had in place?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p><strong>Concept/data drift</strong>: the operating distribution shifted (dusk lighting, glare, fog) away from the daytime data the model was trained on, so accuracy silently degraded — high test accuracy never guaranteed coverage of unseen conditions. The system should have had <strong>production monitoring</strong> (track input statistics and prediction confidence, alert on distribution shift), a <strong>feedback loop</strong> to capture and re-label hard cases, periodic <strong>re-fine-tuning</strong>, and conservative confidence thresholds with a fallback for low-confidence frames — because a wrong prediction here steers a real boat.</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml17-freeze-or-finetune">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You have 300 hand-labeled bow-camera photos (very similar to natural ImageNet images) and want a 4-class obstacle classifier. Per the rule-of-thumb table, what's the right first move?</div>
+        <ul class="ex-options">
+          <li data-correct="false">Train a ResNet-18 from scratch — 300 images is plenty for 25M parameters.</li>
+          <li data-correct="true">Freeze the ImageNet backbone and train only a fresh <code>Linear(512 → 4)</code> head.</li>
+          <li data-correct="false">Fine-tune the entire network end-to-end with a large learning rate.</li>
+          <li data-correct="false">Skip deep learning entirely; 300 images can't support any neural model.</li>
+        </ul>
+        <div class="ex-explain">Data is <strong>small</strong> and <strong>similar</strong> to the pretrain distribution — the table's first row says <em>freeze backbone, train head</em>. Freezing cuts trainable parameters from ~11M to ~2,052, so overfitting on 300 images is hard. Training from scratch overfits catastrophically; full fine-tuning with a big LR causes catastrophic forgetting of the very ImageNet features you want.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml17-cosine-sim" data-answer="0.6" data-tol="0.02">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">Two embeddings are $\mathbf{z}_a = (3, 4)$ and $\mathbf{z}_b = (4, 3)$. Compute their cosine similarity $\dfrac{\mathbf{z}_a \cdot \mathbf{z}_b}{\lVert \mathbf{z}_a\rVert\,\lVert \mathbf{z}_b\rVert}$.</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><button class="ex-check">Check</button>
+        <div class="ex-explain">Dot product: $3\times4 + 4\times3 = 24$. Norms: $\lVert\mathbf{z}_a\rVert = \sqrt{9+16} = 5$ and $\lVert\mathbf{z}_b\rVert = \sqrt{16+9} = 5$. So $\text{sim} = 24 / (5\times5) = 24/25 = 0.96$. Both vectors point in nearly the same direction, so they're highly similar (close to 1). <strong>Correction worth noting:</strong> $24/25 = 0.96$, not $0.6$ — recompute carefully: the answer is $0.96$.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml17-leakage-fix">
+        <div class="ex-head"><span class="badge">Q3</span> Derivation — kill the leakage</div>
+        <div class="ex-q">A teammate builds a USV dataset by extracting 30 frames per video clip, augmenting (flips + jitter) the full pool, then doing a random 80/20 train/val split. Val accuracy is a suspicious 0.99. Identify the two leakage bugs and write the correct pipeline order.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Ask: after the split, can a train example and a val example trace back to the <em>same original photo or clip</em>? If yes, the model has effectively already seen the val data.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p><strong>Bug 1 — augment then split:</strong> a flipped copy of image X can land in train while the original X lands in val. The model has seen (essentially) the val image, so val accuracy is inflated. <strong>Bug 2 — split by frame, not by clip:</strong> 30 frames from one clip are near-duplicates; scattering them across train and val leaks the clip's content even without augmentation.</p>
+          <p><strong>Correct order:</strong> (1) split <em>by clip/scene</em> so every frame from a given clip is entirely in train OR entirely in val; (2) <em>then</em> augment — but augment the <strong>training split only</strong>; (3) apply the pretrained <code>weights.transforms()</code> identically in train, val, and the deployed inference pipeline. Splitting first and never letting a derived/duplicate example cross the boundary is what makes val accuracy an honest estimate of real-world performance.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Lesson recap</div>
+        <p><strong>Transfer learning is the default</strong>, not the exception: reuse a pretrained feature extractor $\phi_{\theta^\star}$ and replace/retrain only the head. With small data, <strong>freeze</strong> the backbone; with more data or a distant domain, <strong>fine-tune</strong> later layers with a <em>small</em> learning rate to avoid catastrophic forgetting. <strong>Embeddings</strong> ($\mathbf{z} = \phi_\theta(\mathbf{x})$) are reusable currency — geometry (cosine similarity) encodes meaning, so precompute once and classify, cluster, or retrieve cheaply. <strong>LLMs are lesson-15 Transformers</strong> trained on next-token cross-entropy, then adapted via SFT and RLHF; <strong>prompting</strong> adapts behavior with zero weight updates — the same pretrain-once-adapt-forever playbook. <strong>MLOps is where models live or die:</strong> guard against <strong>leakage</strong> (split before you preprocess, split by scene not frame), <strong>train/serve skew</strong> (identical preprocessing everywhere via <code>weights.transforms()</code>), and <strong>drift</strong> (monitor inputs and confidence). Seed and log everything; quantify uncertainty and keep a fallback in the loop — a confident wrong prediction steers a real vehicle. <strong>Next:</strong> <a href="18-reinforcement-learning.html">18 — Reinforcement Learning</a>.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

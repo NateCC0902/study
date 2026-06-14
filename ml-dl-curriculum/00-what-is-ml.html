@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>What Is Machine Learning? — Machine Learning &amp; Deep Learning</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="00-what-is-ml">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 00</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL Course · 00 · Foundations</div>
+        <h1>What Is Machine Learning?</h1>
+        <p>Classic programming and machine learning solve the same problems from opposite ends: one writes the rules, the other discovers them from examples. We'll pin down exactly what ML is (and isn't), name the three learning paradigms, lay out the end-to-end workflow, and frame a real USV perception task as an ML problem.</p>
+        <div class="meta"><span>⏱ ~30 min</span><span>🧩 No prerequisites</span><span>🐍 numpy-from-scratch</span><span>∑ The supervised frame</span></div>
+      </section>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🧭</span> Part 0 · Lesson 00 · Code stack: numpy-from-scratch</div>
+        <p><strong>Prerequisites:</strong> none — start here.</p>
+        <p><strong>By the end you can:</strong></p>
+        <ul>
+          <li>Separate <strong>AI</strong>, <strong>ML</strong>, and <strong>DL</strong> and say where each one lives.</li>
+          <li>Name the three learning paradigms (<strong>supervised</strong>, <strong>unsupervised</strong>, <strong>reinforcement</strong>) and pick the right one for a problem.</li>
+          <li>Trace the <strong>end-to-end ML workflow</strong> from raw data to a deployed model.</li>
+          <li>Decide when ML is the right tool — and when a plain <code>if</code> statement beats it.</li>
+          <li>Frame a real robotics task (USV dock detection / obstacle avoidance) as an ML problem: inputs, outputs, paradigm.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>Intuition</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Classic programming and machine learning solve the same kind of problem from opposite ends.</p>
+
+      <p>In <strong>classic programming</strong>, <em>you</em> write the rules. "If the sonar return is closer than 3 m, turn starboard." You know the logic, you type it out, the computer runs it. The output is a <em>consequence</em> of rules you authored.</p>
+
+      <p>In <strong>machine learning</strong>, you don't write the rules. You hand the machine a pile of <strong>examples</strong> — pairs of (situation, correct answer) — and an algorithm searches for the rules that best reproduce those answers. The rules (called the <strong>model</strong>) are <em>discovered</em>, not authored.</p>
+
+      <div class="mermaid">
+flowchart LR
+    subgraph CP[Classic Programming]
+        R1[Rules] --> P1[Program]
+        D1[Data] --> P1
+        P1 --> A1[Answers]
+    end
+    subgraph ML[Machine Learning]
+        D2[Data] --> P2[Learning Algorithm]
+        A2[Answers] --> P2
+        P2 --> R2[Rules / Model]
+    end
+</div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The analogy that sticks</div>
+        <p><strong>Classic programming is writing a recipe; ML is tasting 10,000 dishes and inferring the recipe.</strong> You'd write a recipe when you already know how to cook the thing. You'd taste-and-infer when the dish is too subtle to describe in words — like "what does a dock <em>look</em> like in a camera frame, across fog, glare, and chop?" Nobody can write that <code>if</code> statement by hand. That's the gap ML fills.</p>
+      </div>
+
+      <p><strong>AI vs ML vs DL.</strong> These get used interchangeably in marketing; they are not the same.</p>
+      <ul>
+        <li><strong>Artificial Intelligence (AI)</strong> — the broad goal of making machines do things that look intelligent. Includes ML, but also hand-coded logic, search algorithms (A* for path planning is AI and has <em>zero</em> learning in it), and rule engines.</li>
+        <li><strong>Machine Learning (ML)</strong> — the subset of AI where behavior is <em>learned from data</em> rather than hand-coded.</li>
+        <li><strong>Deep Learning (DL)</strong> — a subset of ML using <strong>neural networks</strong> with many layers. It's still "learn rules from data," but the model is a deep stacked function powerful enough to learn its own features. (We build these from lesson <a href="09-neural-networks-mlp.html">09</a> onward.)</li>
+      </ul>
+
+      <div class="mermaid">
+flowchart TD
+    AI[Artificial Intelligence<br/>search, logic, rule engines, ML] --> ML[Machine Learning<br/>learns from data]
+    ML --> DL[Deep Learning<br/>deep neural networks]
+</div>
+
+      <p>A useful sanity check: your A* path planner and your PID controller are AI/control, <strong>not</strong> ML — there's nothing being learned. A model that predicts current drift from past IMU + GPS data <em>is</em> ML.</p>
+
+      <h3>The three learning paradigms</h3>
+      <p>How the machine learns depends on what kind of feedback it gets.</p>
+
+      <div class="mermaid">
+flowchart TD
+    ML[Machine Learning] --> S[Supervised<br/>labeled examples: X to y]
+    ML --> U[Unsupervised<br/>only X, find structure]
+    ML --> R[Reinforcement<br/>act, get reward, improve]
+    S --> SC[Classification<br/>discrete labels]
+    S --> SR[Regression<br/>continuous values]
+    U --> UC[Clustering]
+    U --> UD[Dimensionality reduction]
+    R --> RP[Policy learning]
+</div>
+
+      <ul>
+        <li><strong>Supervised learning</strong> — you have inputs <strong>and</strong> the correct answers (<strong>labels</strong>). The model learns the mapping input → label. Splits into <strong>classification</strong> (label is a category: "dock" / "buoy" / "open water") and <strong>regression</strong> (label is a number: "distance to obstacle in meters"). This is most of lessons 02–13.</li>
+        <li><strong>Unsupervised learning</strong> — you have inputs but <em>no</em> answers. The model finds structure on its own: grouping similar lidar scans (<strong>clustering</strong>), or compressing a 64-channel sonar array into 3 meaningful axes (<strong>dimensionality reduction</strong>). Lesson <a href="08-kmeans-pca.html">08</a>.</li>
+        <li><strong>Reinforcement learning (RL)</strong> — an <strong>agent</strong> takes actions in an environment, receives a scalar <strong>reward</strong>, and learns a <strong>policy</strong> that maximizes long-term reward. This is how you'd train a USV to hold station in current, or a drone to land. No fixed "correct answer" per step — only delayed reward. (Beyond this course's core, but you'll recognize it.)</li>
+      </ul>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> A quick decision rule</div>
+        <p><em>Do I have labeled answers? → supervised. Just raw data, want structure? → unsupervised. An agent acting over time for reward? → reinforcement.</em></p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>The Math</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>the supervised frame in symbols</small></div>
+      <p>The math here is light on purpose — lesson <a href="01-math-foundations.html">01</a> builds the real toolbox. But the core <em>frame</em> of supervised learning is worth one set of symbols, because every later lesson is a variation on it.</p>
+
+      <p>We want to learn a function</p>
+      <div class="math-box">$$ f_\theta : \mathcal{X} \rightarrow \mathcal{Y} $$</div>
+      <p>where $\mathcal{X}$ is the <strong>input space</strong> (e.g. all possible sonar readings), $\mathcal{Y}$ is the <strong>output space</strong> (e.g. distance in meters, or the set of classes), and $\theta$ (theta) is the vector of <strong>parameters</strong> — the numbers the learning process tunes. A single input is $x \in \mathcal{X}$; its true answer is $y \in \mathcal{Y}$; the model's guess is $\hat{y} = f_\theta(x)$ ("y-hat").</p>
+
+      <p>We're given a <strong>training set</strong> of $n$ labeled examples:</p>
+      <div class="math-box">$$ \mathcal{D} = \{(x^{(1)}, y^{(1)}), \dots, (x^{(n)}, y^{(n)})\} $$</div>
+      <p>The superscript $(i)$ indexes examples (it is <em>not</em> an exponent). Each $x^{(i)}$ is usually a vector of <strong>features</strong> — measured quantities like $[\text{range}, \text{intensity}, \text{bearing}]$.</p>
+
+      <p>To say how <em>wrong</em> a guess is, we define a <strong>loss function</strong> $\ell(\hat{y}, y)$ that's small when the guess is good and large when it's bad. Averaging the loss over the whole training set gives the <strong>cost</strong> (or <strong>empirical risk</strong>):</p>
+      <div class="math-box">$$ J(\theta) = \frac{1}{n} \sum_{i=1}^{n} \ell\big(f_\theta(x^{(i)}),\, y^{(i)}\big) $$</div>
+      <p>Where does this come from? It's just "average mistake over the data I've seen." For regression a classic choice is <strong>squared error</strong> $\ell(\hat{y}, y) = (\hat{y} - y)^2$ (penalize big misses hard); for classification we'll use a different loss in lesson <a href="04-logistic-regression.html">04</a>.</p>
+
+      <p><strong>Training</strong> = solving the optimization problem</p>
+      <div class="math-box">$$ \theta^{*} = \arg\min_{\theta} \; J(\theta) $$</div>
+      <p>i.e. find the parameters that make average loss smallest. We'll do this with <strong>gradient descent</strong> in lesson <a href="03-gradient-descent.html">03</a>. <strong>Inference</strong> = using the trained $f_{\theta^{*}}$ on a <em>new</em> $x$ to get $\hat{y}$.</p>
+
+      <p>The whole game in one sentence: <strong>pick a model family $f_\theta$, define a loss, and search over $\theta$ to minimize average loss — while making sure it still works on data you haven't seen.</strong> That last clause is <strong>generalization</strong>, and it's the hard part.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Generalization vs memorization</div>
+        <p><strong>Generalization</strong> is the difference between memorizing the training set and actually learning the pattern. A model that scores perfectly on training data but fails on new data has <strong>overfit</strong> — it memorized noise. Lesson <a href="05-overfitting-evaluation.html">05</a> is entirely about measuring and fixing this.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>Code</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>make the loop concrete</small></div>
+      <p>No real training yet — that starts in lesson 02. The goal here is to make the <em>loop</em> concrete with a tiny <code>numpy</code> example so the vocabulary stops being abstract. We'll fit the simplest possible model — a single number, the mean — to data, by literally trying values and watching the loss.</p>
+
+      <div class="codeblock">
+        <div class="code-head">mean_by_search.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+
+# ---- 1. DATA --------------------------------------------------------------
+# Pretend a USV measured "distance to nearest obstacle" (meters) at 8 moments.
+# In supervised learning these would be LABELS (y). Here, to keep it minimal,
+# our "model" has no inputs x -- it just predicts one constant value for all.
+y = np.array([12.1, 11.8, 13.0, 12.5, 11.2, 12.9, 12.3, 12.7])
+
+# ---- 2. MODEL -------------------------------------------------------------
+# Our model family is trivial: f_theta(x) = theta, a single parameter.
+# "Predict the same number every time." theta is what we're trying to learn.
+def model(theta):
+    return theta  # ignores input on purpose; simplest possible f_theta
+
+# ---- 3. LOSS / COST -------------------------------------------------------
+# Mean Squared Error: average of (prediction - truth)^2 over all examples.
+def cost(theta, y):
+    preds = model(theta)            # one number, broadcast against all y
+    return np.mean((preds - y) ** 2)
+
+# ---- 4. "OPTIMIZE" (brute-force search, just to SEE the minimum) ----------
+# Real ML uses gradient descent (lesson 03). Here we scan candidate thetas.
+candidates = np.linspace(10.0, 14.0, 401)     # 401 guesses from 10 to 14
+costs = np.array([cost(t, y) for t in candidates])
+
+best_idx   = np.argmin(costs)                  # index of smallest cost
+theta_star = candidates[best_idx]              # the learned parameter
+print(f"learned theta*: {theta_star:.3f}")     # -&gt; learned theta*: 12.310
+print(f"min cost:       {costs[best_idx]:.3f}")# -&gt; min cost:       0.319
+
+# Sanity check: for MSE, the optimal constant is exactly the mean of y.
+print(f"mean of y:      {y.mean():.3f}")       # -&gt; mean of y:      12.312
+</code></pre>
+      </div>
+
+      <p><code>theta_star</code> lands right on <code>y.mean()</code> — that's not a coincidence. For squared-error loss with a constant model, the cost $J(\theta) = \frac{1}{n}\sum (\theta - y^{(i)})^2$ is a parabola in $\theta$; setting its derivative to zero gives $\theta^{*} = \bar{y}$, the mean. You just did your first piece of ML math by brute force, and the analytic answer agrees. That parabola-with-a-bottom shape is the thing gradient descent will <em>roll down</em> in lesson 03.</p>
+
+      <p>Now visualize the <strong>loss landscape</strong> — the single most important picture in ML:</p>
+
+      <div class="codeblock">
+        <div class="code-head">plot_loss_landscape.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import matplotlib.pyplot as plt
+
+plt.figure(figsize=(6, 4))
+plt.plot(candidates, costs, label="cost J(theta)")
+plt.axvline(theta_star, color="red", linestyle="--",
+            label=f"theta* = {theta_star:.2f}")
+plt.xlabel("theta (predicted distance, m)")
+plt.ylabel("mean squared error")
+plt.title("Loss landscape: training = find the bottom of this curve")
+plt.legend()
+plt.tight_layout()
+plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What you should see</div>
+        <p>A smooth U-shaped (parabolic) curve with its single lowest point at the red dashed line, around <code>theta = 12.31</code>. Training, in every later lesson, is the search for the bottom of a curve like this — except $\theta$ will have thousands or millions of dimensions instead of one, and we can't brute-force scan it.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>Real Case</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>frame a USV perception task</small></div>
+      <p><strong>Task: a USV must detect docks and avoid obstacles from its forward camera + sonar.</strong> Let's frame it as ML instead of hand-coded rules.</p>
+
+      <p>Why not just write rules? You could try: "dock = large bright rectangle near the waterline." But docks vary (wood, concrete, floating, with/without boats), and lighting swings from dawn glare to fog. Each new <code>if</code> you add to patch a failure breaks two others. This is the classic sign you should <em>learn</em> the rule from examples instead of authoring it.</p>
+
+      <p><strong>Framing it, piece by piece:</strong></p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>ML concept</th><th>This task</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Input</strong> $x$</td><td>A camera frame (pixels) + a fused sonar/lidar range vector at that instant</td></tr>
+          <tr><td><strong>Features</strong></td><td>Could be raw pixels (DL learns its own features, lesson 13) or engineered: edge density, dominant range, intensity histogram</td></tr>
+          <tr><td><strong>Output</strong> $y$</td><td>Two heads: <em>(a)</em> class — <code>{dock, buoy, vessel, open_water}</code>; <em>(b)</em> number — distance to nearest obstacle (m)</td></tr>
+          <tr><td><strong>Paradigm</strong></td><td>(a) supervised <strong>classification</strong>; (b) supervised <strong>regression</strong> — both supervised because we'll label recorded runs</td></tr>
+          <tr><td><strong>Labels</strong></td><td>Humans annotate logged footage: draw boxes / tag frames. This is the expensive part.</td></tr>
+          <tr><td><strong>Loss</strong></td><td>Cross-entropy for the class head; squared error for the distance head (lessons 04, 02)</td></tr>
+          <tr><td><strong>Train / infer</strong></td><td>Train offline on the labeled log on a workstation/GPU; run <strong>inference</strong> live on the USV's onboard compute, in the ROS2 perception node</td></tr>
+          <tr><td><strong>Generalization</strong></td><td>The real test: does it work in a harbor it was <em>never trained on</em>, in weather it never saw? Measured on a held-out test set (lesson 05).</td></tr>
+        </tbody>
+      </table></div>
+
+      <p>The whole <strong>end-to-end workflow</strong> for this project:</p>
+
+      <div class="mermaid">
+flowchart LR
+    A[Collect data<br/>record harbor runs] --> B[Label<br/>tag frames, mark distances]
+    B --> C[Features<br/>raw pixels or engineered]
+    C --> D[Model<br/>pick f_theta]
+    D --> E[Loss<br/>define wrongness]
+    E --> F[Optimize<br/>train: minimize cost]
+    F --> G[Evaluate<br/>held-out harbor + weather]
+    G -->|good| H[Deploy<br/>ROS2 inference node on USV]
+    G -->|bad| C
+    H -->|new failures| A
+</div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🌊</span> It's a loop, not a line</div>
+        <p>The USV hits a failure case in deployment — say it confuses a moored kayak for open water — and that failure becomes new labeled training data. That feedback loop is most of the real work; the model-fitting math is the easy 10%.</p>
+      </div>
+
+      <p>A grounding classic: the same supervised frame describes the <strong>Iris</strong> dataset (features = petal/sepal measurements, label = flower species, paradigm = classification) and <strong>California housing</strong> (features = block stats, label = median price, paradigm = regression). Same skeleton, different $x$ and $y$. Once you see the skeleton you see it everywhere.</p>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>Pitfalls &amp; Tips</h2>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Six traps to keep straight</div>
+        <ul>
+          <li><strong>Don't reach for ML when rules work.</strong> If you can write the <code>if</code> statement reliably (e.g. "halt if depth &lt; 0.5 m"), do that — it's testable, debuggable, and has no training data cost. ML earns its keep only when the rule is too complex or fuzzy to author by hand.</li>
+          <li><strong>No labels ≠ "just do unsupervised."</strong> Unsupervised learning finds <em>structure</em>, not <em>your specific answer</em>. If you need "dock vs not-dock," clustering won't hand you that label for free — you need supervision somewhere. Many real projects die because nobody budgeted for labeling.</li>
+          <li><strong>Train accuracy is a vanity metric.</strong> A model can score 100% on data it has seen and be useless. Always judge on a <strong>held-out</strong> set the model never trained on. We formalize this in lesson 05 — internalize the instinct now.</li>
+          <li><strong>Garbage in, garbage out — and it's mostly garbage in.</strong> Mislabeled frames, a sonar that drifts after an hour, a camera with a smudged lens: the model faithfully learns your data's flaws. Expect to spend far more time on data than on models.</li>
+          <li><strong>Distribution shift will bite you.</strong> A model trained in a calm freshwater test pond can fail in salt water, chop, and glare. The deployment world rarely matches the training world; plan to measure and re-train.</li>
+          <li><strong>AI ≠ ML ≠ DL — keep them straight.</strong> Reaching for a deep neural net when linear regression (lesson 02) would do is a real and common mistake. Start simple; add complexity only when a simpler model provably falls short.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>Check Your Understanding</h2>
+
+      <p><strong>Q1.</strong> Your teammate says "we used AI for the path planner — it's A* search." Is that machine learning? Why or why not?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>No. A* is a <strong>search algorithm</strong> — it follows hand-coded logic to find a shortest path. Nothing is <em>learned from data</em>; the same inputs always produce the same output by fixed rules. It's AI (intelligent behavior) but not ML. It would only become ML if, say, you learned the edge-cost function from logged traversal data.</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> You have 50,000 logged sonar scans but <strong>no</strong> labels telling you what each scan contains. You want to discover whether the scans fall into a few natural "types." Which paradigm, and which sub-task?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p><strong>Unsupervised learning</strong>, specifically <strong>clustering</strong> — grouping similar scans without any labels. (Lesson 08.) If you later wanted to <em>name</em> those clusters as "dock / open water / vessel," that naming step would require supervision — labels from a human.</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> In the symbols $f_\theta(x^{(i)}) = \hat{y}^{(i)}$ and label $y^{(i)}$, which one does the learning algorithm change during training, and which is fixed?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Training changes <strong>$\theta$</strong> (the parameters) to make $\hat{y}^{(i)} = f_\theta(x^{(i)})$ close to the true $y^{(i)}$. The data $x^{(i)}$ and the labels $y^{(i)}$ are <strong>fixed</strong> — they're the examples we're learning from. We tune the knobs ($\theta$), not the world.</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> A model gets 99% accuracy on the data it trained on but 61% on a new harbor it never saw. What's the name for this, and is the training number reassuring?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>This is <strong>overfitting</strong> — the model memorized the training set (including its noise/quirks) instead of learning a pattern that <strong>generalizes</strong>. The 99% is <em>not</em> reassuring; it's almost a warning sign. The 61% on unseen data is the number that matters. (Lesson 05 is devoted to detecting and fixing this.)</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> Why is the end-to-end ML workflow drawn as a loop instead of a straight line from data to deployment?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Because deployment surfaces new failure cases (new harbors, new weather, mislabeled edge cases) that feed back into data collection and labeling. Real ML systems are continuously evaluated and re-trained; "ship once and forget" almost never holds. The model-fitting step is a small slice of an ongoing cycle dominated by data work.</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml00-paradigm">
+        <div class="ex-head"><span class="badge">Q1</span> Pick the paradigm</div>
+        <div class="ex-q">You have logged USV camera frames, each already <strong>tagged by a human</strong> as <code>dock</code>, <code>buoy</code>, or <code>open_water</code>, and you want the model to predict that tag for new frames. Which paradigm and sub-task is this?</div>
+        <ul class="ex-options">
+          <li data-correct="true">Supervised learning — classification (discrete labels).</li>
+          <li data-correct="false">Supervised learning — regression (continuous values).</li>
+          <li data-correct="false">Unsupervised learning — clustering (no labels available).</li>
+          <li data-correct="false">Reinforcement learning — an agent acting for delayed reward.</li>
+        </ul>
+        <div class="ex-explain">You have inputs <em>and</em> the correct answers (the human tags), so it's <strong>supervised</strong>. The answer is a <em>category</em> from a fixed set, not a number, so it's <strong>classification</strong>. Regression would predict a continuous value (e.g. distance in meters); clustering applies only when you have no labels; RL needs an agent earning reward over time.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml00-best-constant" data-answer="12.312" data-tol="0.01">
+        <div class="ex-head"><span class="badge">Q2</span> Compute the optimal constant</div>
+        <div class="ex-q">For the squared-error loss with a constant model, $\theta^{*}$ is exactly the mean of the labels. Using $y = [12.1, 11.8, 13.0, 12.5, 11.2, 12.9, 12.3, 12.7]$, compute $\theta^{*} = \bar{y}$ (in meters, to 3 decimals).</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">m</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">Sum $= 12.1+11.8+13.0+12.5+11.2+12.9+12.3+12.7 = 98.5$. Divide by $n=8$: $\theta^{*} = 98.5/8 = 12.3125 \approx 12.312$ m. This matches <code>y.mean()</code> and the brute-force <code>theta_star</code> from the code (which lands at 12.310 only because the 401-point grid can't hit 12.3125 exactly).</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml00-rules-vs-ml">
+        <div class="ex-head"><span class="badge">Q3</span> Rules or learning?</div>
+        <div class="ex-q">A teammate wants to "use ML" for a safety interlock: <em>halt the USV if measured water depth drops below 0.5 m</em>. Should this be machine learning? Justify it using this lesson's reasoning, then say what part of the dock-detection task <em>should</em> be ML and why.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Ask: can you write the <code>if</code> statement reliably by hand? If yes, what does ML add — and what does it cost (training data, evaluation, distribution shift)?</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p><strong>No — keep it a rule.</strong> "Halt if depth &lt; 0.5 m" is a single, crisp, reliably-authorable <code>if</code> statement. It's testable, debuggable, deterministic, and needs zero labeled training data. ML would only add a training-data cost, an evaluation burden, and a distribution-shift risk for a rule that already works perfectly — strictly worse. As the lesson says: <em>use ML only when the rule is too complex or fuzzy to author by hand</em>.</p>
+          <p><strong>Where ML earns its keep:</strong> the <em>perception</em> step — "is this camera frame a dock?" — is the fuzzy part. Docks vary in material, shape, lighting, and weather; every hand-written <code>if</code> patch breaks two others. That's the gap ML fills: learn the dock-vs-not-dock rule from labeled examples (supervised classification), then feed its output into the simple hand-coded safety logic. Learn the fuzzy perception; hand-code the crisp control.</p>
+        </div></details>
+      </div>
+
+      <!-- ============================================================ recap -->
+      <h2 id="recap-next"><span class="sec-no">8</span>Recap &amp; Next</h2>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Lesson recap</div>
+        <ul>
+          <li><strong>AI ⊃ ML ⊃ DL</strong>: AI is the broad goal, ML learns rules from data, DL uses deep neural networks. A* and PID are AI/control but <em>not</em> ML.</li>
+          <li>Three paradigms: <strong>supervised</strong> (labeled X→y; classification + regression), <strong>unsupervised</strong> (structure from unlabeled X), <strong>reinforcement</strong> (act → reward → policy).</li>
+          <li>Supervised learning in one frame: pick a model $f_\theta$, define a <strong>loss</strong>, and <strong>minimize average loss</strong> over training data — then check it <strong>generalizes</strong> to unseen data.</li>
+          <li>The end-to-end workflow — data → features → model → loss → optimize → evaluate → deploy — is a <strong>loop</strong>, and the data work dwarfs the math.</li>
+          <li>Use ML only when rules are too complex to author by hand; otherwise an <code>if</code> statement wins.</li>
+        </ul>
+        <p>Next we build the actual toolbox — vectors, matrices, derivatives, and probability — that makes all of this computable: <a href="01-math-foundations.html">01 — The Math Toolbox</a>.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

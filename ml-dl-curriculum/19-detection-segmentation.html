@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Object Detection &amp; Segmentation — Machine Learning &amp; Deep Learning</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="19-detection-segmentation">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 19</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL Course · 19</div>
+        <h1>Object Detection &amp; Segmentation</h1>
+        <p>A classifier tells you a boat <em>exists</em>; a path planner needs to know <strong>where</strong> it is, <strong>how big</strong>, and <strong>how far off the bow</strong>. We climb from one label to boxes to per-pixel masks — and build the IoU / anchor / NMS / mAP machinery that makes perception usable for control.</p>
+        <div class="meta"><span>⏱ ~40 min</span><span>🧠 IoU · anchors · NMS · mAP</span><span>🐍 torchvision</span><span>🪢 U-Net</span></div>
+      </section>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Part 7 · Lesson 19 · Code stack: PyTorch (torchvision pretrained models)</div>
+        <p><strong>Prerequisites:</strong> <a href="13-cnns.html">13 — Convolutional Neural Networks</a> (you must be comfortable with conv stacks, feature maps, and shape arithmetic). Helpful background: <a href="12-training-deep-nets.html">12 — Training Deep Networks</a> (loss heads, training stability) and <a href="17-transfer-learning-llms-mlops.html">17 — Transfer Learning, LLMs &amp; MLOps</a> (using pretrained backbones).</p>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎯</span> By the end you can</div>
+        <ul>
+          <li>Explain the jump from <strong>classification</strong> ("what is in the image") to <strong>detection</strong> ("what <em>and where</em>, as boxes") and <strong>segmentation</strong> ("which pixels").</li>
+          <li>Define <strong>IoU</strong>, <strong>anchor boxes</strong>, <strong>NMS</strong>, and <strong>mAP</strong>, and say <em>why</em> a path planner needs each.</li>
+          <li>Contrast <strong>two-stage</strong> (Faster R-CNN) vs <strong>one-stage</strong> (YOLO/SSD) detectors and reason about the speed/accuracy tradeoff.</li>
+          <li>Run a <strong>pretrained torchvision detector</strong> on a real image, filter by score, apply <strong>NMS</strong>, and draw boxes.</li>
+          <li>Trace the <strong>encoder–decoder / U-Net</strong> shape, including <strong>transposed convolution</strong> and <strong>skip connections</strong>, through a tiny forward pass.</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>Intuition</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Your CNN classifier from lesson 13 answers one question: <em>"What is this image?"</em> → <code>"boat"</code>. That is almost useless to a path planner. The planner does not care that <em>a</em> boat exists somewhere in the frame; it needs to know <strong>where</strong> the boat is, <strong>how big</strong> it is, and <strong>how far off the bow</strong> — so it can decide whether to hold course or give way. Classification collapses a whole scene into one label. Perception for control has to keep the <strong>spatial structure</strong>.</p>
+
+      <p>There are three escalating tasks, and the difference is entirely about <em>spatial resolution of the answer</em>:</p>
+      <ul>
+        <li><strong>Classification</strong> — one label for the whole image. (Lesson 13.)</li>
+        <li><strong>Object detection</strong> — a set of <strong>bounding boxes</strong>, each with a class label and a confidence score. "Boat at pixels (x=410, y=300, w=120, h=80), score 0.94." Tells the planner discrete obstacles and their footprint.</li>
+        <li><strong>Segmentation</strong> — a class for <strong>every pixel</strong>. <strong>Semantic segmentation</strong> says "this pixel is water, that one is sky"; <strong>instance segmentation</strong> goes further and says "this pixel belongs to <em>boat #2</em>."</li>
+      </ul>
+
+      <div class="mermaid">
+graph LR
+    A["Input frame"] --> B["Classification<br/>'boat' (1 label)"]
+    A --> C["Detection<br/>boxes + labels + scores"]
+    A --> D["Semantic seg.<br/>per-pixel class mask"]
+    A --> E["Instance seg.<br/>per-pixel + which object"]
+    B -.->|"more spatial<br/>detail"| C -.-> D -.-> E
+</div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> Analogy — the harbormaster's three reports</div>
+        <p>Classification is a radio call: <em>"There's traffic out there."</em> Useless for steering. Detection is a radar plot: <em>discrete blips with position and size</em> — exactly what a collision-avoidance algorithm consumes. Segmentation is a painted chart where every square meter of the scene is colored "navigable water / shoreline / vessel / sky" — what you want when the hazard is a <em>region</em> (a sandbar, the shoreline) rather than a discrete object you can box.</p>
+      </div>
+
+      <p>For an autonomous vehicle, the rule of thumb is: <strong>detect discrete obstacles, segment continuous regions.</strong> A buoy or another boat is a box. The water/shore boundary, or the seabed an ROV must not scrape, is a mask.</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>The Math</h2>
+
+      <h3 id="a-box-and-how-to-score-it">2.1 A box, and how to score it</h3>
+
+      <div class="layer"><span class="step">②</span> Math <small>four numbers and an overlap metric</small></div>
+      <p>A bounding box is just four numbers. Two common conventions: corner form $(x_1, y_1, x_2, y_2)$ (top-left and bottom-right) or center form $(x_c, y_c, w, h)$. torchvision uses <strong>corner form</strong>. A detector outputs, per box, a class label and a <strong>confidence score</strong> $s \in [0,1]$.</p>
+
+      <p>To measure whether a predicted box $A$ matches a ground-truth box $B$, we need an overlap metric. That metric is <strong>Intersection-over-Union (IoU)</strong>:</p>
+
+      <div class="math-box">$$
+\text{IoU}(A, B) = \frac{\text{area}(A \cap B)}{\text{area}(A \cup B)}
+$$</div>
+
+      <p>where $A \cap B$ is the overlapping rectangle and $A \cup B = \text{area}(A) + \text{area}(B) - \text{area}(A \cap B)$ is the combined footprint. <strong>Where it comes from:</strong> it is the <strong>Jaccard index</strong> (lesson 05's set-similarity measure) applied to pixel sets. $\text{IoU}=1$ means perfect overlap, $\text{IoU}=0$ means disjoint. The intersection rectangle is computed by taking the inner edges:</p>
+
+      <div class="math-box">$$
+x_1^\cap = \max(x_1^A, x_1^B),\quad y_1^\cap = \max(y_1^A, y_1^B),\quad
+x_2^\cap = \min(x_2^A, x_2^B),\quad y_2^\cap = \min(y_2^A, y_2^B)
+$$</div>
+
+      <p>and if $x_2^\cap &gt; x_1^\cap$ and $y_2^\cap &gt; y_1^\cap$ the intersection area is their product, else $0$ (boxes don't touch).</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> IoU is the workhorse</div>
+        <p>It decides whether a prediction "counts" as correct (typically $\text{IoU} \ge 0.5$), and it drives NMS below.</p>
+      </div>
+
+      <h3 id="anchor-boxes">2.2 Anchor boxes — turning detection into regression</h3>
+
+      <p>How do you make a CNN <em>emit</em> boxes? You can't easily ask a fixed-size network to output a variable number of arbitrary rectangles. The trick that unlocked modern detectors: <strong>anchor boxes</strong> (also called priors or default boxes).</p>
+
+      <p>Overlay a grid on the image. At each grid cell, predefine a handful of reference rectangles of fixed sizes and aspect ratios — e.g. a tall one, a wide one, a square one, at three scales. These are <strong>anchors</strong>. The network's job is no longer "invent a box from nothing" but "for each anchor, predict (a) is there an object here? and (b) a small <strong>offset</strong> correcting the anchor to the true box." That converts an open-ended search into a fixed, parallel <strong>classification + regression</strong> problem the CNN already knows how to do.</p>
+
+      <p>The regression targets are offsets relative to an anchor $(x_a, y_a, w_a, h_a)$:</p>
+
+      <div class="math-box">$$
+t_x = \frac{x - x_a}{w_a},\quad t_y = \frac{y - y_a}{h_a},\quad
+t_w = \log\frac{w}{w_a},\quad t_h = \log\frac{h}{h_a}
+$$</div>
+
+      <p>where $(x,y,w,h)$ is the true box center/size. <strong>Where it comes from:</strong> dividing by the anchor size makes the target <strong>scale-invariant</strong> (a 10-pixel error on a tiny buoy and a 100-pixel error on a huge ship are comparable when normalized), and the $\log$ on width/height keeps growth/shrink symmetric and forces positive sizes. The network predicts $\hat{t}$; you invert these equations to recover the actual box.</p>
+
+      <h3 id="two-stage-vs-one-stage">2.3 Two families: two-stage vs one-stage</h3>
+
+      <div class="mermaid">
+graph TD
+    subgraph TwoStage["Two-stage (Faster R-CNN): accurate"]
+        I1["Image"] --> BB1["CNN backbone<br/>(feature map)"]
+        BB1 --> RPN["Region Proposal Network<br/>~1000s of candidate boxes"]
+        RPN --> ROI["ROI pooling +<br/>classify &amp; refine each"]
+        ROI --> O1["boxes + labels"]
+    end
+    subgraph OneStage["One-stage (YOLO / SSD): fast"]
+        I2["Image"] --> BB2["CNN backbone"]
+        BB2 --> GRID["Single dense grid:<br/>per cell, per anchor →<br/>class + box in one pass"]
+        GRID --> O2["boxes + labels"]
+    end
+</div>
+
+      <ul>
+        <li><strong>Two-stage (R-CNN → Fast R-CNN → Faster R-CNN).</strong> Stage 1: a <strong>Region Proposal Network (RPN)</strong> scans the backbone feature map and emits a few thousand class-agnostic "there might be <em>something</em> here" boxes. Stage 2: for each proposal, <strong>ROI pooling</strong> crops the corresponding feature patch to a fixed size and a small head classifies it and refines the box. Two passes = more compute but high accuracy, especially on small objects.</li>
+        <li><strong>One-stage (YOLO, SSD).</strong> Skip proposals entirely. A single forward pass over the grid predicts, for every cell and every anchor, the class scores <em>and</em> the box offsets <em>at once</em>. One pass = real-time speeds (tens to hundreds of FPS) at some accuracy cost.</li>
+      </ul>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> The tradeoff, in one sentence</div>
+        <p>Two-stage spends compute zooming in on promising regions before deciding (accurate, slower); one-stage decides everywhere simultaneously (fast, slightly less precise on small/cluttered objects). On a USV at 20 FPS doing collision avoidance you almost always pick <strong>one-stage</strong>; for an offline survey re-analysis where accuracy is king, two-stage is fine.</p>
+      </div>
+
+      <h3 id="non-maximum-suppression">2.4 Non-Maximum Suppression (NMS)</h3>
+
+      <p>Anchors are dense, so the network fires <em>many overlapping boxes on the same object</em> — five slightly-shifted boxes all yelling "boat!". You want <strong>one box per object</strong>. <strong>NMS</strong> is the cleanup:</p>
+
+      <ol>
+        <li>Sort all boxes (of a class) by score, highest first.</li>
+        <li>Take the top box, keep it, and <strong>remove every remaining box with $\text{IoU} \ge \tau$</strong> against it (they're duplicates of the same object). $\tau$ is the NMS threshold, e.g. $0.5$.</li>
+        <li>Repeat with the next-highest surviving box until none remain.</li>
+      </ol>
+
+      <p>It's a greedy "the most confident box wins its neighborhood" filter. Too low a $\tau$ and you suppress genuinely distinct adjacent objects (two boats side by side merge into one); too high and duplicates leak through.</p>
+
+      <h3 id="map-the-detection-scorecard">2.5 mAP — the detection scorecard</h3>
+
+      <p>You can't use plain accuracy: detection has variable numbers of objects, and "correct" depends on both label <em>and</em> IoU. The standard metric is <strong>mean Average Precision (mAP)</strong>:</p>
+
+      <ul>
+        <li>A prediction is a <strong>true positive</strong> if its label is right <strong>and</strong> $\text{IoU} \ge$ threshold (e.g. 0.5) with an unmatched ground-truth box; otherwise a <strong>false positive</strong>. Missed ground truths are <strong>false negatives</strong>.</li>
+        <li>Sweep the score threshold from high to low; at each level compute <strong>precision</strong> $= \frac{TP}{TP+FP}$ and <strong>recall</strong> $= \frac{TP}{TP+FN}$ (lesson 05). This traces a <strong>precision–recall curve</strong>; its area is the <strong>Average Precision (AP)</strong> for that class.</li>
+        <li><strong>mAP</strong> averages AP over all classes (and, in COCO, over IoU thresholds 0.50→0.95). Higher is better; it rewards finding objects (recall) <em>without</em> spraying false boxes (precision).</li>
+      </ul>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>Code</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>We'll load a <strong>pretrained Faster R-CNN</strong> from torchvision, run it on one image, filter weak detections, apply <strong>NMS</strong>, and draw the boxes. The model was trained on <strong>COCO</strong> (80 everyday classes — <code>person</code>, <code>car</code>, <code>boat</code>, <code>bird</code>, ...), so it already knows "boat" out of the box, which is convenient for a marine demo.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Heads up</div>
+        <p>The first run <strong>downloads pretrained weights (~160 MB) once</strong> and caches them. It runs fine on CPU (a second or two per image); a GPU is optional. Requires <code>torchvision</code> in your <code>study</code> env (<code>pip install torchvision</code>).</p>
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">load_detector.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import torch
+import torchvision
+from torchvision.models.detection import (
+    fasterrcnn_resnet50_fpn, FasterRCNN_ResNet50_FPN_Weights
+)
+import torchvision.ops as ops
+
+# --- 1. Load the pretrained detector in EVAL mode ---------------------------
+# .DEFAULT picks the best available pretrained weights bundle. The bundle also
+# carries (a) the COCO class names and (b) the exact preprocessing transform.
+weights = FasterRCNN_ResNet50_FPN_Weights.DEFAULT
+model = fasterrcnn_resnet50_fpn(weights=weights)
+model.eval()                       # disable dropout/BN updates — inference only
+
+categories = weights.meta["categories"]   # list; index 0 is "__background__"
+print(categories[:10])
+# -&gt; ['__background__', 'person', 'bicycle', 'car', 'motorcycle',
+#     'airplane', 'bus', 'train', 'truck', 'boat']
+
+# The model's own preprocessing: convert to float, scale, normalize.
+preprocess = weights.transforms()
+</code></pre>
+      </div>
+
+      <p>Now run inference. The detection model takes a <strong>list of image tensors</strong> (it handles variable sizes internally) and returns a <strong>list of dicts</strong>, one per image, with keys <code>boxes</code>, <code>labels</code>, <code>scores</code>.</p>
+
+      <div class="codeblock">
+        <div class="code-head">run_inference.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from torchvision.io import read_image   # reads as uint8 CHW tensor
+
+# Use any image you have. For a marine scene, a harbor/boat photo is ideal.
+img_uint8 = read_image("harbor.jpg")     # shape: (3, H, W), dtype uint8
+batch = [preprocess(img_uint8)]          # list of one preprocessed tensor
+
+with torch.no_grad():                    # no gradients needed for inference
+    outputs = model(batch)
+
+pred = outputs[0]                        # dict for our single image
+print(pred["boxes"].shape, pred["scores"].shape)
+# -&gt; torch.Size([N, 4]) torch.Size([N])   # N raw detections, boxes in (x1,y1,x2,y2)
+</code></pre>
+      </div>
+
+      <p>The raw output has many low-confidence and duplicate boxes. We clean it in two steps — <strong>score filter</strong>, then <strong>NMS</strong>:</p>
+
+      <div class="codeblock">
+        <div class="code-head">filter_and_nms.py <span class="lang">Python</span></div>
+<pre><code class="language-python"># --- 2. Filter by confidence score -----------------------------------------
+SCORE_THRESH = 0.7                       # keep only confident detections
+keep = pred["scores"] &gt;= SCORE_THRESH
+boxes_filt  = pred["boxes"][keep]        # (M, 4)  score-filtered, still has dups
+labels_filt = pred["labels"][keep]       # (M,)  integer class ids
+scores_filt = pred["scores"][keep]       # (M,)
+
+# --- 3. Non-Maximum Suppression: kill duplicate boxes ----------------------
+# ops.nms returns the INDICES to keep, sorted by score, removing any box whose
+# IoU with a higher-scoring box exceeds the threshold.
+NMS_IOU = 0.5
+keep_idx = ops.nms(boxes_filt, scores_filt, iou_threshold=NMS_IOU)
+boxes  = boxes_filt[keep_idx]            # NMS-deduplicated subset
+labels = labels_filt[keep_idx]
+scores = scores_filt[keep_idx]
+
+for b, l, s in zip(boxes, labels, scores):
+    name = categories[l.item()]
+    x1, y1, x2, y2 = b.tolist()
+    print(f"{name:8s} score={s:.2f}  box=({x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f})")
+# -&gt; boat     score=0.99  box=(412,301,640,455)
+# -&gt; boat     score=0.91  box=(110,330,250,420)
+# -&gt; person   score=0.85  box=(470,250,505,330)
+</code></pre>
+      </div>
+
+      <p>It is worth seeing NMS as a one-liner so the "magic" is demystified. Here is the IoU + greedy-NMS computed by hand, matching <code>torchvision.ops.nms</code>:</p>
+
+      <div class="codeblock">
+        <div class="code-head">my_nms.py <span class="lang">Python</span></div>
+<pre><code class="language-python">def iou(box, boxes):
+    """IoU of one box (4,) against many boxes (K,4). Corner format."""
+    x1 = torch.maximum(box[0], boxes[:, 0])          # inner-left edge
+    y1 = torch.maximum(box[1], boxes[:, 1])
+    x2 = torch.minimum(box[2], boxes[:, 2])          # inner-right edge
+    y2 = torch.minimum(box[3], boxes[:, 3])
+    inter = (x2 - x1).clamp(min=0) * (y2 - y1).clamp(min=0)
+    area  = lambda b: (b[..., 2] - b[..., 0]) * (b[..., 3] - b[..., 1])
+    union = area(box) + area(boxes) - inter
+    return inter / union
+
+def my_nms(boxes, scores, thresh=0.5):
+    order = scores.argsort(descending=True)          # highest score first
+    keep = []
+    while order.numel() &gt; 0:
+        i = order[0]                                 # the winner
+        keep.append(i.item())
+        if order.numel() == 1:
+            break
+        rest = order[1:]
+        ious = iou(boxes[i], boxes[rest])
+        order = rest[ious &lt; thresh]                  # drop overlapping duplicates
+    return torch.tensor(keep)
+
+# Sanity check against the library: run BOTH on the pre-NMS (score-filtered)
+# boxes and confirm the kept-index sets agree. (Running on the already-
+# deduplicated `boxes` would trivially keep everything and prove nothing.)
+mine = set(my_nms(boxes_filt, scores_filt, NMS_IOU).tolist())
+lib  = set(ops.nms(boxes_filt, scores_filt, NMS_IOU).tolist())
+assert mine == lib
+</code></pre>
+      </div>
+
+      <p><strong>Draw the boxes</strong> with matplotlib:</p>
+
+      <div class="codeblock">
+        <div class="code-head">draw_boxes.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+
+fig, ax = plt.subplots(figsize=(8, 6))
+ax.imshow(img_uint8.permute(1, 2, 0))                # CHW -&gt; HWC for imshow
+for b, l, s in zip(boxes, labels, scores):
+    x1, y1, x2, y2 = b.tolist()
+    rect = patches.Rectangle((x1, y1), x2 - x1, y2 - y1,
+                             linewidth=2, edgecolor="lime", facecolor="none")
+    ax.add_patch(rect)
+    ax.text(x1, y1 - 4, f"{categories[l.item()]} {s:.2f}",
+            color="black", fontsize=9,
+            bbox=dict(facecolor="lime", alpha=0.8, pad=1))
+ax.axis("off"); plt.tight_layout(); plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">📡</span> What you should see</div>
+        <p>The original photo with tight green rectangles hugging each boat/person, each tagged with its class name and confidence — and crucially, exactly <em>one</em> box per object (NMS did its job; without it you'd see clusters of near-duplicate boxes on each hull).</p>
+      </div>
+
+      <h3 id="tiny-unet-shape-walkthrough">Shape walkthrough — a tiny U-Net (segmentation)</h3>
+
+      <p>Detection gives boxes; <strong>segmentation</strong> gives a per-pixel mask, and the canonical architecture is the <strong>U-Net</strong>: an <strong>encoder</strong> that downsamples to learn semantics, a <strong>decoder</strong> that <em>upsamples back to full resolution</em>, and <strong>skip connections</strong> carrying fine detail across. The decoder's upsampling uses <strong>transposed convolution</strong> (a learnable upsample — the inverse-shape of a conv: it <em>spreads</em> each input pixel into a larger patch, increasing H and W). Watch the spatial dims shrink then grow:</p>
+
+      <div class="codeblock">
+        <div class="code-head">tiny_unet.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import torch.nn as nn
+
+class TinyUNet(nn.Module):
+    def __init__(self, in_ch=3, n_classes=3):       # e.g. water / sky / shore
+        super().__init__()
+        self.enc1 = nn.Conv2d(in_ch, 16, 3, padding=1)   # keep H,W
+        self.enc2 = nn.Conv2d(16, 32, 3, padding=1)
+        self.pool = nn.MaxPool2d(2)                       # halves H,W
+        self.bottleneck = nn.Conv2d(32, 64, 3, padding=1)
+        # transposed conv: stride 2 DOUBLES H,W (learnable upsampling)
+        self.up   = nn.ConvTranspose2d(64, 32, 2, stride=2)
+        # after concatenating the skip (32 + 32 = 64 channels):
+        self.dec  = nn.Conv2d(64, 32, 3, padding=1)
+        self.head = nn.Conv2d(32, n_classes, 1)           # per-pixel logits
+
+    def forward(self, x):
+        s1 = torch.relu(self.enc1(x))     # encoder feature, full res — SKIP source
+        s2 = torch.relu(self.enc2(s1))
+        p  = self.pool(s2)                # downsample
+        b  = torch.relu(self.bottleneck(p))
+        u  = self.up(b)                   # upsample back toward full res
+        u  = torch.cat([u, s2], dim=1)    # SKIP connection: fuse fine detail
+        d  = torch.relu(self.dec(u))
+        return self.head(d)               # (N, n_classes, H, W) per-pixel logits
+
+x = torch.randn(1, 3, 64, 64)             # one 64x64 RGB image
+net = TinyUNet()
+print("input     ", tuple(x.shape))                       # (1, 3, 64, 64)
+print("output    ", tuple(net(x).shape))                  # (1, 3, 64, 64)
+# -&gt; input      (1, 3, 64, 64)
+# -&gt; output     (1, 3, 64, 64)   # per-pixel class scores, SAME H,W as input
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The skip connection is the whole trick</div>
+        <p>The output has the <strong>same height and width as the input</strong> but <code>n_classes</code> channels: take <code>argmax</code> over the channel dim and you get a full-resolution label mask. The <strong>skip connection</strong> (<code>torch.cat([u, s2])</code>) is the whole trick — the encoder destroys spatial precision while learning <em>what</em>; the skip hands the decoder back the <em>where</em> (sharp edges) it would otherwise have lost. Without it, U-Net masks come out blurry.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>Real Case</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>why this matters on a vehicle</small></div>
+
+      <h3 id="usv-uav-camera-perception">USV/UAV camera perception for collision avoidance</h3>
+
+      <p>Put a forward camera on a USV. Run a one-stage detector (YOLO-class, or torchvision's <code>ssdlite320_mobilenet_v3_large</code> for a light real-time model) at 15–30 FPS. The detector emits boxes: <code>boat (0.96)</code>, <code>boat (0.88)</code>, <code>bird (0.71)</code>. Now the box geometry feeds the planner directly:</p>
+
+      <ul>
+        <li><strong>Bearing</strong> comes from the box's horizontal center: a box centered left of frame center is a contact off the port bow. With camera intrinsics, pixel column → angle.</li>
+        <li><strong>Range proxy / closing risk</strong> comes from box size and its <em>growth rate</em> between frames: a <code>boat</code> box that doubles in height over two seconds is approaching fast — escalate to an avoidance maneuver.</li>
+        <li><strong>Footprint</strong> (box width) sets how much lateral clearance to plan.</li>
+      </ul>
+
+      <p>A bare class label ("there is a boat") cannot do any of this. The planner is a geometry engine; it consumes <em>positions and extents</em>, which is exactly what detection provides and classification throws away. This is also where <strong>NMS matters operationally</strong>: without it, one approaching boat shows up as five flickering boxes, and the tracker that feeds your collision-avoidance logic sees five phantom contacts.</p>
+
+      <p>For a <strong>UAV</strong> doing landing-zone or line inspection, same story: detect people/vehicles to keep clear of, and use box position to keep the target centered for a gimbal lock.</p>
+
+      <h3 id="rov-usv-region-segmentation">ROV / USV region segmentation</h3>
+
+      <p>Some hazards aren't discrete objects — they're <em>regions</em>. Here you want <strong>semantic segmentation</strong> (U-Net or DeepLab-class):</p>
+
+      <ul>
+        <li><strong>USV horizon/water segmentation</strong> — label every pixel <code>water</code> / <code>sky</code> / <code>shore/obstacle</code>. The water/non-water boundary defines the <strong>navigable region</strong>; the planner stays inside the water mask. This is robust where detection fails: distant shoreline, breaking waves, or unfamiliar floating debris have no "class," but they're clearly <em>not open water</em>.</li>
+        <li><strong>ROV seabed/structure segmentation</strong> — segment <code>seabed</code> / <code>water column</code> / <code>structure (pipe, hull, reef)</code> from the downward camera or forward sonar imagery so the ROV holds a safe altitude and doesn't scrape the bottom or collide with a pipeline it's inspecting.</li>
+      </ul>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">📡</span> Anchor (classic dataset)</div>
+        <p>The torchvision detector here is trained on <strong>COCO</strong> (Common Objects in Context, 80 classes, ~330k images) — the standard detection benchmark and the reason <code>boat</code>, <code>person</code>, and <code>bird</code> work zero-shot in our demo. The segmentation equivalents you'd fine-tune from are <strong>Cityscapes</strong> / <strong>Pascal VOC</strong>; for marine work, domain datasets like <strong>MaSTr1325</strong> (USV water/sky/obstacle segmentation) or <strong>MODD</strong> (marine obstacle detection) are the right starting points.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-and-tips"><span class="sec-no">5</span>Pitfalls &amp; Tips</h2>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Use the model's own preprocessing</div>
+        <p><code>weights.transforms()</code> applies the exact normalization the network was trained with. Feeding raw $[0,255]$ pixels, or your own mean/std, silently wrecks accuracy — a classic <strong>train/serve skew</strong> (lesson 17). Detection models also expect a <em>list</em> of CHW tensors, not a stacked batch tensor.</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Score threshold ≠ NMS threshold</div>
+        <p>They're different knobs. The <strong>score</strong> threshold filters weak detections (raise it to cut false positives); the <strong>NMS IoU</strong> threshold merges duplicates (raise it if distinct adjacent objects are being wrongly merged, lower it if you see duplicate boxes). Tune them separately.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Off-by-one on class indices</div>
+        <p>torchvision detection models reserve <strong>index 0 for <code>__background__</code></strong>, so <code>categories[label]</code> is correct <em>only</em> because that background entry shifts everything. Don't subtract 1; index straight into <code>weights.meta["categories"]</code>.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Don't trust mAP@0.5 blindly for safety</div>
+        <p>A high mAP can hide that the model misses <em>small</em> objects — and a buoy at 200 m is small. Evaluate on your <em>own</em> operating conditions (dusk, glare, fog) and on the size range you actually care about, not just COCO's distribution.</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Detection vs segmentation: pick by hazard type</div>
+        <p>Discrete obstacle → box (cheaper, gives a clean contact). Continuous region (navigable water, seabed) → mask. Forcing a box around "the shoreline" is the wrong tool.</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> NMS is per-class by default in good pipelines</div>
+        <p>A <code>boat</code> box and a <code>person</code> box that overlap (person standing on the boat) should <em>both</em> survive. <code>ops.nms</code> is class-agnostic; for multi-class use <code>ops.batched_nms</code>, which offsets boxes by class so cross-class overlaps aren't suppressed.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-your-understanding"><span class="sec-no">6</span>Check Your Understanding</h2>
+
+      <p><strong>Q1.</strong> Two predicted boat boxes for the same hull: $A=(100,100,200,200)$ and $B=(150,100,250,200)$ (corner format, pixels). Compute their IoU. If NMS runs with $\tau=0.4$, what happens?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Intersection: $x_1^\cap=\max(100,150)=150$, $x_2^\cap=\min(200,250)=200$, so width $=50$; $y$ fully overlaps, height $=100$. Intersection $=50\times100=5000$. Each box is $100\times100=10000$, union $=10000+10000-5000=15000$. $\text{IoU}=5000/15000 \approx \mathbf{0.33}$. Since $0.33 &lt; \tau=0.4$, NMS keeps <strong>both</strong> boxes — it would <em>not</em> treat them as duplicates at this threshold. (Lower $\tau$ to ~0.3 and the lower-scoring one gets suppressed.)</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> Why does a one-stage detector (YOLO/SSD) run faster than a two-stage one (Faster R-CNN), and what do you typically give up?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>One-stage predicts class scores <strong>and</strong> box offsets for every grid cell/anchor in a <strong>single forward pass</strong> — no separate region-proposal stage and no per-proposal ROI cropping/classification. Two-stage does an RPN pass to propose ~thousands of regions, then re-processes each one, which is far more compute. You typically give up some <strong>accuracy, especially on small and densely-clustered objects</strong>, where the proposal-then-refine pipeline is more precise. For real-time vehicle perception you usually accept that tradeoff for the framerate.</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> Your detector outputs eleven boxes on a single approaching boat, all score &gt; 0.8. What stage is missing, and why does it specifically endanger the collision-avoidance logic?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p><strong>NMS</strong> is missing (or its IoU threshold is set too high to merge them). Anchors are dense, so many overlapping boxes fire on one object. The danger: the <strong>tracker/planner downstream sees 11 separate "contacts"</strong> for one real boat — phantom obstacles that can trigger erratic avoidance maneuvers, inflate the apparent traffic density, or confuse a multi-object tracker into splitting/swapping IDs. One object must yield one box.</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> In a U-Net, what concretely do the <strong>skip connections</strong> add, and what goes wrong without them? What operation grows the spatial resolution back?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p>Skip connections <strong>concatenate encoder feature maps (high spatial precision, the <em>where</em>) into the decoder</strong> at matching resolutions, fusing them with the upsampled semantic features (the <em>what</em>). Without them the decoder must reconstruct sharp boundaries from heavily-downsampled features, so masks come out <strong>blurry / spatially imprecise</strong> — bad when the water/shore boundary must be pixel-accurate. The resolution is grown back by <strong>transposed convolution</strong> (learnable upsampling), which spreads each input element into a larger output patch (stride 2 doubles H and W).</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> A planner needs to know <em>where</em> the navigable water is so the USV stays in it, and separately needs to avoid two other boats. Which task (detection vs segmentation) fits each, and why?</p>
+      <details class="ex-acc"><summary>Answer</summary><div class="acc-body">
+        <p><strong>Navigable water → semantic segmentation.</strong> It's a continuous <em>region</em>, not a countable object; a per-pixel <code>water</code> mask defines the drivable area directly, and works even for unfamiliar/undefined hazards (debris, shoreline) that have no class. <strong>Other boats → detection.</strong> They're discrete objects, and the planner wants each one as a clean contact with position and footprint (a box) to reason about bearing, closing rate, and clearance — far cheaper and more actionable than a mask for that purpose.</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml19-pick-the-task">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">A USV must stay inside the open-water region <em>and</em> avoid three discrete buoys. Which combination of tasks fits best?</div>
+        <ul class="ex-options">
+          <li data-correct="false">Classification for both — one global label per frame is enough.</li>
+          <li data-correct="true">Semantic segmentation for the navigable water region, detection (boxes) for the discrete buoys.</li>
+          <li data-correct="false">Detection (boxes) for both the water and the buoys.</li>
+          <li data-correct="false">Instance segmentation for the water, classification for the buoys.</li>
+        </ul>
+        <div class="ex-explain">The lesson's rule of thumb: <strong>detect discrete obstacles, segment continuous regions.</strong> Navigable water is a region (use a per-pixel mask — robust even to unfamiliar/undefined hazards). Buoys are countable discrete objects, so boxes give clean contacts with bearing, closing rate, and footprint for the planner.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml19-iou" data-answer="0.143" data-tol="0.01">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">Two boxes in corner form (pixels): $A=(0,0,100,100)$ and $B=(50,50,150,150)$. Compute their <strong>IoU</strong>. (Hint: intersection edges are inner-max on top-left, inner-min on bottom-right; union = areaA + areaB − inter.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">IoU</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">Intersection corners: $x_1^\cap=\max(0,50)=50$, $y_1^\cap=\max(0,50)=50$, $x_2^\cap=\min(100,150)=100$, $y_2^\cap=\min(100,150)=100$. Width $=50$, height $=50$, so inter $=2500$. Each box area $=100\times100=10000$; union $=10000+10000-2500=17500$. $\text{IoU}=2500/17500 = 1/7 \approx \mathbf{0.143}$.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml19-unet-shapes">
+        <div class="ex-head"><span class="badge">Q3</span> Derivation — trace the U-Net spatial dimensions</div>
+        <div class="ex-q">For the <code>TinyUNet</code> on a $64\times64$ input, write down the spatial size $(H,W)$ at <code>s2</code> (after <code>enc2</code>), at <code>p</code> (after <code>pool</code>), at <code>b</code> (after bottleneck), and at <code>u</code> (after the transposed conv) — and explain why <code>torch.cat([u, s2])</code> is shape-compatible.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body"><code>Conv2d</code> with <code>padding=1</code> and kernel 3 keeps $(H,W)$. <code>MaxPool2d(2)</code> halves it. <code>ConvTranspose2d(stride=2)</code> doubles it. Track only the spatial dims; channels are listed in the constructor.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p><strong>s2</strong>: <code>enc1</code> and <code>enc2</code> both use kernel 3, <code>padding=1</code>, so they preserve resolution → $(64,64)$, 32 channels.</p>
+          <p><strong>p</strong>: <code>pool = MaxPool2d(2)</code> halves both dims → $(32,32)$, 32 channels.</p>
+          <p><strong>b</strong>: the bottleneck conv has <code>padding=1</code>, kernel 3 → resolution unchanged at $(32,32)$, 64 channels.</p>
+          <p><strong>u</strong>: <code>ConvTranspose2d(64, 32, 2, stride=2)</code> doubles both dims → $(64,64)$, 32 channels.</p>
+          <p><strong>Why the concat works:</strong> <code>u</code> is $(N,32,64,64)$ and the skip source <code>s2</code> is $(N,32,64,64)$ — <em>identical spatial dims</em>, so <code>torch.cat([u, s2], dim=1)</code> stacks along the channel axis to give $(N,64,64,64)$, which is exactly the 64 input channels <code>self.dec = Conv2d(64, 32, ...)</code> expects. The skip restores the full-resolution <em>where</em> the pooling threw away; the output head then maps to <code>n_classes</code> at the original $64\times64$.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Lesson recap</div>
+        <ul>
+          <li><strong>Detection = what + where</strong> (boxes + labels + scores); <strong>segmentation = which pixels</strong> (semantic = per-class, instance = per-object). Classification alone is too coarse for a planner that reasons about geometry.</li>
+          <li><strong>IoU</strong> scores box overlap (intersection / union); it gates "correct" matches, drives <strong>NMS</strong> (greedy "best box wins its neighborhood" to kill duplicates), and underlies <strong>mAP</strong> (area under the precision–recall curve, averaged over classes).</li>
+          <li><strong>Anchor boxes</strong> turn open-ended box-finding into per-anchor <strong>classify + offset-regress</strong>. <strong>Two-stage</strong> (Faster R-CNN: propose then refine) trades speed for accuracy; <strong>one-stage</strong> (YOLO/SSD: one grid pass) trades a little accuracy for real-time speed — usually the right call on a vehicle.</li>
+          <li>A <strong>pretrained torchvision detector</strong> runs zero-shot on COCO classes (<code>boat</code>, <code>person</code>, ...): preprocess → infer → <strong>score filter</strong> → <strong>NMS</strong> → draw. Always use <code>weights.transforms()</code> and remember index 0 is <code>__background__</code>.</li>
+          <li><strong>U-Net</strong> = encoder (downsample, learn semantics) + decoder (<strong>transposed conv</strong> upsample back to full resolution) + <strong>skip connections</strong> (carry fine detail across), producing a same-size per-pixel mask.</li>
+        </ul>
+        <p><strong>Next:</strong> models are only as good as what you feed them. <a href="20-data-feature-engineering.html">20 — Data &amp; Feature Engineering</a> — how to build, clean, label, and augment the datasets (including detection boxes and segmentation masks) that make all of this work.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

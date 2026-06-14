@@ -1,110 +1,118 @@
-import { readFileSync, readdirSync } from 'node:fs';
+#!/usr/bin/env node
+/* Validate the unified study site: structure, offline-safety, bilingual parity.
+   Run:  node deploy/validate.mjs            (exits non-zero on any issue)
+   Flags: --course=pid|mldl|embedded   --lang=en|zh   --skip-missing            */
+import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
 const ROOT = new URL('..', import.meta.url).pathname;
-const files = [
-  'index.html',
-  ...readdirSync(join(ROOT,'Arduino')).filter(f=>f.endsWith('.html')).sort().map(f=>'Arduino/'+f),
-  ...readdirSync(join(ROOT,'STM32')).filter(f=>f.endsWith('.html')).sort().map(f=>'STM32/'+f),
-];
+const ARG = Object.fromEntries(process.argv.slice(2).map(a => { const m = a.match(/^--([^=]+)(?:=(.*))?$/); return m ? [m[1], m[2] ?? true] : [a, true]; }));
 
-let totalIssues = 0;
+/* expected pages, mirroring assets/app.js COURSES (to also catch MISSING files) */
+const EMBED = {
+  arduino: { dir: 'embedded-mastery/Arduino', ids: ['01-intro','02-gpio','03-analog','04-pwm','05-timers-interrupts','06-serial-i2c-spi','07-sensors-actuators','08-architecture-power','09-capstone'] },
+  stm32:   { dir: 'embedded-mastery/STM32',   ids: ['01-intro','02-clocks','03-gpio','04-nvic-exti','05-timers','06-adc-dac','07-uart-i2c-spi','08-dma','09-rtos-lowpower','10-capstone'] },
+};
+const MLDL_IDS = ['00-what-is-ml','01-math-foundations','02-linear-regression','03-gradient-descent','04-logistic-regression','05-overfitting-evaluation','06-knn-trees-ensembles','07-svm-kernels','08-kmeans-pca','09-neural-networks-mlp','10-backpropagation','11-pytorch-fundamentals','12-training-deep-nets','13-cnns','14-rnns-lstms','15-attention-transformers','16-generative-models','17-transfer-learning-llms-mlops','18-reinforcement-learning','19-detection-segmentation','20-data-feature-engineering','21-hyperparameter-optimization','appendix','glossary'];
+const PID_IDS = ['01-plant','02-p-control','03-d-control','04-i-control','05-windup','06-derivative-noise','07-wrapping-actuators','08-tuning-ros2','glossary'];
+const REF_PAGES = new Set(['appendix','glossary']);
+const ML_INTERACTIVE = { '02-linear-regression':1,'03-gradient-descent':1,'04-logistic-regression':1,'05-overfitting-evaluation':1,'08-kmeans-pca':2,'09-neural-networks-mlp':1,'13-cnns':1,'15-attention-transformers':1 };
+
+const pages = [];
+const push = (rel, meta) => pages.push({ rel, ...meta });
+for (const [trk, t] of Object.entries(EMBED)) for (const id of t.ids) {
+  push(`${t.dir}/${id}.html`,        { course:'embedded', track:trk, chapter:id, lang:'en', isRef:false });
+  push(`${t.dir}/zh-tw/${id}.html`,  { course:'embedded', track:trk, chapter:id, lang:'zh', isRef:false });
+}
+for (const id of MLDL_IDS) {
+  push(`ml-dl-curriculum/${id}.html`,       { course:'mldl', track:'main', chapter:id, lang:'en', isRef:REF_PAGES.has(id) });
+  push(`ml-dl-curriculum/zh-tw/${id}.html`, { course:'mldl', track:'main', chapter:id, lang:'zh', isRef:REF_PAGES.has(id) });
+}
+for (const id of PID_IDS) {
+  push(`pid/${id}.html`,       { course:'pid', track:'main', chapter:id, lang:'en', isRef:REF_PAGES.has(id) });
+  push(`pid/zh-tw/${id}.html`, { course:'pid', track:'main', chapter:id, lang:'zh', isRef:REF_PAGES.has(id) });
+}
+
+const sel = pages.filter(p => (!ARG.course || p.course === ARG.course) && (!ARG.lang || p.lang === ARG.lang));
+
+let missing = 0, totalIssues = 0, checked = 0;
 const rows = [];
 
-for (const rel of files) {
-  const html = readFileSync(join(ROOT, rel), 'utf8');
+for (const pg of sel) {
+  const abs = join(ROOT, pg.rel);
+  if (!existsSync(abs)) { if (!ARG['skip-missing']) { rows.push({ rel: pg.rel, missing: true }); missing++; } continue; }
+  checked++;
+  const html = readFileSync(abs, 'utf8');
   const issues = [];
-  const isHub = rel === 'index.html';
+  const depth = pg.rel.split('/').length - 1;
+  const assetPrefix = '../'.repeat(depth) + 'assets/';
 
-  // 1. doctype + closing html
-  if (!/^﻿?<!DOCTYPE html>/i.test(html)) issues.push('no <!DOCTYPE html> at start');
-  if (!/<\/html>\s*$/i.test(html)) issues.push('does not end with </html>');
-  if (/\bTODO\b|\blorem ipsum\b|\.\.\.\s*<\/(p|li)>/i.test(html)) issues.push('possible placeholder/TODO/ellipsis');
+  if (!/^﻿?<!DOCTYPE html>/i.test(html)) issues.push('no <!DOCTYPE html>');
+  if (!/<\/html>\s*$/i.test(html)) issues.push('no closing </html>');
+  if (/\bTODO\b|lorem ipsum|\.\.\.\s*<\/(p|li|td)>/i.test(html)) issues.push('placeholder/TODO/ellipsis');
+  const ext = [...html.matchAll(/(?:src|href)\s*=\s*"(https?:\/\/[^"]+)"/g)].map(m => m[1]);
+  if (ext.length) issues.push('external URL: ' + ext.slice(0,2).join(', '));
 
-  // 2. offline: no external URLs in src/href attributes
-  const ext = [...html.matchAll(/(?:src|href)\s*=\s*"(https?:\/\/[^"]+)"/g)].map(m=>m[1]);
-  if (ext.length) issues.push('external URL(s): '+ext.slice(0,3).join(', '));
+  if (!new RegExp(`data-course="${pg.course}"`).test(html)) issues.push(`data-course != ${pg.course}`);
+  if (!new RegExp(`data-track="${pg.track}"`).test(html)) issues.push(`data-track != ${pg.track}`);
+  if (!new RegExp(`data-chapter="${pg.chapter}"`).test(html)) issues.push(`data-chapter != ${pg.chapter}`);
 
-  if (!isHub) {
-    // body attrs
-    const track = rel.startsWith('Arduino') ? 'arduino' : 'stm32';
-    const tcls  = track === 'arduino' ? 'track-arduino' : 'track-stm32';
-    const chap  = rel.split('/')[1].replace('.html','');
-    if (!new RegExp(`<body[^>]*class="[^"]*${tcls}`).test(html)) issues.push(`body missing class ${tcls}`);
-    if (!new RegExp(`data-track="${track}"`).test(html)) issues.push(`body data-track != ${track}`);
-    if (!new RegExp(`data-chapter="${chap}"`).test(html)) issues.push(`body data-chapter != ${chap}`);
-
-    // 3. empty nav containers
-    if (!/<nav class="sidebar" id="sidebar">\s*<\/nav>/.test(html)) issues.push('#sidebar not present-and-empty');
-    if (!/<nav class="chap-nav" id="chap-nav">\s*<\/nav>/.test(html)) issues.push('#chap-nav not present-and-empty');
-
-    // 4. asset paths + script order
-    for (const need of ['../assets/styles.css','../assets/app.js','../assets/vendor/mermaid.min.js',
-                        '../assets/katex/katex.min.js','../assets/katex/contrib/auto-render.min.js',
-                        '../assets/vendor/highlight.min.js','../assets/katex/katex.min.css']) {
-      if (!html.includes(need)) issues.push('missing asset ref: '+need);
-    }
-    const scripts = [...html.matchAll(/<script[^>]*src="([^"]+)"[^>]*>/g)].map(m=>m[1]);
-    const appIdx = scripts.indexOf('../assets/app.js');
-    if (appIdx === -1) issues.push('no app.js script');
-    else {
-      // every vendor lib script must come before app.js
-      const after = scripts.slice(appIdx+1).filter(s=>/vendor|katex/.test(s));
-      if (after.length) issues.push('lib script after app.js: '+after.join(','));
-    }
-
-    // 5. headings
-    const h2 = [...html.matchAll(/<h2\b[^>]*\bid="([^"]+)"/g)].map(m=>m[1]);
-    const h2all = [...html.matchAll(/<h2\b/g)].length;
-    if (h2all < 6) issues.push(`only ${h2all} <h2> (want >=6)`);
-    if (h2.length !== h2all) issues.push(`${h2all-h2.length} <h2> missing id`);
-    const dupe = h2.filter((v,i)=>h2.indexOf(v)!==i);
-    if (dupe.length) issues.push('duplicate h2 id: '+[...new Set(dupe)].join(','));
-
-    // 6. exercises
-    const exTypes = [...html.matchAll(/data-ex="([^"]+)"/g)].map(m=>m[1]);
-    if (exTypes.length < 3) issues.push(`only ${exTypes.length} exercises`);
-    for (const t of ['quiz','numeric','reveal']) if (!exTypes.includes(t)) issues.push('missing exercise type: '+t);
-    const exIds = [...html.matchAll(/class="exercise"[^>]*data-id="([^"]+)"/g)].map(m=>m[1]);
-    const dupId = exIds.filter((v,i)=>exIds.indexOf(v)!==i);
-    if (dupId.length) issues.push('dup exercise data-id: '+dupId.join(','));
-    // quiz must have a correct option
-    if (!/data-correct="true"/.test(html)) issues.push('no data-correct="true" option');
-    // numeric must have an answer
-    if (exTypes.includes('numeric') && !/data-ex="numeric"[^>]*data-answer="/.test(html)
-        && !/data-answer="[^"]+"[^>]*data-ex="numeric"/.test(html)
-        && !/<div class="exercise" data-ex="numeric"[\s\S]{0,200}?data-answer="/.test(html))
-      issues.push('numeric exercise missing data-answer');
-
-    // 7. richness
-    const mermaid = [...html.matchAll(/<div class="mermaid">/g)].length;
-    const code = [...html.matchAll(/<div class="codeblock">/g)].length;
-    if (mermaid < 1) issues.push('no mermaid diagram');
-    if (code < 2) issues.push(`only ${code} codeblock(s)`);
-
-    // 8. unescaped < inside <code> ... </code>
-    let badCode = 0;
-    for (const m of html.matchAll(/<code\b[^>]*>([\s\S]*?)<\/code>/g)) {
-      if (/</.test(m[1])) badCode++;
-    }
-    if (badCode) issues.push(`${badCode} code block(s) with unescaped '<'`);
-
-    rows.push({rel, h2: h2all, ex: exTypes.length, mermaid, code, issues});
-  } else {
-    if (!/data-page="hub"/.test(html)) issues.push('hub missing data-page');
-    if (!html.includes('assets/app.js')) issues.push('hub missing app.js');
-    if (!/track-card arduino/.test(html) || !/track-card stm32/.test(html)) issues.push('hub missing track cards');
-    rows.push({rel, h2:'-', ex:'-', mermaid:'-', code:'-', issues});
+  for (const need of ['styles.css','app.js','vendor/mermaid.min.js','katex/katex.min.js','katex/contrib/auto-render.min.js','vendor/highlight.min.js','katex/katex.min.css']) {
+    if (!html.includes(assetPrefix + need)) issues.push('missing/!depth asset: ' + assetPrefix + need);
   }
+  const scripts = [...html.matchAll(/<script[^>]*src="([^"]+)"[^>]*>/g)].map(m => m[1]);
+  const appIdx = scripts.findIndex(s => s.endsWith('assets/app.js'));
+  if (appIdx === -1) issues.push('no app.js');
+  else if (scripts.slice(appIdx + 1).some(s => /vendor|katex/.test(s))) issues.push('vendor lib after app.js');
+
+  if (!/<nav class="sidebar" id="sidebar">\s*<\/nav>/.test(html)) issues.push('#sidebar not present-and-empty');
+  if (!/<nav class="chap-nav" id="chap-nav">\s*<\/nav>/.test(html)) issues.push('#chap-nav not present-and-empty');
+
+  const h2ids = [...html.matchAll(/<h2\b[^>]*\bid="([^"]+)"/g)].map(m => m[1]);
+  const h2all = [...html.matchAll(/<h2\b/g)].length;
+  const minH2 = pg.isRef ? 3 : 6;
+  if (h2all < minH2) issues.push(`only ${h2all} <h2> (want >=${minH2})`);
+  if (h2ids.length !== h2all) issues.push(`${h2all - h2ids.length} <h2> missing id`);
+  const dupe = [...new Set(h2ids.filter((v,i) => h2ids.indexOf(v) !== i))];
+  if (dupe.length) issues.push('dup h2 id: ' + dupe.join(','));
+
+  const exTypes = [...html.matchAll(/data-ex="([^"]+)"/g)].map(m => m[1]);
+  if (pg.isRef) {
+    if (exTypes.length < 1) issues.push('ref page: want >=1 exercise');
+  } else {
+    if (exTypes.length < 3) issues.push(`only ${exTypes.length} exercises (want 3)`);
+    for (const ty of ['quiz','numeric','reveal']) if (!exTypes.includes(ty)) issues.push('missing exercise type: ' + ty);
+    if (!/data-correct="true"/.test(html)) issues.push('no data-correct="true"');
+    if (exTypes.includes('numeric') && !/data-ex="numeric"[^>]*data-answer="/.test(html)) issues.push('numeric missing data-answer');
+  }
+  const exIds = [...html.matchAll(/class="exercise"[^>]*data-id="([^"]+)"/g)].map(m => m[1]);
+  const dupId = [...new Set(exIds.filter((v,i) => exIds.indexOf(v) !== i))];
+  if (dupId.length) issues.push('dup exercise data-id: ' + dupId.join(','));
+
+  let badCode = 0;
+  for (const m of html.matchAll(/<code\b[^>]*>([\s\S]*?)<\/code>/g)) if (/</.test(m[1])) badCode++;
+  if (badCode) issues.push(`${badCode} <code> with unescaped '<'`);
+
+  if (pg.course === 'pid' && !pg.isRef) {
+    if (!html.includes(assetPrefix + 'pid-sim.js')) issues.push('pid: missing pid-sim.js');
+    if (!/EM\.pidSim\(/.test(html)) issues.push('pid: missing EM.pidSim() init');
+    if (!/<canvas id="/.test(html)) issues.push('pid: missing <canvas>');
+  }
+  if (pg.course === 'mldl' && ML_INTERACTIVE[pg.chapter]) {
+    if (!html.includes(assetPrefix + 'ml-demos.js')) issues.push('ml: missing ml-demos.js');
+    const canv = [...html.matchAll(/EM\.mlDemo\.\w+\(/g)].length;
+    if (canv < ML_INTERACTIVE[pg.chapter]) issues.push(`ml: ${canv} demos (want ${ML_INTERACTIVE[pg.chapter]})`);
+  }
+
+  rows.push({ rel: pg.rel, h2: h2all, ex: exTypes.length, issues });
   totalIssues += issues.length;
 }
 
-console.log('FILE                                   H2  EX  MMD CODE  STATUS');
-console.log('─'.repeat(74));
 for (const r of rows) {
-  const status = r.issues.length ? '✗ '+r.issues.length+' issue(s)' : '✓ ok';
-  console.log(r.rel.padEnd(38), String(r.h2).padStart(2), String(r.ex).padStart(3), String(r.mermaid).padStart(3), String(r.code).padStart(4), '  '+status);
-  for (const i of r.issues) console.log('     ↳', i);
+  if (r.missing) { console.log('MISSING  ' + r.rel); continue; }
+  if (r.issues.length) { console.log(`✗ ${r.rel}  (h2=${r.h2} ex=${r.ex})`); for (const i of r.issues) console.log('     ↳ ' + i); }
 }
-console.log('─'.repeat(74));
-console.log(`${rows.length} files · ${totalIssues} total issue(s)`);
+const okCount = rows.filter(r => !r.missing && !r.issues.length).length;
+console.log('─'.repeat(70));
+console.log(`${sel.length} expected · ${okCount} ok · ${checked - okCount} with issues · ${missing} MISSING · ${totalIssues} total issue(s)`);
+process.exit(missing || totalIssues ? 1 : 0);

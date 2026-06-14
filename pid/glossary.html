@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>PID Glossary — PID Control for a USV</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-pid" data-course="pid" data-track="main" data-chapter="glossary">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> PID&nbsp;·&nbsp;USV</a>
+  <span class="spacer"></span>
+  <span class="track-pill">PID · Ch G</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">PID Course · Glossary · Reference</div>
+        <h1>PID Glossary</h1>
+        <p>Every term this course leans on, defined the way a control engineer actually uses it — with the units, the numbers from our boat, and a pointer to the chapter where it bites. Skim it when a word stops feeling solid; the goal is that none of these stay vague.</p>
+        <div class="meta"><span>📖 Reference</span><span>🧭 USV / Nomoto</span><span>∑ PID</span><span>📐 Units throughout</span></div>
+      </section>
+
+      <p>This page is a lookup table, not a story. Terms are grouped the way the course unfolds: the plant first, then the three terms, then the failure modes and their fixes, then tuning, then deployment. Where a symbol has <em>units</em>, they're given — reading a gain's units physically is the single biggest demystifier in tuning. Numbers reference the one boat used everywhere: $K=0.6$, $T=2.5$ s, rudder $\pm 35°$, slew $25$ °/s, current $\equiv 4°$ stuck rudder, loop $20$ Hz ($dt=0.05$ s).</p>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="the-plant"><span class="sec-no">1</span>The plant: the boat and its model</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>what you're steering</small></div>
+      <p>The "plant" is the thing being controlled. For us it's a boat that turns by rudder, and the central, course-long fact is this: <strong>the rudder sets a turning rate, not a heading.</strong> Everything downstream is a consequence.</p>
+
+      <div class="math-box">$$ T\,\dot r + r = K\,(\delta + d), \qquad \dot\psi = r $$</div>
+
+      <p>That's the Nomoto model: a single first-order lag from rudder to yaw rate, then an integral from yaw rate to heading. Set $\dot r = 0$ and the steady turning rate is $r_\infty = K(\delta + d)$ — the boat turns forever unless net rudder is zero.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Term</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Plant</strong></td><td>The system being controlled. Here, the USV's steering dynamics — rudder in, heading out. The controller's job is to make the plant do what you want despite its lag and disturbances.</td></tr>
+          <tr><td><strong>USV</strong></td><td>Unmanned surface vessel — the autonomous boat we're holding on a heading. Stands in for anything that steers by turning rate: quadcopter yaw, car heading, a tank turret.</td></tr>
+          <tr><td><strong>Nomoto model</strong></td><td>The standard first-order ship-steering model, $T\dot r + r = K\delta$. The simplest equation that still behaves like a real boat: yaw rate lags the rudder through one time constant.</td></tr>
+          <tr><td><strong>$K$ — turning gain</strong></td><td>Steady yaw rate per unit rudder, units $\frac{\text{rad/s}}{\text{rad}}$. Our boat: $K=0.6$, so a 10° rudder yields a $\sim 6$ °/s steady turn.</td></tr>
+          <tr><td><strong>$T$ — time constant</strong></td><td>How sluggishly the hull responds, in seconds. Our boat: $T=2.5$ s. After one $T$ the yaw rate has reached $\sim 63\%$ of its final value; after $3T$, $\sim 95\%$.</td></tr>
+          <tr><td><strong>Rudder angle $\delta$</strong></td><td>The control input you actually command (rad or degrees). Not the heading — the rudder commands turning.</td></tr>
+          <tr><td><strong>Yaw rate $r$</strong></td><td>How fast the boat is turning, $\dot\psi$, in rad/s (or °/s). The rudder controls this directly through $K$ and $T$.</td></tr>
+          <tr><td><strong>Heading $\psi$</strong></td><td>Which way the bow points, in rad (or degrees). The integral of yaw rate, $\psi=\int r\,dt$ — which is why a fixed rudder makes heading ramp forever.</td></tr>
+          <tr><td><strong>Disturbance $d$</strong></td><td>An external push — current or wind — modeled as a constant offset on the rudder, $\equiv 4°$ stuck rudder on our boat. It acts exactly like a bias the controller must cancel.</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="mermaid">
+flowchart LR
+    D["rudder δ"] -->|"gain K, lag T"| R["yaw rate r"]
+    R -->|"∫ dt"| P["heading ψ"]
+    W["current / wind d"] --> R
+</div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one fact behind every other term</div>
+        <p>Rudder → rate, rate → (integrated) heading. The boat carries momentum <em>into</em> wherever you point it, and it responds late. Lag + accumulation = overshoot. Most of this glossary is vocabulary for fighting that single sentence.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-three-terms"><span class="sec-no">2</span>The three terms: P, I, D and what they read as</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>the law and its units</small></div>
+      <p>The discrete control law we run every $dt$ on a microcontroller, with error $e = \psi_\text{set} - \psi$:</p>
+      <div class="math-box">$$ u_n = k_p\,e_n + k_i \underbrace{\textstyle\sum_k e_k\,dt}_{\text{integral}} + k_d \underbrace{\frac{e_n - e_{n-1}}{dt}}_{\text{derivative}}, \qquad u \leftarrow \mathrm{clamp}(u,\,-\delta_\max,\,+\delta_\max) $$</div>
+
+      <p>Each gain has units, and reading them physically makes tuning far less mystical:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Term</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Setpoint $\psi_\text{set}$</strong></td><td>The heading you want the boat to hold. The reference the controller chases.</td></tr>
+          <tr><td><strong>Error $e$</strong></td><td>$e = \psi_\text{set} - \psi$, in rad. Always angle-wrapped before it enters the PID (see §3). Zero error is the goal; the sign tells you which way to turn.</td></tr>
+          <tr><td><strong>$k_p$ — proportional gain</strong></td><td>Units $\frac{\text{rad rudder}}{\text{rad error}}$ (dimensionless). Reads as "how much rudder per degree I'm off." More $k_p$ = faster response, less offset, more ringing — until it never stops ringing.</td></tr>
+          <tr><td><strong>$k_i$ — integral gain</strong></td><td>Units $\frac{\text{rad rudder}}{\text{rad}\cdot\text{s}}$ (i.e. $1/\text{s}$). "How hard I lean on a <em>persistent</em> error." Should be the slowest thing in the loop — it's a memory, and big $k_i$ means jumpy conclusions from short memory.</td></tr>
+          <tr><td><strong>$k_d$ — derivative gain</strong></td><td>Units $\frac{\text{rad rudder}}{\text{rad/s}}$ (i.e. seconds). "How much rudder per degree-per-second of swing." Acts only on <em>change</em>; once on heading and steady, $D=0$.</td></tr>
+          <tr><td><strong>P term</strong> ($k_p e$)</td><td>The spring. Force proportional to how far off you are. Strong, immediate, but at zero error it outputs zero rudder — so it can't hold against a disturbance.</td></tr>
+          <tr><td><strong>I term</strong> ($k_i \textstyle\sum e\,dt$)</td><td>The trim tab. Accumulates lingering error and ramps the rudder to whatever steady value cancels the disturbance. On our boat it learns the $-4°$ trim needed for the current, then holds it at zero error.</td></tr>
+          <tr><td><strong>D term</strong> ($k_d \,\dot e$)</td><td>The damper. Opposes fast change, so it brakes the approach and kills overshoot. Negative when error is shrinking quickly — that's the cancellation that <em>is</em> damping.</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="codeblock">
+        <div class="code-head">control step (per dt) <span class="lang">pseudocode</span></div>
+<pre><code class="language-python">error      = wrap(setpoint - heading)        # rad, ALWAYS wrapped (see §3)
+integral  += error * dt                       # rad·s, persists across calls
+derivative = (error - prev_error) / dt        # rad/s
+
+u = kp*error + ki*integral + kd*derivative    # rad of rudder
+u = clamp(u, -RUDDER_MAX, +RUDDER_MAX)
+prev_error = error
+</code></pre>
+      </div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> P and D cancel during a good approach</div>
+        <p>Mid-turn (heading 60°, setpoint 90°, $k_p=2$, $k_d=3$): $P=+1.047$ rad pushes in, but the bow is already closing at $\sim 20$ °/s, so $D=-1.047$ rad pulls back. They <em>exactly cancel</em> and the controller nearly coasts — pushing harder would only overshoot harder. That cancellation is the whole point of D.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="failure-modes"><span class="sec-no">3</span>Failure modes &amp; their fixes</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>the bugs everyone meets</small></div>
+      <p>These are the named ways a naive PID misbehaves on a real boat — and the standard fix for each. Every one of them is a consequence of §1's two facts colliding with real actuators and sensors.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Term</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Steady-state offset</strong></td><td>The leftover error a P-only controller settles at. To hold heading against the current the rudder must hold $-4°$, but $u=k_p e$ can only do that by keeping $e_\text{ss} = -4°/k_p \ne 0$. P holds course by staying wrong. Fixed by I.</td></tr>
+          <tr><td><strong>Overshoot</strong></td><td>Sailing past the setpoint before settling. Caused by momentum into the target plus lag. Tamed by D (and by not over-driving P).</td></tr>
+          <tr><td><strong>Settle time</strong></td><td>How long until the boat stays within a small band of the setpoint. The thing you trade against overshoot and chatter when tuning.</td></tr>
+          <tr><td><strong>Integral windup</strong></td><td>While the rudder is saturated, the I term keeps accumulating error it can't act on. On a 0°→180° turn the rudder pins at $+35°$ for $\sim 9$ s; the integral can store $\sim 13$ rad $\approx 750°$ of commanded rudder. The boat then does donuts forever. Fixed by anti-windup.</td></tr>
+          <tr><td><strong>Anti-windup</strong></td><td>Any scheme that stops the integral from bloating during saturation. Three standard forms: <strong>clamp</strong> (cap the integral so $k_i\cdot\text{integral}$ can't exceed the rudder limit), <strong>conditional integration</strong> (don't integrate on saturated samples), <strong>back-calculation</strong> (subtract $(u_\text{unclamped}-u_\text{clamped})\cdot k$ from the integral each step — industry standard, smoothest).</td></tr>
+          <tr><td><strong>Saturation</strong></td><td>The actuator hitting its physical limit, $\pm 35°$ rudder. The command can ask for more; the rudder simply can't deliver it. The root cause of windup.</td></tr>
+          <tr><td><strong>Derivative kick</strong></td><td>When the <em>setpoint</em> steps, the error jumps in one sample, so $\dot e$ spikes. A 10° setpoint step gives $10°/0.05\,\text{s} = 200$ °/s of fake derivative $\approx 600°$ of rudder — a useless spike that slams the servo. The boat didn't swing; your setpoint moved.</td></tr>
+          <tr><td><strong>Derivative-on-measurement</strong></td><td>The fix for kick: differentiate $\psi$ instead of $e$. When the setpoint is constant $\dot e = -\dot\psi$, so it's the same damping signal — but it ignores setpoint jumps. One sign flip: <code>d = -(meas - prev_meas)/dt</code>.</td></tr>
+          <tr><td><strong>Low-pass filter</strong></td><td>Smooths the derivative against sensor noise. The derivative of noise is huge ($\sigma=0.5°$ noise → $\sim 14$ °/s of garbage $\to \times k_d \approx 42°$ of rudder chatter). The filter $d_f \leftarrow \alpha\,d_f + (1-\alpha)\,d_\text{raw}$ ($\alpha\approx0.85$) cuts it, at the cost of a little lag in D.</td></tr>
+          <tr><td><strong>Angle wrapping</strong></td><td>Mapping an angle error into $(-\pi,\pi]$ so the boat turns the short way. Heading 350°, setpoint 10° is 20° away, but naive subtraction gives $-340°$ — "turn the long way," a crash near a dock. <code>wrap(a) = (a+π) % (2π) − π</code>, applied to every error.</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="codeblock">
+        <div class="code-head">the three fixes, in code <span class="lang">Python</span></div>
+<pre><code class="language-python">import math
+
+def wrap(angle):                                  # → (-pi, pi], the short way
+    return (angle + math.pi) % (2 * math.pi) - math.pi
+
+# derivative-on-measurement (kills derivative kick on setpoint steps)
+derivative = -(measurement - prev_measurement) / dt
+
+# low-pass the derivative (kills noise amplification)
+d_filtered = alpha * d_filtered + (1 - alpha) * d_raw   # alpha ≈ 0.85
+
+# anti-windup, clamp form: cap the integral so ki*integral
+# can never command more than the rudder can deliver
+integral = max(-RUDDER_MAX / ki, min(RUDDER_MAX / ki, integral))
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> The two that are invisible until they aren't</div>
+        <p>Angle wrapping and a stale integral both pass every test that doesn't happen to trigger them — then crash the boat the first time it crosses north or is re-engaged after sitting. Wrap every error; <code>reset()</code> the controller on re-engage.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="tuning"><span class="sec-no">4</span>Tuning: gains, limits, and the recipe</h2>
+
+      <div class="layer"><span class="step">⑤</span> Practice <small>how to pick gains</small></div>
+      <p>Tuning is the art of choosing $k_p, k_i, k_d$ for a fast, smooth, offset-free response. The vocabulary below is what the recipe is phrased in.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Term</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Ultimate gain $K_u$</strong></td><td>The $k_p$ at which the closed loop oscillates with constant amplitude (P-only, $k_i=k_d=0$). On our boat $K_u \approx 5$. The reference point for Ziegler–Nichols.</td></tr>
+          <tr><td><strong>Ultimate period $T_u$</strong></td><td>The period of that sustained oscillation at $K_u$. On our boat $T_u \approx 9$ s. Feeds the ZN formulas.</td></tr>
+          <tr><td><strong>Ziegler–Nichols</strong></td><td>A classic tuning rule that computes gains from $K_u$ and $T_u$: $k_p=0.6K_u$, $k_i=1.2K_u/T_u$, $k_d=0.075K_uT_u$. From our $K_u=5,\,T_u=9$ that's $k_p=3.0,\,k_i=0.67,\,k_d=3.4$. It targets fast disturbance rejection and tolerates overshoot — a hot starting point to de-tune from.</td></tr>
+          <tr><td><strong>Phase lag</strong></td><td>The delay between command and effect: servo slew, sensor-filter delay, comms latency, hull dynamics. Phase lag at high gain is the universal recipe for oscillation. More lag → lower usable $k_p$. It's <em>why</em> "raise $k_p$ until it oscillates" works even when the ideal Nomoto plant alone never would.</td></tr>
+          <tr><td><strong>Slew rate</strong></td><td>The fastest the actuator can move, $25$ °/s for our servo — so $\sim 2.8$ s stop-to-stop. At high gain the command flips faster than the rudder can follow, turning a square-wave command into a lagging sawtooth: phase lag in the flesh.</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> The recipe, in order</div>
+        <p>(1) $k_i=0,\,k_d=0$; raise $k_p$ to sustained oscillation ($\approx K_u=5$), then halve to $k_p \approx 2\text{–}2.5$. (2) Raise $k_d$ until overshoot is gone ($\approx 3$). (3) Add the smallest $k_i$ that removes offset in reasonable time ($0.2$, trims the current in $\sim 30$ s). Result: <strong>$k_p=2,\ k_i=0.2,\ k_d=3$</strong>. Field order is identical: P → D → I, starting low.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="deployment"><span class="sec-no">5</span>Deployment: from sim to a real USV</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>on the water</small></div>
+      <p>The math doesn't change going to hardware; the plumbing does. These are the terms you meet when the controller leaves the simulator and runs in a ROS 2 node.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>In the sim</th><th>On the boat (ROS 2)</th></tr></thead>
+        <tbody>
+          <tr><td><code>psi</code> (heading)</td><td>Yaw from the IMU / <code>/odometry/filtered</code> — already fused upstream by an EKF or complementary filter.</td></tr>
+          <tr><td><code>wrap(sp - psi)</code></td><td>Same wrap, done in your node every cycle, on every error.</td></tr>
+          <tr><td><code>DT = 0.05</code></td><td>Timer callback at $\sim 20\text{–}50$ Hz — but use the <em>measured</em> $dt$, not the nominal one.</td></tr>
+          <tr><td>rudder $\delta$</td><td>A rudder servo, or differential thrust: <code>left = base + u</code>, <code>right = base - u</code>.</td></tr>
+          <tr><td><code>RUDDER_MAX</code></td><td>Your real actuator limits — clamp in software too, and pair with anti-windup.</td></tr>
+          <tr><td>current disturbance $d$</td><td>Real current and wind — the I term's standing job to trim out.</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Two non-negotiables before any autonomy test</div>
+        <p>Have a hardware kill switch wired and tested. And <code>reset()</code> the PID whenever the controller is re-engaged — a stale integral from five minutes ago is a windup bug waiting to fling the boat at the dock.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="quick-check"><span class="sec-no">6</span>Quick check</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="pidG-which-term">
+        <div class="ex-head"><span class="badge">Q1</span> Match the symptom to the cure</div>
+        <div class="ex-q">A PD-tuned boat holds 92° instead of the commanded 90° in a steady current, and never closes the last 2°. Which glossary term names the problem, and which fixes it?</div>
+        <ul class="ex-options">
+          <li data-correct="false">Derivative kick; fixed by derivative-on-measurement.</li>
+          <li data-correct="true">Steady-state offset; fixed by adding the integral (I) term.</li>
+          <li data-correct="false">Integral windup; fixed by clamping the integral.</li>
+          <li data-correct="false">Angle wrapping; fixed by wrapping the error.</li>
+        </ul>
+        <div class="ex-explain">A P (or PD) controller outputs $k_p e$, so to hold the $-4°$ of rudder that cancels the current it must keep a non-zero error: $e_\text{ss} = -4°/k_p$. That's <strong>steady-state offset</strong>. D only acts on change and dies at steady state, so it can't help. The integral ramps the rudder to the trim value and lets error return to zero — exactly what I is <em>for</em>. (Windup and kick are I-side and setpoint-step problems; wrapping is a turn-the-short-way problem — none match this symptom.)</div>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>This page is your lookup index: the <strong>plant</strong> (Nomoto, $K$, $T$, $\psi$, $r$, $d$), the <strong>three terms</strong> with their units, the <strong>failure modes</strong> (offset, overshoot, windup, derivative kick, noise, wrapping) and their fixes (anti-windup, derivative-on-measurement, low-pass, wrap), and <strong>tuning</strong> ($K_u$, $T_u$, Ziegler–Nichols, phase lag, slew rate). When a term goes fuzzy mid-chapter, come back here. Then return to the case where it bit you — the chapters are where these definitions earn their keep.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+<script src="../assets/pid-sim.js"></script>
+</body>
+</html>
