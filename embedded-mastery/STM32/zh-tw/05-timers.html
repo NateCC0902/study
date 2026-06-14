@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>計時器精通：PWM、輸入捕捉與編碼器 — Embedded Mastery</title>
+<link rel="stylesheet" href="../../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../../assets/styles.css">
+</head>
+<body class="track-stm32" data-course="embedded" data-track="stm32" data-chapter="05-timers">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">STM32 · 第 05 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">STM32 學習軌 · 第 05 章 · 進階</div>
+        <h1>計時器精通：PWM、輸入捕捉與編碼器</h1>
+        <p>STM32 的計時器是最具代表性的核心周邊。它底層其實只是一個計數器——但只要在這個計數器外面包上一個預除器（prescaler）、一個自動重載暫存器，再加上幾個比較通道，你就能產生馬達驅動訊號、不耗用 CPU 就把 LED 調暗、以奈秒等級量測脈衝，還能在硬體中解碼正交編碼器（quadrature encoder）。這一切，我們都從一個暫存器建立起來：<code>CNT</code>。</p>
+        <div class="meta">
+          <span>⏱ 約 50 分鐘</span><span>🧠 計數與比較</span><span>⚡ PWM／捕捉／編碼器</span><span>📐 時脈運算</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="timer-is-a-counter"><span class="sec-no">1</span>計時器只是一個對時脈計數的計數器</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先建立整體圖像</small></div>
+      <p>暫時忘掉「計時器」這個詞。STM32 上像 <strong>TIM2</strong> 或 <strong>TIM3</strong> 這樣的通用型計時器，本質上是一個硬體<strong>計數器</strong>——一個叫做 <code>CNT</code> 的暫存器，每接收到一個時脈邊緣，它就往上加一。整個概念就是這樣。其餘的一切（PWM、週期量測、編碼器解碼）都是透過決定它<em>跳得多快</em>，以及<em>在某些計數值時發生什麼事</em>所建立出來的。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話模型</div>
+        <p>計時器是一個由<strong>分頻後時脈所驅動的計數器（<code>CNT</code>）</strong>，它向上數到一個可程式化的上限（<code>ARR</code>），接著繞回 0，並且能在經過可程式化的比較點（<code>CCRx</code>）時觸發動作。</p>
+      </div>
+
+      <p>有三個旋鈕決定了它的行為，而你設定任何一個計時器時都會碰到它們：</p>
+      <ul>
+        <li><strong><code>PSC</code></strong>——<em>預除器（prescaler）</em>。它把進入計時器的時脈分頻，讓 <code>CNT</code> 跳得更慢。分頻倍數為 <span>$(\text{PSC}+1)$</span>。</li>
+        <li><strong><code>ARR</code></strong>——<em>自動重載暫存器（auto-reload register）</em>。計數器數 <code>0, 1, 2, … ARR</code>，然後歸零並發出一個<em>更新事件（update event）</em>。所以週期是 <span>$(\text{ARR}+1)$</span> 個計數刻（tick）。</li>
+        <li><strong><code>CCRx</code></strong>——通道 <em>x</em> 的<em>捕捉／比較暫存器（capture/compare register）</em>。在輸出模式下，它是決定 PWM 工作週期（duty）的門檻值；在輸入模式下，當邊緣到來時它會<em>鎖存（latch）</em>當下的計數值。</li>
+      </ul>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 為什麼到處都是「+1」</div>
+        <p>計數器在 0 到 ARR 之間（<em>含兩端</em>）的每一個值上各停留一個計數刻。這共有 <span>$\text{ARR}+1$</span> 個不同的值——因此週期 <span>$=\text{ARR}+1$</span>，而不是 <code>ARR</code>。同樣的差一（off-by-one）邏輯讓預除器的分頻倍數變成 <span>$\text{PSC}+1$</span>。硬體從零開始數；人類卻常常忘了那個零。把這點刻進腦海裡。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="counting-math"><span class="sec-no">2</span>計數運算：PSC、ARR 與更新頻率</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>推導出來</small></div>
+      <p>計時器的輸入時脈 <span>$f_{\text{tim}}$</span> 經過預除器分頻後，得到 <code>CNT</code> 遞增的速率：</p>
+
+      <div class="math-box">$$ f_{\text{CNT}} = \frac{f_{\text{tim}}}{\text{PSC}+1} $$</div>
+
+      <p>接著計數器需要 <span>$\text{ARR}+1$</span> 個這樣的計數刻才會溢位（overflow）一次。每一次溢位就是一次<strong>更新事件</strong>——計時器的心跳。它的頻率是輸入時脈被<em>兩個</em>因子同時分頻後的結果：</p>
+
+      <div class="math-box">$$ f_{\text{update}} = \frac{f_{\text{tim}}}{(\text{PSC}+1)(\text{ARR}+1)} $$</div>
+
+      <p>這一條方程式是整章的基礎。PWM 頻率、取樣率中斷、軟體時鐘——它們全都只是套上不同 ARR／CCR 意義的 <span>$f_{\text{update}}$</span>。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——APB 計時器時脈 ×2 規則</div>
+        <p><span>$f_{\text{tim}}$</span> <em>並不</em>總是等於你在時脈樹（clock tree）中設定的 APB 匯流排時脈。在 STM32F4/F7/H7 上，當某個 APB 預除器大於 1 時，該匯流排上的計時器時脈會<strong>加倍</strong>。在一顆 168&nbsp;MHz 的 F407 上，APB1 為 42&nbsp;MHz（÷4），那麼 APB1 的<em>計時器</em>時脈就是 <span>$2\times42 = 84\,\text{MHz}$</span>——這正是餵給 TIM2–7 的頻率。我們在第 2 章遇過這條規則；而在這裡，它決定了你算出來的每一個數字。永遠要從 CubeMX 時脈樹的「to TIMx」節點讀取 <span>$f_{\text{tim}}$</span>，而不是匯流排的標籤。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>反推目標值</small></div>
+      <p>實務上你會<em>反向</em>運用這條方程式：你已知 <span>$f_{\text{tim}}$</span> 和一個目標 <span>$f_{\text{update}}$</span>，然後必須選出 PSC 和 ARR。重新整理：</p>
+
+      <div class="math-box">$$ (\text{PSC}+1)(\text{ARR}+1) = \frac{f_{\text{tim}}}{f_{\text{update}}} $$</div>
+
+      <p><strong>實例演練。</strong>一個 84&nbsp;MHz 的計時器；我們想要 1&nbsp;kHz 的更新（一個漂亮的 1&nbsp;ms 計時刻）。我們需要的乘積是</p>
+
+      <div class="math-box">$$ (\text{PSC}+1)(\text{ARR}+1) = \frac{84\times10^6}{1\times10^3} = 84\,000 $$</div>
+
+      <p>現在把 84&nbsp;000 分解成兩個整數，每個都 <span>$\le 65536$</span>（因為這些是 16 位元暫存器）。一個俐落的拆法是 <span>$84 \times 1000$</span>，得到 <strong>PSC = 83</strong> 和 <strong>ARR = 999</strong>。驗算一下：<span>$84 \times 1000 = 84\,000$</span>，且 <span>$84\times10^6 / 84\,000 = 1000\,\text{Hz}$</span>。搞定。</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 聰明地選擇拆法</div>
+        <p>許多 (PSC, ARR) 組合都能命中相同的 <span>$f_{\text{update}}$</span>，但它們並不等價。對於 <strong>PWM</strong>，你會想要 <strong>ARR 大</strong>（PSC 小或為零），這樣工作週期的解析度才細——每一階工作週期的大小是 <span>$1/(\text{ARR}+1)$</span>。對於慢速的軟體時鐘，你會想要 <strong>PSC 大</strong>，這樣 16 位元的 ARR 仍能達到很長的週期。選那個能把解析度擺在你需要之處的因子。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="timer-architecture"><span class="sec-no">3</span>方塊內部：CNT、ARR 與 CCR 如何互動</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>資料路徑（datapath）</small></div>
+      <p>把計數器想像成一道上升的鋸齒波：<code>CNT</code> 從 0 爬升到 ARR，瞬間跳回 0，如此重複。ARR 是設定<em>週期</em>的上限。每一個比較暫存器 <code>CCRx</code> 都是穿過這道鋸齒波的一條水平線——當 <code>CNT</code> 跨越它的那一刻，該通道的輸出就翻轉。正是這個跨越，把一個計數器變成了 PWM 產生器。</p>
+
+      <div class="mermaid">
+flowchart LR
+    CLK["f_tim<br/>(APB 計時器時脈)"] --> PSC["預除器<br/>÷(PSC+1)"]
+    PSC --> CNT["CNT<br/>數 0…ARR"]
+    ARR["ARR<br/>(週期−1)"] -- "重載／繞回" --> CNT
+    CNT --> CMP{{"比較<br/>CNT vs CCRx"}}
+    CCR["CCRx<br/>(工作週期門檻)"] --> CMP
+    CMP --> OUT(["通道輸出<br/>OCx → PWM 腳位"])
+    CNT -- "溢位" --> UEV(["更新事件／<br/>中斷"])
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 把這張圖讀成一句話</div>
+        <p>匯流排時脈被預除器分頻後餵給 <code>CNT</code>。<code>CNT</code> 爬升到 <code>ARR</code> 再繞回（即更新事件）。一路上，有一個比較器拿 <code>CNT</code> 跟每一個 <code>CCRx</code> 比較；跨越的那一刻就驅動輸出腳位。<strong>ARR 設定週期；CCR 設定工作週期。</strong>兩個暫存器，就是整個故事。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="pwm-generation"><span class="sec-no">4</span>PWM：把計數器變成近似類比的輸出</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>取平均，而非單純切換</small></div>
+      <p>在 <strong>PWM 模式 1</strong> 下，通道輸出在 <span>$\text{CNT} &lt; \text{CCRx}$</span> 時為高電位，之後則為低電位，直到計數器繞回為止。所以在每個週期裡，腳位在總共 <code>ARR+1</code> 個計數刻中有 <code>CCRx</code> 個刻為高電位。用它去驅動馬達或 LED，負載會對<em>平均</em>電壓做出反應——一個 25% 工作週期的快速方波，看起來就像供應電壓的 25%。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>工作週期與頻率</small></div>
+      <p>有兩條公式主宰 PWM，而它們都直接從 §2 推導出來。<strong>工作週期（duty cycle）</strong>是高電位時間佔週期的比例：</p>
+
+      <div class="math-box">$$ D = \frac{\text{CCR}}{\text{ARR}+1} $$</div>
+
+      <p>而 <strong>PWM 頻率</strong>就是更新頻率（計數器每繞回一次就是一個 PWM 週期）：</p>
+
+      <div class="math-box">$$ f_{\text{PWM}} = \frac{f_{\text{tim}}}{(\text{PSC}+1)(\text{ARR}+1)} $$</div>
+
+      <p><strong>實例演練——20&nbsp;kHz 的馬達 PWM。</strong>20&nbsp;kHz 是馬達驅動的甜蜜點：高於可聽見的嘶嘶聲，又低於切換損耗（switching-loss）造成困擾的頻率。當 <span>$f_{\text{tim}} = 84\,\text{MHz}$</span> 且 PSC = 0（不分頻，以取得最大的工作週期解析度）：</p>
+
+      <div class="math-box">$$ \text{ARR}+1 = \frac{f_{\text{tim}}}{f_{\text{PWM}}} = \frac{84\times10^6}{20\times10^3} = 4200 \;\Rightarrow\; \text{ARR}=4199 $$</div>
+
+      <p>這給了 4200 階工作週期——約 0.024% 的解析度，綽綽有餘。若要 <strong>25% 工作週期</strong>：</p>
+
+      <div class="math-box">$$ \text{CCR} = D\,(\text{ARR}+1) = 0.25 \times 4200 = 1050 $$</div>
+
+      <p>所以 <code>PSC=0, ARR=4199, CCR=1050</code> 就產生一個 20&nbsp;kHz、25% 工作週期的波形。想要 50%？寫入 <code>CCR=2100</code>。妙處在於：一旦計時器設定完成，要改變亮度或馬達轉速，就只是<em>一次暫存器寫入</em>，之後完全沒有 CPU 開銷。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>逐行閱讀</small></div>
+      <p>以下是 STM32 HAL 的版本——TIM3 通道 1，20&nbsp;kHz，起始為 25% 工作週期。假設時脈樹給了 TIM3 一個 84&nbsp;MHz 的計時器時脈。</p>
+
+      <div class="codeblock">
+        <div class="code-head">pwm.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">TIM_HandleTypeDef htim3;
+
+void PWM_Init(void)
+{
+  __HAL_RCC_TIM3_CLK_ENABLE();                 // 為計時器供電（開啟時脈）
+
+  htim3.Instance           = TIM3;
+  htim3.Init.Prescaler     = 0;                // PSC = 0  -&gt; 分頻倍數為 1
+  htim3.Init.CounterMode   = TIM_COUNTERMODE_UP;
+  htim3.Init.Period        = 4199;             // ARR = 4199 -&gt; 84MHz/4200 = 20 kHz
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  HAL_TIM_PWM_Init(&amp;htim3);
+
+  TIM_OC_InitTypeDef sConfig = {0};
+  sConfig.OCMode     = TIM_OCMODE_PWM1;        // CNT &lt; CCR 時為高電位
+  sConfig.Pulse      = 1050;                   // CCR = 1050 -&gt; 25% 工作週期
+  sConfig.OCPolarity = TIM_OCPOLARITY_HIGH;
+  HAL_TIM_PWM_ConfigChannel(&amp;htim3, &amp;sConfig, TIM_CHANNEL_1);
+
+  HAL_TIM_PWM_Start(&amp;htim3, TIM_CHANNEL_1);    // 開始驅動腳位
+}
+
+// 之後，零重算就能即時改變工作週期：
+void PWM_SetDutyPercent(uint8_t pct)           // 0..100
+{
+  uint32_t arr = __HAL_TIM_GET_AUTORELOAD(&amp;htim3);   // 4199
+  uint32_t ccr = ((arr + 1U) * pct) / 100U;          // CCR = D*(ARR+1)
+  __HAL_TIM_SET_COMPARE(&amp;htim3, TIM_CHANNEL_1, ccr);
+}
+</code></pre>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 每個欄位對應到什麼</div>
+        <p><code>Init.Prescaler</code> 就是 <strong>PSC</strong>，<code>Init.Period</code> 就是 <strong>ARR</strong>，<code>sConfig.Pulse</code> 就是 <strong>CCR</strong>。HAL 的命名把暫存器藏了起來，但數學是完全一樣的。<code>__HAL_TIM_SET_COMPARE()</code> 只不過是對 <code>TIM3-&gt;CCR1</code> 的一次寫入——瞬間完成、無毛刺（glitch-free），而且因為這些暫存器有預載／緩衝（preload/buffer），會在下一次重載時乾淨地更新。</p>
+      </div>
+
+      <p>如果你偏好直接操作硬體，同樣的設定改用裸暫存器寫法，能讓對應關係一目了然：</p>
+
+      <div class="codeblock">
+        <div class="code-head">pwm_regs.c <span class="lang">C / STM32（暫存器）</span></div>
+<pre><code class="language-c">RCC-&gt;APB1ENR  |= RCC_APB1ENR_TIM3EN;          // 開啟計時器時脈
+TIM3-&gt;PSC      = 0;                            // 預除器    = PSC
+TIM3-&gt;ARR      = 4199;                         // 自動重載  = ARR（週期-1）
+TIM3-&gt;CCR1     = 1050;                         // 比較值    = CCR（25% 工作週期）
+TIM3-&gt;CCMR1   |= (6 &lt;&lt; TIM_CCMR1_OC1M_Pos);    // OC1M = 110 -&gt; PWM 模式 1
+TIM3-&gt;CCMR1   |= TIM_CCMR1_OC1PE;              // 預載 CCR1（無毛刺更新）
+TIM3-&gt;CCER    |= TIM_CCER_CC1E;                // 啟用通道 1 輸出
+TIM3-&gt;CR1     |= TIM_CR1_ARPE;                 // ARR 也啟用預載
+TIM3-&gt;EGR     |= TIM_EGR_UG;                   // 強制一次更新以載入影子暫存器
+TIM3-&gt;CR1     |= TIM_CR1_CEN;                  // CEN = 1 -&gt; 計數器開始運轉
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——同一個周邊上的伺服機、馬達與 LED</div>
+        <p>同樣一個計時器，只要重新調校，就能驅動三種經典產品。一個<strong>玩具伺服機（hobby servo）</strong>需要 50&nbsp;Hz 的訊框，搭配 1–2&nbsp;ms 的高電位脈衝：設定 <code>PSC=83, ARR=19999</code>（1&nbsp;MHz 計時刻 → 20&nbsp;ms 週期），再用 <code>CCR=1500</code> 對應中位。一個<strong>有刷馬達 H 橋（H-bridge）</strong>需要 20&nbsp;kHz（即上面的例子），這樣它才不會發出嘯叫。<strong>LED 調光</strong>需要 ≥1&nbsp;kHz（讓眼睛察覺不到閃爍），並搭配較大的 ARR 以達成平滑的漸變。一個 IP 方塊，三個產業——這就是精通它為什麼划算的原因。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="input-capture"><span class="sec-no">5</span>輸入捕捉：量測外部世界</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>在邊緣到來時鎖存計數值</small></div>
+      <p>PWM 是計時器在<em>說話</em>。<strong>輸入捕捉（input capture）</strong>則是計時器在<em>聆聽</em>。你把一個外部訊號接到某個通道腳位，並告訴硬體：「每當有上升邊緣時，就把當下的 <code>CNT</code> 拍快照存進 <code>CCRx</code>。」CPU 完全不參與計時——當邊緣到來的那一瞬間，矽晶片就鎖存了計數值，所以你能以近乎零抖動（jitter）地量測週期、脈衝寬度或頻率。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>從計數刻到秒再到 Hz</small></div>
+      <p>把連續兩次捕捉值相減，就得到以<em>計時刻</em>為單位的週期。每個計時刻歷時 <span>$1/f_{\text{CNT}}$</span> 秒，因此所量測到的輸入訊號頻率為</p>
+
+      <div class="math-box">$$ f_{\text{signal}} = \frac{f_{\text{CNT}}}{\Delta\text{CNT}} = \frac{f_{\text{tim}}/(\text{PSC}+1)}{\text{CCR}_n - \text{CCR}_{n-1}} $$</div>
+
+      <p>注意繞回問題：如果 <span>$\text{CCR}_n &lt; \text{CCR}_{n-1}$</span>，表示計數器在兩個邊緣之間溢位了，所以在相減之前要先加上 <span>$\text{ARR}+1$</span>。<strong>實例演練：</strong>當計時刻為 1&nbsp;MHz（每刻 1&nbsp;µs）、捕捉到的差值為 2000 刻時，輸入頻率為 <span>$f = 10^6 / 2000 = 500\,\text{Hz}$</span>——對應 2&nbsp;ms 週期，直接從硬體讀出。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>在 ISR 中捕捉</small></div>
+      <div class="codeblock">
+        <div class="code-head">capture.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">// TIM2 CH1 設為輸入捕捉，上升邊緣。計時刻 = 1 us（84 MHz 上 PSC = 83）。
+volatile uint32_t g_period_ticks = 0;
+static   uint32_t last = 0;
+
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim-&gt;Channel == HAL_TIM_ACTIVE_CHANNEL_1) {
+    uint32_t now = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+    uint32_t arr = __HAL_TIM_GET_AUTORELOAD(htim);
+    // 防繞回的差值：若計數器翻轉過，就加上一整個完整週期
+    g_period_ticks = (now &gt;= last) ? (now - last)
+                                   : (now + (arr + 1U) - last);
+    last = now;
+  }
+}
+
+// f_signal = 1e6 / g_period_ticks（Hz），因為這裡每個計時刻為 1 us。
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——慢速訊號上漏掉的溢位</div>
+        <p>上面的繞回修正只處理兩個邊緣之間的<em>單一</em>次溢位。如果輸入訊號比一整個計數器週期還要慢，計數器就會繞回不只一次，天真的差值計算就會出錯。對於低頻訊號，要嘛把預除器加大（計時刻更慢、量測範圍更長），要嘛去計數更新事件中斷的次數並把它折算進來。永遠要清楚你的可量測範圍：<span>$f_{\min} = f_{\text{CNT}}/(\text{ARR}+1)$</span>。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="encoder-mode"><span class="sec-no">6</span>編碼器模式：硬體中免費的正交解碼</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>計數器變成了位置</small></div>
+      <p>一個正交編碼器（quadrature encoder）輸出兩道方波，<strong>A</strong> 與 <strong>B</strong>，相位相差 90°。相位的<em>先後順序</em>告訴你方向：A 領先 B 是正轉，B 領先 A 是反轉。在<strong>編碼器模式</strong>下，計時器把兩個通道接進計數器，使得 <code>CNT</code> 在正轉邊緣遞增、在反轉邊緣遞減——全自動完成。設定完成後，<code>CNT</code> 本身<em>就是</em>輪子的位置，由硬體更新，不需中斷，即使在高轉速（RPM）下也不會漏掉任何一個計數。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>計數值、轉速與那個 ×4</small></div>
+      <p>在常見的 <strong>×4 模式</strong>下，計時器對兩個通道的每一個邊緣都計數，所以一個每轉 <em>N</em> 條線（lines per revolution）的編碼器，每轉會產生 <span>$4N$</span> 個計數。在一個已知的時間區間 <span>$\Delta t$</span> 內讀取計數差值，就能算出轉速：</p>
+
+      <div class="math-box">$$ \text{RPM} = \frac{\Delta\text{CNT}}{4N} \cdot \frac{60}{\Delta t} $$</div>
+
+      <p><strong>實例演練：</strong>一個 500 線的編碼器（所以在 ×4 模式下每轉 2000 計數）在一個 10&nbsp;ms 的時窗內前進了 200 個計數。那麼 <span>$\text{RPM} = \frac{200}{2000}\cdot\frac{60}{0.01} = 0.1 \cdot 6000 = 600\,\text{RPM}$</span>。所有的邊緣追蹤都是計數器做的；你的迴圈只要讀 <code>CNT</code> 再相減即可。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>用一個暫存器讀取位置</small></div>
+      <div class="codeblock">
+        <div class="code-head">encoder.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">TIM_HandleTypeDef htim4;
+
+void Encoder_Init(void)                         // TIM4 CH1=A, CH2=B
+{
+  TIM_Encoder_InitTypeDef enc = {0};
+  htim4.Instance        = TIM4;
+  htim4.Init.Prescaler  = 0;                    // 對每個邊緣計數，不分頻
+  htim4.Init.Period     = 0xFFFF;               // 16 位元繞回（自由運轉）
+  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+  enc.EncoderMode = TIM_ENCODERMODE_TI12;       // x4：對 A 與 B 的邊緣都計數
+  enc.IC1Polarity = TIM_ICPOLARITY_RISING;
+  enc.IC2Polarity = TIM_ICPOLARITY_RISING;
+  HAL_TIM_Encoder_Init(&amp;htim4, &amp;enc);
+  HAL_TIM_Encoder_Start(&amp;htim4, TIM_CHANNEL_ALL);
+}
+
+// 在你的控制迴圈裡，位置就是計數器本身：
+int16_t Encoder_Read(void)
+{
+  return (int16_t)__HAL_TIM_GET_COUNTER(&amp;htim4); // 有號型別 -&gt; 可處理反轉
+}
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——閉迴路馬達控制</div>
+        <p>這是每一台伺服驅動器、機器人關節與 CNC 軸的骨幹。一個計時器以 PWM 模式命令馬達；第二個計時器以編碼器模式讀取它的位置——兩者都在硬體中、都不需中斷。一個週期性的控制迴圈（通常是第三個計時器，例如以 1&nbsp;kHz 觸發 ISR）讀取編碼器差值、計算 PID 修正量，然後寫入一個新的 <code>CCR</code>。三個計時器，一套完整的運動控制系統，而 CPU 大半時間都閒著。</p>
+      </div>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-pwm-wrap">
+        <div class="sim-title">🔬 即時模擬：由 ARR 與 CCR 決定的 PWM（84 MHz 計時器時脈，PSC = 0）</div>
+        <canvas id="sim-pwm"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">拖動 <em>ARR</em> 與 <em>CCR</em>：觀察波形，以及即時的 <em>f<sub>PWM</sub></em> = 84&nbsp;MHz/(ARR+1) 與工作週期 = CCR/(ARR+1)。CCR 會被夾限（clamp）到 ARR+1（即 100% 工作週期）。</p>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>⑤ 換你上場</h2>
+      <div class="layer"><span class="step">⑤</span> 練習 <small>由你計算與決定</small></div>
+      <p>三個小測驗。點選一個答案、輸入一個數字，或展開一個程式設計挑戰。你的進度會儲存在這台裝置上，並顯示在首頁。</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="stm05-duty">
+        <div class="ex-head"><span class="badge">Q1</span> 概念檢查</div>
+        <div class="ex-q">一個處於 PWM 模式 1 的計時器，<code>ARR = 999</code> 且 <code>CCR = 250</code>。輸出的工作週期是多少？而你要改哪個暫存器才能讓它變成 75%？</div>
+        <ul class="ex-options">
+          <li data-correct="false">2.5% 工作週期；把 ARR 改成 750</li>
+          <li data-correct="true">25% 工作週期；寫入 CCR = 750</li>
+          <li data-correct="false">40% 工作週期；寫入 CCR = 400</li>
+          <li data-correct="false">25% 工作週期；改變預除器 PSC</li>
+        </ul>
+        <div class="ex-explain">工作週期為 $D = \text{CCR}/(\text{ARR}+1) = 250/1000 = 25\%$。要達到 75%，你改的是<em>工作週期</em>而非週期，所以寫入 $\text{CCR} = 0.75 \times 1000 = 750$。改變 ARR 或 PSC 會改變的是<em>頻率</em>，而不是工作週期。</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="stm05-update-freq" data-answer="1000" data-tol="5">
+        <div class="ex-head"><span class="badge">Q2</span> 算算看</div>
+        <div class="ex-q">一個計時器以 <strong>16&nbsp;MHz</strong> 計時，<code>PSC = 15</code> 且 <code>ARR = 999</code>。更新頻率 $f_{\text{update}}$ 是多少 <strong>Hz</strong>？（回想 $f_{\text{update}} = \dfrac{f_{\text{tim}}}{(\text{PSC}+1)(\text{ARR}+1)}$。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="Hz"><span class="ex-unit">Hz</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$(\text{PSC}+1)(\text{ARR}+1) = 16 \times 1000 = 16\,000$，所以 $f = \dfrac{16\times10^6}{16\,000} = 1000\,\text{Hz}$——一個漂亮的 1&nbsp;ms 計時刻。這就是經典的「在 16&nbsp;MHz 計時器上給我一個 1&nbsp;kHz 控制迴圈中斷」的配方。</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="stm05-servo-pwm">
+        <div class="ex-head"><span class="badge">Q3</span> 程式設計挑戰——驅動一個玩具伺服機</div>
+        <div class="ex-q">在一個 84&nbsp;MHz 的計時器上設定 TIM3 CH1，產生一個標準的 <strong>50&nbsp;Hz</strong> 伺服機訊框（20&nbsp;ms 週期），搭配 <strong>1.5&nbsp;ms 的中位脈衝</strong>。為了方便的 1&nbsp;µs 計時刻，選出 PSC／ARR，接著算出對應中位的 CCR。寫出 HAL 的初始化。</div>
+        <details class="ex-acc">
+          <summary>提示</summary>
+          <div class="acc-body">目標是 <strong>1&nbsp;µs 的計時刻</strong>：$f_{\text{CNT}} = 84\,\text{MHz}/(\text{PSC}+1) = 1\,\text{MHz} \Rightarrow \text{PSC} = 83$。接著 20&nbsp;ms 的週期等於 20&nbsp;000 個計時刻，所以 $\text{ARR} = 19999$。1.5&nbsp;ms 的脈衝是 1500 個計時刻，所以 $\text{CCR} = 1500$。（1&nbsp;ms → 1000，2&nbsp;ms → 2000：即伺服機的完整行程範圍。）</div>
+        </details>
+        <details class="ex-acc">
+          <summary>顯示一種解答</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">servo.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">// 84 MHz 計時器 -&gt; PSC=83 給出 1 us 的計時刻（1 MHz）。
+// 20 ms 訊框 -&gt; ARR=19999。1.5 ms 中位 -&gt; CCR=1500。
+TIM_HandleTypeDef htim3;
+
+void Servo_Init(void)
+{
+  __HAL_RCC_TIM3_CLK_ENABLE();
+
+  htim3.Instance         = TIM3;
+  htim3.Init.Prescaler   = 83;                 // 84MHz/84 = 1 MHz  (1 us/計時刻)
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period      = 19999;              // 20000 計時刻 = 20 ms = 50 Hz
+  HAL_TIM_PWM_Init(&amp;htim3);
+
+  TIM_OC_InitTypeDef oc = {0};
+  oc.OCMode     = TIM_OCMODE_PWM1;
+  oc.Pulse      = 1500;                         // 1.5 ms -&gt; 中位
+  oc.OCPolarity = TIM_OCPOLARITY_HIGH;
+  HAL_TIM_PWM_ConfigChannel(&amp;htim3, &amp;oc, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&amp;htim3, TIM_CHANNEL_1);
+}
+
+// 瞄準伺服機：角度 0..180 度 -&gt; 脈衝 1000..2000 us。
+void Servo_SetAngle(uint8_t deg)               // 0..180
+{
+  uint32_t us = 1000U + ((uint32_t)deg * 1000U) / 180U;  // 1000..2000
+  __HAL_TIM_SET_COMPARE(&amp;htim3, TIM_CHANNEL_1, us);       // CCR 以 1-us 計時刻為單位
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">1&nbsp;µs 計時刻就是訣竅所在：它讓 CCR <em>直接以微秒為單位讀取</em>，所以 1500&nbsp;µs 的脈衝就字面上是 <code>CCR=1500</code>。選擇預除器以得到一個對人類友善的計時刻，正是乾淨計時器程式碼的標誌。</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> 本章回顧</div>
+        <p>計時器就是一個計數器：<code>CNT</code> 以 $f_{\text{tim}}/(\text{PSC}+1)$ 的速率計數，每 $\text{ARR}+1$ 個計時刻繞回一次，而更新頻率是 $f_{\text{tim}}/((\text{PSC}+1)(\text{ARR}+1))$——記得 APB ×2 計時器時脈規則。在 <strong>PWM</strong> 中，ARR 設定頻率、CCR 設定工作週期（$D=\text{CCR}/(\text{ARR}+1)$）；84&nbsp;MHz → 20&nbsp;kHz 對應 ARR=4199，而 25% 工作週期是 CCR=1050。<strong>輸入捕捉</strong>在邊緣到來時鎖存 <code>CNT</code>，以防繞回的方式量測週期與頻率。<strong>編碼器模式</strong>把 <code>CNT</code> 變成一個硬體位置計數器，用於閉迴路馬達控制。一個周邊，三項超能力——而 CPU 幾乎不費吹灰之力。下一章我們會把這些計時器接到 ADC 與 DMA，做出完全在硬體中運行的取樣。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="回到頂端">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../../../assets/vendor/highlight.min.js"></script>
+<script src="../../../assets/katex/katex.min.js"></script>
+<script src="../../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../../assets/vendor/mermaid.min.js"></script>
+<script src="../../../assets/app.js"></script>
+
+<!-- chapter-specific simulator -->
+<script>
+EM.sim("sim-pwm", {
+  height: 240,
+  params: [
+    { key: "arr", label: "ARR",  min: 99,  max: 8399, step: 100, value: 4199, unit: "" },
+    { key: "ccr", label: "CCR",  min: 0,   max: 8400, step: 50,  value: 1050, unit: "" }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h, pad = 40 * dpr;
+    var hi = pad, lo = H - pad;                          // y for HIGH / LOW
+    var ftim = 84e6;                                     // fixed timer clock, PSC=0
+    var period = v.arr + 1;                              // ticks per PWM cycle
+    var ccr = Math.min(v.ccr, period);                   // clamp to 100% duty
+    var duty = ccr / period;
+
+    ctx.lineWidth = 1 * dpr; ctx.strokeStyle = "#262d3a";
+    ctx.fillStyle = "#6e7681"; ctx.font = (12 * dpr) + "px monospace";
+    ctx.beginPath(); ctx.moveTo(pad, hi); ctx.lineTo(W - 10 * dpr, hi);
+    ctx.moveTo(pad, lo); ctx.lineTo(W - 10 * dpr, lo); ctx.stroke();
+    ctx.fillText("HI", 6 * dpr, hi + 4 * dpr);
+    ctx.fillText("LO", 6 * dpr, lo + 4 * dpr);
+
+    // draw ~3 PWM periods, each period = high for duty fraction then low
+    var cycles = 3;
+    var usable = W - pad - 14 * dpr;
+    var pxPerCycle = usable / cycles;
+    ctx.beginPath();
+    ctx.strokeStyle = "#2ec4b6"; ctx.lineWidth = 2.5 * dpr;
+    var x = pad;
+    ctx.moveTo(x, duty > 0 ? hi : lo);
+    for (var i = 0; i < cycles; i++) {
+      var xHighEnd = x + duty * pxPerCycle;
+      ctx.lineTo(xHighEnd, hi);                          // high segment
+      ctx.lineTo(xHighEnd, lo);                          // falling edge
+      var xCycleEnd = x + pxPerCycle;
+      ctx.lineTo(xCycleEnd, lo);                         // low segment
+      if (i < cycles - 1) ctx.lineTo(xCycleEnd, hi);     // rising edge to next
+      x = xCycleEnd;
+    }
+    ctx.stroke();
+
+    var f = ftim / period;                               // Hz
+    var fTxt = f >= 1000 ? (Math.round(f / 10) / 100) + " kHz"
+                         : (Math.round(f * 10) / 10) + " Hz";
+    return "f<sub>PWM</sub> = 84MHz/(ARR+1) = <b>" + fTxt +
+           "</b> &nbsp;·&nbsp; Duty = CCR/(ARR+1) = <b>" +
+           (Math.round(duty * 1000) / 10) + " %</b> &nbsp;·&nbsp; (CCR " +
+           ccr + " / period " + period + ")";
+  }
+});
+</script>
+</body>
+</html>

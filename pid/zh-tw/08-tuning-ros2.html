@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>整定並部署到真實的 USV（ROS2）— USV 的 PID 控制</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-pid" data-course="pid" data-track="main" data-chapter="08-tuning-ros2">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> PID&nbsp;·&nbsp;USV</a>
+  <span class="spacer"></span>
+  <span class="track-pill">PID · 第 08 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">PID 課程 · 第 08 章 · 整定與部署</div>
+        <h1>整定並部署到真實的 USV（ROS2）</h1>
+        <p>每一個術語、每一種失效模式你都見過了。現在把它們拼起來：一套可重複的 <strong>P&nbsp;→&nbsp;D&nbsp;→&nbsp;I</strong> 配方，對這艘船會落在 <code>kp=2, ki=0.2, kd=3</code>；再與 Ziegler–Nichols 並排比較；最後是那個不起眼但關鍵的步驟 — 把模擬器映射成一個真實的 ROS2 節點（node），而且不把你的硬體燒掉。</p>
+        <div class="meta"><span>⏱ 約 35 分鐘</span><span>🎛 P→D→I 配方</span><span>📐 Ziegler–Nichols</span><span>🤖 ROS2 映射</span><span>⚡ 即時模擬</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="the-recipe"><span class="sec-no">1</span>配方：先 P，再 D，最後 I — 順序就是這樣</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>為什麼是這個順序，而不是別的</small></div>
+      <p>整定（tuning）不是在一個三維增益空間裡亂搜尋；那條路通往瘋狂。它是一個<em>序列</em>，而這個序列直接源自每一項各自的作用。P 決定積極程度。D 馴服 P 製造出來的超調（overshoot）。一旦 P 與 D 把暫態安定下來，I 再把剩下的穩態偏差清掉。順序弄錯，你就會追著自己的尾巴跑 — P 還沒開始轉向時 D 根本沒東西可阻尼，而暫態還在振鈴時 I 會就偏差（offset）這件事騙你。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 每一項一句話</div>
+        <p><strong>P</strong> 負責轉向。<strong>D</strong> 阻止轉向衝過頭。<strong>I</strong> 抹掉 P 和 D 都處理不了的殘餘偏差。照它們生效的順序去整定：快（P）、更快（D）、最慢（I）。</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    A["起點：ki=0, kd=0"] --> B["把 kp 拉到 Ku≈5<br/>持續振盪"]
+    B --> C["折半：<br/>kp = 2 – 2.5"]
+    C --> D["把 kd 拉到<br/>超調消失：kd≈3"]
+    D --> E["加上能消除偏差的<br/>最小 ki：ki=0.2"]
+    E --> F["完成：<br/>kp=2, ki=0.2, kd=3"]
+</div>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>我們落腳的那組增益</small></div>
+      <p>底下每個數值都來自<em>這艘</em>船 — 一階（first-order）Nomoto 受控體（plant），$K=0.6$、$T=2.5$ s，舵（rudder）為 ±35°、以 25 °/s 變化，外加一道把船首（bow）推得像 4° 卡住的舵那樣的水流（current）。跑完配方，你會收斂到貫穿案例 3–7 所使用的那組增益：<strong>$k_p=2$、$k_i=0.2$、$k_d=3$</strong>。本節接下來講的就是你<em>怎麼</em>一步步到那裡，這樣你就能在任何一艘船上重現它。</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="step-p"><span class="sec-no">2</span>步驟 1 — 把 <span class="kt">$k_p$</span> 拉到臨界增益，再折半</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>找到邊緣，往後退一步</small></div>
+      <p>設 $k_i=0$、$k_d=0$ — 純 P。現在把 $k_p$ 拉到船開始<strong>持續、等幅的振盪（oscillation）</strong>：不衰減、不發散，就是永遠地振鈴下去。那個增益就是<strong>臨界增益（ultimate gain）</strong> $K_u$，而振鈴的週期（period）就是<strong>臨界週期（ultimate period）</strong> $T_u$。在這艘船上是 $K_u \approx 5$、$T_u \approx 9$ s。（回想案例 1：$k_p=2$ 振鈴一次就穩定；$k_p=5$ 永遠不穩定，以 ±16° 振盪不止；$k_p=8$ 振得更兇更快，±25°。）</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 為什麼理想受控體仍會振盪</div>
+        <p>一艘裸 Nomoto 船，配上一個<em>完美</em>的舵，光靠 $k_p$ 永遠不會變得不穩定 — 連 $k_p=100$ 都會穩定。真實的船會振盪，是因為致動器（actuator）有<strong>延遲（lag）</strong>：我們的伺服機（servo）以 25 °/s 變化，所以在高 $k_p$ 時命令在兩端之間翻動的速度，比舵跟得上的還快。高增益下的這個相位延遲（phase lag），就是引發振盪的萬用配方（案例 9）。模擬器把變化率限制（slew rate）內建進來，正是為了這個原因。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>折半以得到一個可用的增益</small></div>
+      <p>臨界增益是穩定的<em>邊緣</em> — 單獨拿來用毫無價值。退回一半：</p>
+      <div class="math-box">$$ k_p = \tfrac{1}{2}\,K_u = \tfrac{1}{2}\times 5 = 2.5 \quad\Longrightarrow\quad \text{落在 } k_p \in [2,\,2.5] $$</div>
+      <p>把臨界增益折半是教科書上最老的招數 — 這正是 Ziegler–Nichols 對一個純 P 控制器（controller）所做的事（$k_p = 0.5\,K_u$）。它替你買到一個舒適的穩定裕度：響應俐落、一個小超調，然後就穩定下來。我們會把它再往下推到 $k_p=2$，多留一點裕度，因為 D 和 I 都還沒上。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 別想靠把 $k_p$ 拉大來消掉偏差</div>
+        <p>你會被誘惑：P 會留下一個穩態偏差（案例 2），而 $k_p$ 越大偏差越小（$e_{ss} = -4°/k_p$）。但 $k_p \ge 5$ 會振盪 — 所以只要是任何<em>可用的</em> $k_p$，這個偏差就是結構性的。別拿 P 去硬碰它。那是 I 的工作，再過兩步就到。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="step-d"><span class="sec-no">3</span>步驟 2 — 把 <span class="kt">$k_d$</span> 拉到超調消失</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>加上阻尼器</small></div>
+      <p>固定 $k_p=2$。現在加上 D 並往上掃描（sweep）。D 只對<em>變化</em>起作用：當誤差（error）正在快速縮小時，微分（derivative）為負，所以在收斂過程中 D 對抗 P，船在抵達之前就先鬆手。出自案例 3：</p>
+      <ul>
+        <li><strong>$k_d=0$</strong> — 超調到約 118°，振鈴。</li>
+        <li><strong>$k_d=1$</strong> — 一個小超調。</li>
+        <li><strong>$k_d=3$</strong> — 像泊車小弟一樣滑進去。零超調。</li>
+      </ul>
+      <p>超調消失就停手。把 $k_d$ 推過頭，你只會換來神經兮兮和對雜訊的敏感（案例 7）— D 會把羅盤雜訊微分成舵的垃圾。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>滑行的條件</small></div>
+      <p>當 P 的推力與 D 的剎車恰好抵消時，控制器歸於中性 — 開始滑行：</p>
+      <div class="math-box">$$ k_p\,e = k_d\,\dot e \quad\Longrightarrow\quad \dot e = \frac{k_p}{k_d}\,e = \frac{2}{3}\,e $$</div>
+      <p>所以在 $k_p=2,\ k_d=3$ 時，一旦收斂速率（°/s）超過剩餘誤差（°）的<strong>三分之二</strong>，控制器就停止推力。離目標 30°、收斂快過 20 °/s → 它已經在鬆手了。那個抵消<em>就是</em>阻尼（damping）— 再讀一次第 01 章那個手算時間步，當船離目標還有 30° 時，P 與 D 各以 60° 恰好互相抵消。</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> D 不是萬能的</div>
+        <p>D 只馴服<em>運動</em>。一旦上了航向（heading）且穩定下來，$\dot e = 0$，D 就不貢獻任何東西。它無法完成轉向（那是 P），也無法修正穩態偏差（那是 I）。如果你發現自己在靠拉大 $k_d$ 來修一個固定偏差，停手 — 你用錯項了。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="step-i"><span class="sec-no">4</span>步驟 3 — 加上能抹掉偏差的最小 <span class="kt">$k_i$</span></h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>配平片</small></div>
+      <p>PD 靠<em>持續維持錯誤</em>來保持航向：P 項要輸出抵消水流所需的 −4° 舵，唯一的辦法就是讓誤差維持在 −2°。I 修好了這件事。積分（integral）累積那個持續存在的誤差，自己把舵爬升到 −4° — 它<strong>把水流學會了</strong>。由 I 扛起配平（trim），誤差回到零，P 也放鬆到零。在這艘船上 $k_i=0.2$ 大約在 30 s 內把水流配平掉。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 能用就好的最小值 — 以及為什麼</div>
+        <p>積分是一份<strong>記憶</strong>，而它應該是迴圈（loop）裡<em>最慢</em>的東西。$k_i$ 大 = 從短記憶裡就跳結論 = 超調與緩慢蛇行（在模擬器裡試試 $k_i=2$，看它怎麼游移）。只加上你消除偏差所需、能在合理時間內完成的那麼多 I 就好。如果你看到緩慢蛇行，就<strong>把 $k_i$ 折半</strong>。那約 30 s 的安定時間不是 bug — 你要的是讓 I 對<em>持續存在</em>的東西（水流、風、配平）作出反應，而不是對每一道浪。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>I 拿薪水就是要去除的那個偏差</small></div>
+      <p>要維持固定航向，淨偏航（yaw）力矩必須為零，所以舵必須維持 −4° 來抵消水流。一個純 P 控制器只能透過誤差來輸出這個值：</p>
+      <div class="math-box">$$ k_p\,e_{ss} = -4° \quad\Longrightarrow\quad e_{ss} = -\frac{4°}{k_p} $$</div>
+      <p>在 $k_p=2$ 時那是一個 P 和 D 永遠去除不了的頑固 −2° 偏差。積分項 $k_i\sum e\,dt$ 只要<em>還有任何</em>誤差殘留就會持續成長 — 所以它只有在 $e=0$ 時才會停止成長。整個訣竅就在這裡：I 是唯一一個在誤差為零時仍能撐住非零舵的項。</p>
+
+      <div class="layer"><span class="step">⑤</span> 練習 <small>把整套配方現場走一遍</small></div>
+      <p>這就是完整的遊樂場。從頭在它上面跑一遍配方：把 $k_i$ 和 $k_d$ 歸零，把 $k_p$ 拉到航向軌跡振鈴而不衰減（那就是 $K_u\approx5$），然後折半。加上 $k_d$，看著超調塌掉。最後打開水流開關，加一撮 $k_i$，看著穩態偏差慢慢爬回零。加上雜訊（noise）並把 $k_d$ 推大，看看案例 7 警告的那種抖動。</p>
+
+      <div class="sim"><div class="sim-title"><span>🧭</span> 完整遊樂場 — 現場套用整定配方（kp、ki、kd、水流、雜訊、各開關）</div><canvas id="sim-tune"></canvas></div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 該拖什麼，又該看什麼</div>
+        <p>先單獨驅動 $k_p$ — 航向面板會顯示那個彈簧（案例 1）。當它以固定振幅振鈴時，從時間軸讀出<em>週期</em>（約 9 s = $T_u$）。加上 $k_d$，上方面板的超調就縮到沒有（案例 3）。打開水流，一艘 PD 船會停在設定值<em>下方</em>；偷偷把 $k_i$ 拉上去，軌跡就爬回那條線（案例 4）。然後加上雜訊並把 $k_d$ 過度拉大：舵面板變成一團模糊（案例 7）。整門課都在這一張畫布上了。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="ziegler-nichols"><span class="sec-no">5</span>Ziegler–Nichols：同樣的 <span class="kt">$K_u, T_u$</span>，用公式算</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>把臨界值代入表格</small></div>
+      <p>Ziegler–Nichols 需要的東西，你在步驟 1 就已經全部量好了：$K_u=5$、$T_u=9$ s。經典的 ZN 整定法則把這兩個數字直接變成增益：</p>
+      <div class="math-box">$$ k_p = 0.6\,K_u, \qquad k_i = \frac{1.2\,K_u}{T_u}, \qquad k_d = 0.075\,K_u\,T_u $$</div>
+      <p>用 $K_u=5,\ T_u=9$ 把算式跑一遍：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th></th><th>$k_p = 0.6\,K_u$</th><th>$k_i = 1.2\,K_u/T_u$</th><th>$k_d = 0.075\,K_u T_u$</th></tr></thead>
+        <tbody>
+          <tr><td>ZN 經典版</td><td>3.0</td><td>0.67</td><td>3.4</td></tr>
+          <tr><td>我們的手動整定</td><td>2.0</td><td>0.20</td><td>3.0</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 解讀這個對照</div>
+        <p>$k_d$ 幾乎完全一致（3.4 對 3.0）— 兩種方法看到的阻尼需求是一樣的。但 ZN 的 $k_p$、尤其是它的 $k_i$ 都跑得很<strong>熱</strong>：$k_i=0.67$ 是我們的三倍多。那是刻意設計的 — ZN 以<em>快速擾動抑制（disturbance rejection）</em>為目標，並願意為此而超調。我們的配方以平滑的收斂為目標。把 ZN 當成一個<strong>起點</strong>，然後往平滑的方向退調（de-tune）：手動整定的增益本質上就是 ZN 把積分往回拉很多、比例稍微減一點。</p>
+      </div>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>什麼時候該選哪一個</small></div>
+      <p>如果你的 USV <em>現在</em>就必須抗住一陣陣的側風 — 像漂移就是整個問題核心的測線任務 — 從 ZN 開始，並接受那個超調。如果它是要替感測器定點，或要穿過狹窄的碼頭區，那就取較平滑的手動整定。不管哪一種，你做的<em>都是同樣的</em>量測（把 $k_p$ 拉到 $K_u$、計時 $T_u$）；表格只是對「該用你量到的東西多積極」這件事抱持的不同意見。</p>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="sim-to-boat"><span class="sec-no">6</span>從模擬器到你真正的 USV（ROS2）</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>把每個模擬器變數映射成真實訊號</small></div>
+      <p>你整定好的那個控制器完全不變。會變的是這些數字從哪裡來、又往哪裡去。以下是確切的映射：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>在模擬器裡</th><th>在船上（ROS2）</th></tr></thead>
+        <tbody>
+          <tr><td><code>psi</code></td><td>來自 IMU／<code>/odometry/filtered</code> 的偏航（已融合）</td></tr>
+          <tr><td><code>wrap(sp − psi)</code></td><td>一樣 — 在你的節點裡做，<strong>每一週期</strong>都做</td></tr>
+          <tr><td><code>DT = 0.05</code></td><td>計時器回呼（timer callback）約 20–50 Hz，但要用<em>量測到的</em> dt</td></tr>
+          <tr><td>舵 $\delta$</td><td>舵伺服機，或差動推力（differential thrust）：<code>left = base+u, right = base−u</code></td></tr>
+          <tr><td><code>RUDDER_MAX</code></td><td>你的致動器極限 — 在軟體裡也要箝位（clamp）</td></tr>
+          <tr><td>水流擾動</td><td>真實的水流／風 — 那是你 I 項的工作</td></tr>
+        </tbody>
+      </table></div>
+
+      <p>這裡頭有兩列，如果你只是掃過就是地雷。<strong>量測到的 dt：</strong>一個「設為 20 Hz」的計時器並不會剛好每 0.05 s 觸發一次 — 抖動、忙碌的 CPU、或一次掉拍都會改變真實的間隔，而你的 I 項（$\times dt$）和 D 項（$\div dt$）都跟它一起縮放。要用時間戳的差值，不要用標稱速率。<strong>每一週期都纏繞：</strong>角度纏繞（angle wrapping）的 bug（案例 8）在你的測試剛好跨過正北之前都是看不見的，一旦跨過，船就會繞著碼頭走遠路轉 340°。在誤差進入 PID 之前就把它纏繞好。</p>
+
+      <div class="codeblock">
+        <div class="code-head">heading_node.py <span class="lang">Python · rclpy</span></div>
+<pre><code class="language-python">import math, rclpy
+from rclpy.node import Node
+from std_msgs.msg import Float64
+from nav_msgs.msg import Odometry
+from pid_controller import PID            # 第 01 章那個類別
+
+def wrap(a):                              # → (-pi, pi]，用在每一個誤差上
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+class HeadingNode(Node):
+    def __init__(self):
+        super().__init__("heading_pid")
+        # 你在模擬器裡整定好的增益 — 不變
+        self.pid = PID(kp=2.0, ki=0.2, kd=3.0, output_limits=(-0.61, 0.61))  # ±35°
+        self.setpoint = 0.0              # rad，來自航點／teleop 主題
+        self.last_t   = None            # 用來算量測到的 dt
+        self.armed    = False           # 緊急斷電開關的閘門（見 §7）
+
+        self.create_subscription(Odometry, "/odometry/filtered", self.on_odom, 10)
+        self.cmd = self.create_publisher(Float64, "/rudder_cmd", 10)
+
+    def on_odom(self, msg):
+        # 1. 直接從融合後的估計取出偏航（quaternion → heading）
+        q = msg.pose.pose.orientation
+        psi = math.atan2(2*(q.w*q.z + q.x*q.y),
+                         1 - 2*(q.y*q.y + q.z*q.z))
+
+        # 2. 量測到的 dt，不是標稱的 0.05 s
+        t  = self.get_clock().now().nanoseconds * 1e-9
+        if self.last_t is None:
+            self.last_t = t
+            return                       # 需要兩個取樣點才能算 dt
+        dt = t - self.last_t
+        self.last_t = t
+        if dt &lt;= 0.0 or dt &gt; 0.5:        # 跳過離譜的間隔（掉拍）
+            return
+
+        # 3. 每一週期都先纏繞誤差，再跑同樣的 PID
+        error = wrap(self.setpoint - psi)
+        if not self.armed:               # 緊急斷電開關打開 → 不致動
+            self.pid.reset()             # 閒置時保持積分乾淨
+            return
+        u = self.pid.update(error, dt)   # 舵的 rad 數，已箝位
+
+        self.cmd.publish(Float64(data=u))
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 就算伺服機也會箝位，也要在軟體裡箝位</div>
+        <p><code>RUDDER_MAX</code> 不只是對硬體客氣而已。如果你放任 PID <em>命令</em>超過物理硬限位，積分就會持續對著一個它看不見的極限捲下去 — 那正是案例 5 的積分飽和（windup）（飽和的舵 + 仍在累積的積分 = 永遠在繞圈圈）。要箝位輸出<em>並且</em>保護積分（抗積分飽和，第 05 章）。伺服機的機械硬限位是你的最後一道防線，不是第一道。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="safety"><span class="sec-no">7</span>下水之前：安全</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>救你船命的兩條規則</small></div>
+      <p>實地整定的順序跟模擬器一模一樣：<strong>P → D → I，從低開始。</strong>你是在水上做，但你是從模擬器交給你的那組增益開始，所以你是在微調，不是在盲目搜尋。任何自主航行（autonomy）測試之前，有兩件沒得商量的事：</p>
+
+      <ol>
+        <li><strong>一個硬體緊急斷電開關（kill switch）。</strong>不是一個軟體旗標 — 是一個物理連鎖裝置，不管程式怎麼想都能切斷致動。一個 RC 遙控覆寫頻道，或推進器（thruster）電源上的一個繼電器。第一次你的整定出錯時（它一定會），這就是「事後檢討」與「下水游泳」之間的差別。</li>
+        <li><strong>每次控制器重新接管時都呼叫 <code>reset()</code>。</strong>五分鐘前留下的陳舊積分 — 在船停在碼頭、或緊急斷電開關打開期間累積的 — 是一個等著在你一啟動就爆發的積分飽和 bug。重新接管時，把積分歸零並清掉 <code>prev_error</code>，這樣就不會因為你沒在看的時候航向「跳動」而冒出一個幽靈式的微分衝擊（derivative kick）。</li>
+      </ol>
+
+      <div class="codeblock">
+        <div class="code-head">啟動／重新接管處理器 <span class="lang">Python</span></div>
+<pre><code class="language-python">def on_kill_switch(self, engaged: bool):
+    """接到 RC 遙控覆寫／硬體連鎖裝置。"""
+    if engaged and not self.armed:
+        self.pid.reset()        # &lt;-- 規則：重新接管時保持積分乾淨
+        self.last_t = None      # 強制重新算 dt；不要微分衝擊
+    self.armed = engaged
+    if not engaged:
+        self.cmd.publish(Float64(data=0.0))   # 舵回中位，鬆手
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 為什麼 <code>reset()</code> 在船上比在模擬器裡更重要</div>
+        <p>在模擬器裡，控制器從 $t=0$ 開始連續運行。在水上它會被啟動、為了手動修正而停用、再到碼頭附近重新啟動 — 而每一段停用期間都是無聲的誤差，要是你放任不管，積分早就把它吃進去了。重新接管時的 <code>reset()</code> 讓每一段自主航行片段都從一個已知乾淨的狀態開始。把它和緊急斷電開關（它會替你呼叫 <code>reset()</code>）搭在一起，你就補上了「在模擬器裡能跑」與「在水上能跑」之間的那道缺口。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>換你了</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="pid08-order">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">你在整定一艘全新的船。為什麼我們要把 $k_p$ 拉到振盪、再加上 $k_d$，而不是先整定 $k_d$、或三項一起整定？</div>
+        <ul class="ex-options">
+          <li data-correct="false">$k_d$ 的影響最大，所以必須先設它才能留在合理範圍內。</li>
+          <li data-correct="true">D 只對運動起作用，所以在 P 開始驅動轉向之前它根本沒東西可阻尼 — 而暫態還在振鈴時 I 會就偏差騙你。</li>
+          <li data-correct="false">Ziegler–Nichols 要求增益必須按字母順序設定。</li>
+          <li data-correct="false">三項一次設好沒問題；順序只是慣例。</li>
+        </ul>
+        <div class="ex-explain">每一項都在不同的時間尺度上生效，並且依賴前一項。P（快）負責轉向；D（更快）只能對抗<em>變化</em>，所以它需要 P 的暫態才有東西可作用；I（最慢）應該只看到暫態安定後剩下的那個穩態偏差。照它們生效的順序去整定：P → D → I。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="pid08-zn-ki" data-answer="0.67" data-tol="0.02">
+        <div class="ex-head"><span class="badge">Q2</span> 算一算</div>
+        <div class="ex-q">Ziegler–Nichols 經典版給出 $k_i = 1.2\,K_u/T_u$。用量到的 $K_u = 5$ 和 $T_u = 9$ s，ZN 開出的積分增益是多少？（四捨五入到小數點後兩位。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">rad/(rad·s)</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$k_i = 1.2 \times 5 / 9 = 6/9 = 0.667 \approx 0.67$。那是我們手動整定 $k_i=0.2$ 的三倍多 — ZN 把積分跑得很熱以快速抑制擾動，並接受超調。我們把它往下退調，以求平滑的收斂。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="pid08-measured-dt">
+        <div class="ex-head"><span class="badge">Q3</span> 設計 — 為什麼要量測 dt，不量會壞在哪裡</div>
+        <div class="ex-q">你的 ROS2 計時器「設為 20 Hz」，於是你把 <code>dt = 0.05</code> 寫死。CPU 一忙，有幾個回呼變成在 0.08 s 和 0.03 s 觸發。I 項和 D 項會出什麼問題？量測 dt 又怎麼修好它？</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">寫出離散的 I 項和 D 項，注意其中一個是<em>乘以</em> dt，另一個是<em>除以</em> dt。然後問：當真實間隔不等於你假設的 0.05 時會怎樣。</div></details>
+        <details class="ex-acc"><summary>看一個解法</summary><div class="acc-body">
+          <p>積分加上 $e\cdot dt$，而微分算 $(e_n - e_{n-1})/dt$。當真實間隔是 0.08 s 時把 <code>dt=0.05</code> 寫死，意味著積分累積得<strong>太少</strong>（你低估了面積，所以 I 配平水流配得太慢），而微分回報的擺動速率<strong>太高</strong>，高了 0.08/0.05 = 1.6 倍（幽靈式阻尼，而且雜訊被放大）。到 0.03 s 時錯誤就往另一個方向翻過去。修法是從訊息／時鐘時間戳量測實際間隔 — <code>dt = t - self.last_t</code> — 這樣每一項都按真實流逝的時間縮放。額外的好處是，你可以拒掉離譜的間隔（掉拍造成的 <code>dt &gt; 0.5</code>），而不是把一個垃圾微分餵進迴圈。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章重點回顧</div>
+        <p>照順序整定：把 $k_p$ 拉到臨界增益 $K_u\approx5$（週期 $T_u\approx9$ s）再折半；加上 $k_d\approx3$ 直到超調消失；加上能抹掉偏差的最小 $k_i\approx0.2$ — 落在 <strong>$k_p=2,\ k_i=0.2,\ k_d=3$</strong>。從同樣的 $K_u,T_u$ 算出的 Ziegler–Nichols 給出更熱的 $3.0 / 0.67 / 3.4$；把它當起點，往平滑的方向退調。部署到 ROS2 不會改變控制器 — 它改變的是配線：從 <code>/odometry/filtered</code> 取融合後的偏航、每一週期都纏繞、用<em>量測到的</em> dt、在軟體裡箝位。下水之前：一個硬體緊急斷電開關，以及每次重新接管都 <code>reset()</code>。這就是整門課，在一艘真實的船上。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+<script src="../../assets/pid-sim.js"></script>
+<script>EM.pidSim("sim-tune", EM.pidPresets.full());</script>
+</body>
+</html>

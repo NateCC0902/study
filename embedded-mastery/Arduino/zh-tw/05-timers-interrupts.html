@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>計時器與中斷：不靠 delay() 的即時運作 — Embedded Mastery</title>
+<link rel="stylesheet" href="../../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../../assets/styles.css">
+</head>
+<body class="track-arduino" data-course="embedded" data-track="arduino" data-chapter="05-timers-interrupts">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">Arduino · 第 05 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Arduino 學習路線 · 第 05 章 · 中階→進階</div>
+        <h1>計時器與中斷：不靠 <code>delay()</code> 的即時運作</h1>
+        <p>在第 1 章我們犯了個錯：每一次 <code>delay()</code> 都會凍結整顆 CPU，讓它對外界又盲又聾，直到整段等待結束。專業的韌體絕不會這樣阻塞。本章我們學習三條出路——<code>millis()</code> 慣用法、硬體計時器，以及中斷——再加上那個讓它們挺過 49 天溢位（rollover）的無號數運算技巧。</p>
+        <div class="meta">
+          <span>⏱ 約 50 分鐘</span><span>🧠 非阻塞</span><span>⏲ AVR 計時器</span><span>⚡ 中斷服務常式 (ISR)</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="why-delay-fails"><span class="sec-no">1</span>為什麼 <code>delay()</code> 是個陷阱</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先建立整體圖像</small></div>
+      <p>把你的韌體想像成一位沒有助手的單一工人。<code>delay(500)</code> 告訴這位工人：「完全靜止半秒鐘。」在這 500 毫秒裡，CPU 並不是以有用的方式閒置——它其實是卡在一個緊湊的計數迴圈裡，執行著數百萬條什麼都不做的指令，<em>無法做任何其他事</em>。它無法讀取按鈕，無法服務感測器，無法以不同頻率閃爍第二顆 LED。整台機器都成了這一次等待的人質。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話模型</div>
+        <p><code>delay()</code> 是<strong>阻塞式（blocking）</strong>的：它讓你<em>整個</em>程式的時間都停擺。專業韌體則是<strong>非阻塞式（non-blocking）</strong>的——它從不靜止不動；它不斷地問「時候到了嗎？」，並在空檔處理其他所有事情。</p>
+      </div>
+
+      <p>一旦你認得這個症狀，它就再明顯不過。你寫了 Blink，然後想加一顆能切換 LED 速度的按鈕——結果按鈕像沒反應一樣，只有在你剛好趁 <code>loop()</code> 不在 <code>delay()</code> 裡的那短暫瞬間按下去時才會有作用。解法不是換一顆更快的 CPU，而是一種根本不同的控制結構：停止<em>等待</em>，開始<em>輪詢時鐘（polling the clock）</em>。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——「多撒幾個 delay 就好了」</div>
+        <p>初學者試著用猜測的延遲值來交錯處理多個任務（這裡 <code>delay(7)</code>、那裡 <code>delay(13)</code>）。這永遠拼不起來：每一次阻塞式等待都會替其他每個任務增加延遲，而且只要你再加一件事，時序就會漂移。阻塞式程式無法擴展到超過一個工作。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="millis-idiom"><span class="sec-no">2</span><code>millis()</code> 慣用法：協作式非阻塞</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>看一眼時鐘，而不是盯著它</small></div>
+      <p>與其<em>睡到</em>下一個事件發生，我們<em>記住</em>上一個事件何時發生，然後在每一次經過 <code>loop()</code> 時，去問那個一直在跑的時鐘是否已經過了足夠的時間。<code>millis()</code> 以 <code>unsigned long</code>（一個 32 位元的 <code>uint32_t</code>）回傳開機以來的毫秒數，並在背景裡永遠地往上計數。我們從不等它——只是瞄它一眼。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>每一行都要讀</small></div>
+      <div class="codeblock">
+        <div class="code-head">blink_nonblocking.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t LED = LED_BUILTIN;
+const uint32_t interval = 500;      // 每次切換之間的毫秒數
+uint32_t last = 0;                  // 上一次切換的時刻
+bool ledOn = false;
+
+void setup() {
+  pinMode(LED, OUTPUT);
+}
+
+void loop() {
+  uint32_t now = millis();          // 瞄一眼時鐘——絕不阻塞
+  if (now - last &gt;= interval) {      // 已經過了 500 ms 了嗎？
+    last = now;                      // 記住「這個」時刻供下次使用
+    ledOn = !ledOn;                  // 翻轉狀態
+    digitalWrite(LED, ledOn);
+  }
+  // ...loop() 裡其他所有事情每一輪都持續執行：
+  // 讀按鈕、輪詢感測器、閃第二顆 LED 等等。
+}
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 把這個模式背起來</div>
+        <p>在你採取動作的那一刻就把 <code>last = now</code> 存起來——不要有條件地寫成 <code>last += interval</code>，也絕不要再呼叫一次 <code>last = millis()</code>（那會重新讀取時鐘而造成漂移）。每一輪讀一次 <code>now</code>、做一次比較、做一次更新。這個三行骨架就能取代你日後想用的每一個 <code>delay()</code>。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>為何溢位咬不到你</small></div>
+      <p>這就是幾乎讓所有人栽跟頭的部分。<code>millis()</code> 是一個 32 位元的無號計數器。它一路往上數到最大值，然後<strong>繞回零（wrap back to zero）</strong>：</p>
+
+      <div class="math-box">
+        $$ t_{\text{rollover}} = \frac{2^{32}\ \text{ms}}{1000\cdot 60\cdot 60\cdot 24} \approx 49.71\ \text{days} $$
+      </div>
+
+      <p>天真的擔憂是：「當 <code>now</code> 繞回到一個很小的數，而 <code>last</code> 還是個很大的數時，<code>now - last</code> 不就會變成一個巨大的負值，把我的計時器搞壞嗎？」在<em>有號（signed）</em>運算裡，是的——災難。但 <code>now</code> 和 <code>last</code> 都是 <code>uint32_t</code>，而無號減法的定義就是以 $2^{32}$ 取<strong>模（modulo）</strong>後繞回。硬體計算出的是：</p>
+
+      <div class="math-box">
+        $$ (\,\text{now} - \text{last}\,) \bmod 2^{32} \;=\; \text{true elapsed time} $$
+      </div>
+
+      <p>具體來說，假設 <span>$\text{last} = 2^{32}-100 = 4{,}294{,}967{,}196$</span>（繞回前 100 ms），而 250 ms 之後 <code>now</code> 已繞回到 <span>$150$</span>。有號的觀點給出 <span>$150 - 4{,}294{,}967{,}196 = -4{,}294{,}967{,}046$</span>——一派胡言。無號的觀點則給出：</p>
+
+      <div class="math-box">
+        $$ (150 - 4{,}294{,}967{,}196)\bmod 2^{32} = 150 + 100 = 250\ \text{ms} \;\checkmark $$
+      </div>
+
+      <p>正好是真實經過的時間。<code>now</code> 的繞回，與減法本身內建的繞回，完美地相互抵消。但這<em>只有</em>在你讓兩個運算元都保持無號、並拿<strong>差值</strong>去和間隔比較時才成立。絕不要比較 <code>now &gt;= last + interval</code>——那個加法本身就可能溢位，把臭蟲又招回來。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——錯誤的比較方式</div>
+        <p><code>if (millis() &gt;= target)</code>（其中 <code>target = last + interval</code>）是經典的壞寫法：一旦 <code>target</code> 在接近 49 天的關卡溢位，它就變成一個很小的數，於是條件會立刻並永遠地觸發。永遠寫成差值形式：<code>if (now - last &gt;= interval)</code>。它在結構上就是防溢位的。</p>
+      </div>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-roll-wrap">
+        <div class="sim-title">🔬 即時：無號溢位，以及為何減法能挺過去</div>
+        <canvas id="sim-roll"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">把 <em>now</em> 拖過繞回線。看著有號差值瘋狂地變成負值，而無號差值卻一直等於真實經過的時間。</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="scheduler"><span class="sec-no">3</span>從一個計時器到一個協作式排程器</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>多任務，單一迴圈</small></div>
+      <p>一旦每個任務都擁有自己的 <code>last</code> 和 <code>interval</code>，它們就能輕鬆共存：<code>loop()</code> 快速旋轉，而每個任務在自己的時鐘說可以時各自獨立觸發。這就是一個<strong>協作式排程器（cooperative scheduler）</strong>——沒有作業系統，只是一把共享同一個快速迴圈的 <code>if (now - last &gt;= interval)</code> 區塊。</p>
+
+      <div class="mermaid">
+flowchart TB
+    P([電源 / 重置]) --> S["setup()"]
+    S --> N["now = millis()"]
+    N --> T1{"now - lastA<br/>&ge; intervalA?"}
+    T1 -- 是 --> A["執行任務 A<br/>lastA = now"]
+    T1 -- 否 --> T2
+    A --> T2{"now - lastB<br/>&ge; intervalB?"}
+    T2 -- 是 --> B["執行任務 B<br/>lastB = now"]
+    T2 -- 否 --> N
+    B --> N
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 讓 <code>loop()</code> 保持飢餓</div>
+        <p>協作式排程器只有在 <code>loop()</code> 跑得<em>夠頻繁</em>——理想上每秒數千次——的情況下才能運作。這代表<strong>任何地方都不能阻塞</strong>：沒有 <code>delay()</code>、沒有忙等待（busy-wait）、沒有列印巨大字串的緩慢 <code>Serial.print</code>。迴圈越快，你的排程解析度就越緊密。一個漏掉的 <code>delay(1000)</code> 就會一次癱瘓所有任務。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="avr-timers"><span class="sec-no">4</span>硬體計時器：不佔用 CPU 的精準度</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>一個會自己跑的計數器</small></div>
+      <p><code>millis()</code> 慣用法很棒，但它的解析度受限於 <code>loop()</code> 旋轉的速度，而一個臃腫的迴圈會讓它抖動（jittery）。對於<em>硬性（hard）</em>時序——以精確的 8 kHz 取樣某個感測器、產生音調、驅動步進馬達——我們把這份工作交給 AVR 內建的專用<strong>計時器／計數器（timer/counter）</strong>周邊。它們在硬體中計數時鐘脈衝，完全獨立於 CPU 正在做什麼，並在精確的時刻引發中斷。</p>
+
+      <p>ATmega328P 有三個這樣的計時器。每一個其實就是一個暫存器 <code>TCNTn</code>，它在每一個脈衝時遞增並繞回：</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>計時器</th><th>位元寬</th><th>計數器</th><th>最大計數</th><th>Arduino 拿它來做</th></tr></thead>
+        <tbody>
+          <tr><td><code>Timer0</code></td><td>8 位元</td><td><code>TCNT0</code></td><td>255</td><td><code>millis()</code>、<code>delay()</code>、腳位 5/6 PWM</td></tr>
+          <tr><td><code>Timer1</code></td><td>16 位元</td><td><code>TCNT1</code></td><td>65535</td><td>腳位 9/10 PWM、<code>Servo</code></td></tr>
+          <tr><td><code>Timer2</code></td><td>8 位元</td><td><code>TCNT2</code></td><td>255</td><td>腳位 3/11 PWM、<code>tone()</code></td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——Timer0 已名花有主</div>
+        <p>重新設定 <code>Timer0</code> 會在你整個草稿碼（sketch）裡破壞 <code>millis()</code>、<code>micros()</code> 和 <code>delay()</code>。要做自訂的週期性中斷時，請伸手去拿 <strong>Timer1</strong>（16 位元，餘裕最多），別去碰 Timer0。</p>
+      </div>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>預除器——一個時鐘分頻器</small></div>
+      <p>在 16 MHz 下，一個 8 位元計時器每 <span>$256 / 16{\times}10^6 \approx 16\ \mu\text{s}$</span> 就溢位一次——對人類尺度的事件來說實在太快了。<strong>預除器（prescaler）</strong>在系統時鐘<em>抵達</em>計數器<em>之前</em>先把它分頻：當預除器為 256 時，計時器每 256 個系統週期才跳動一次。AVR 提供一份固定的除數選單——<code>1, 8, 64, 256, 1024</code>——由 <code>TCCRnB</code> 暫存器裡的 <code>CSn2:0</code> 時鐘選擇位元來挑選。</p>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>CTC 模式——比對符合時清除計時器</small></div>
+      <p>取得<em>精確週期</em>的訣竅是 <strong>CTC 模式</strong>（Clear Timer on Compare Match，比對符合時清除計時器）。你把一個目標值載入比對暫存器 <code>OCRnA</code>。計時器從 <span>$0,1,2,\dots$</span> 一路數到 <code>OCRnA</code>，引發一個中斷，然後<em>自動歸零</em>並重新開始。沒有軟體重置，沒有漂移——一個矽晶片裡的完美節拍器。</p>
+
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> 計數中
+    計數中 --> 計數中 : 跳動 (TCNT1++)
+    計數中 --> 符合 : TCNT1 == OCR1A
+    符合 --> ISR : 引發 COMPA 中斷
+    ISR --> 重置 : TCNT1 = 0 (自動)
+    重置 --> 計數中 : 繼續
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="timer-math"><span class="sec-no">5</span>計時器數學：為任意頻率挑選 <code>OCRnA</code></h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>把它推導出來</small></div>
+      <p>在 CTC 模式中，計時器從 0 數到 <code>OCRnA</code> 然後重置——這是每個週期 <span>$(\text{OCRnA}+1)$</span> 個跳動（這個 <span>$+1$</span> 是因為它有一個跳動是花<em>在</em> 0 這一格）。每個跳動持續一個經過預除的時鐘週期。所以中斷頻率為：</p>
+
+      <div class="math-box">
+        $$ f_{\text{int}} = \frac{f_{\text{clk}}}{N \,\bigl(1 + \text{OCRnA}\bigr)} $$
+      </div>
+
+      <p>其中 <span>$f_{\text{clk}} = 16\ \text{MHz}$</span>，而 <span>$N$</span> 是預除器（1、8、64、256、1024 之一）。把它反過來解出你必須載入的暫存器值：</p>
+
+      <div class="math-box">
+        $$ \text{OCRnA} = \frac{f_{\text{clk}}}{N\, f_{\text{int}}} - 1 $$
+      </div>
+
+      <p><strong>實作範例。</strong>我們想要在 Timer1 上得到一個乾淨的 <span>$1\ \text{Hz}$</span> 中斷——每秒一次跳動——使用預除器 <span>$N = 256$</span>：</p>
+
+      <div class="math-box">
+        $$ \text{OCR1A} = \frac{16\times10^6}{256 \times 1} - 1 = 62500 - 1 = 62499 $$
+      </div>
+
+      <p>檢驗一下結果：<span>$62499 \le 65535$</span>，所以它放得進 16 位元的 <code>OCR1A</code> 暫存器。（在 8 位元的 Timer0 或 Timer2 上就放不下了——<span>$62499 \gg 255$</span>——這正是我們選 16 位元 Timer1 的原因。）把它代回正向公式，你會精準地還原出 <span>$16{\times}10^6 / (256 \times 62500) = 1\ \text{Hz}$</span>。挑選預除器是門藝術：選那個能讓所得 <code>OCRnA</code> 仍放得進暫存器的最小 <span>$N$</span>，因為較小的 <span>$N$</span> 帶來較細的時序解析度。</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 解析度檢驗</div>
+        <p>在 16 MHz 下使用 <span>$N = 256$</span>，每個跳動是 <span>$256/16{\times}10^6 = 16\ \mu\text{s}$</span>。所以 <code>OCR1A</code> 是以 16 µs 為單位量化的——你可以精準打中 1 Hz、2 Hz、4 Hz，但一個古怪的頻率會被湊到最接近的 16 µs。需要更細？降到 <span>$N = 64$</span>（4 µs 為單位）再重新求解——只要新的 <code>OCR1A</code> 仍然放得進 65535。</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>親手設定 Timer1</small></div>
+      <div class="codeblock">
+        <div class="code-head">timer1_ctc.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t LED = LED_BUILTIN;
+
+void setup() {
+  pinMode(LED, OUTPUT);
+
+  noInterrupts();           // 設定期間先關閉中斷
+  TCCR1A = 0;               // 清除控制暫存器 A（無 PWM，一般埠操作）
+  TCCR1B = 0;               // 清除控制暫存器 B
+  TCNT1  = 0;               // 把計數器重置為 0
+
+  OCR1A = 62499;            // 比對目標：16e6/(256*1) - 1  → 1 Hz
+  TCCR1B |= (1 &lt;&lt; WGM12);   // WGM12 = 1 選擇 CTC 模式（頂值 = OCR1A）
+  TCCR1B |= (1 &lt;&lt; CS12);    // CS12 = 1 選擇預除器 = 256
+  TIMSK1 |= (1 &lt;&lt; OCIE1A);  // 啟用 Timer1 比對 A 符合中斷
+  interrupts();             // 全域重新啟用中斷
+}
+
+// 這會以精確的 1 Hz 自動執行——不輪詢，不延遲。
+ISR(TIMER1_COMPA_vect) {
+  digitalWrite(LED, !digitalRead(LED));   // 翻轉 LED
+}
+
+void loop() {
+  // 完全空閒。1 Hz 的閃爍在背景發生。
+  // 把你真正的工作放在這裡；它永遠不會阻塞計時器。
+}
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 為什麼是 <code>(1 &lt;&lt; BITNAME)</code></div>
+        <p>像 <code>WGM12</code>、<code>CS12</code>、<code>OCIE1A</code> 這些常數只是定義在 AVR 標頭檔裡的<em>位元位置</em>（0–7 的數字）。<code>(1 &lt;&lt; CS12)</code> 建立一個只設定該位元的遮罩；<code>|=</code> 把它 OR 進暫存器，在不擾動其他位元的情況下把那一位翻成 1。這是去戳單一硬體位元的通用慣用法——你在第 2 章看過它，而且你會永遠用到它。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="interrupts"><span class="sec-no">6</span>硬體中斷：零延遲的反應</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>硬體拍你的肩膀</small></div>
+      <p>計時器中斷在<em>時鐘</em>事件上觸發。<strong>外部中斷（external interrupt）</strong>則在<em>腳位</em>事件上觸發——一個上升或下降邊緣——而且不論你的程式正在做什麼，它都在幾個時鐘週期內就觸發。CPU 放下一切，跳進你的<strong>中斷服務常式（Interrupt Service Routine，ISR）</strong>，執行它，然後從原本停下的地方精準地繼續。這就是你如何以幾乎零延遲去捕捉一個快速事件——編碼器邊緣、感測器脈衝、按鈕——而不是期盼 <code>loop()</code> 剛好在對的微秒去輪詢。</p>
+
+      <div class="mermaid">
+sequenceDiagram
+    participant W as 外部接線（邊緣）
+    participant H as AVR 硬體
+    participant M as loop() / 主程式
+    participant I as ISR
+    M->>M: 正常執行中
+    W->>H: INT0 腳位上的上升邊緣
+    H->>M: 完成目前指令
+    H->>I: 向量跳到 ISR（推入內容）
+    I->>I: 做最低限度的事
+    I->>M: 返回（彈出內容）
+    M->>M: 從暫停處精準繼續
+</div>
+
+      <p>在 Uno 上，只有腳位 <strong>2 和 3</strong> 是真正的外部中斷線（<code>INT0</code>、<code>INT1</code>）。你用 Arduino API 來掛上一個 ISR：</p>
+
+      <div class="codeblock">
+        <div class="code-head">encoder_edge.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t ENC_A = 2;          // 編碼器 A 通道 → INT0
+volatile int32_t pulses = 0;      // 與 ISR 共用 → 必須是 volatile
+
+void setup() {
+  pinMode(ENC_A, INPUT_PULLUP);
+  // 在腳位 2 的每個上升（RISING）邊緣呼叫 countPulse()：
+  attachInterrupt(digitalPinToInterrupt(ENC_A), countPulse, RISING);
+  Serial.begin(115200);
+}
+
+// ISR：保持微小。不用 delay()、不用 Serial、不用 malloc。
+void countPulse() {
+  pulses++;                       // 只記下事件然後離開
+}
+
+void loop() {
+  // 安全地讀取共用變數：關中斷後快照（snapshot）它。
+  noInterrupts();
+  int32_t snapshot = pulses;
+  interrupts();
+  Serial.println(snapshot);       // 緩慢的工作發生在「這裡」，不在 ISR 裡
+}
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> ISR 的三條誡命</div>
+        <p><strong>1. 保持微小。</strong>ISR 會從其他所有事情那裡奪走 CPU——設一個旗標、加一下計數器，然後馬上離開。<br>
+        <strong>2. 不要 <code>delay()</code>、<code>Serial</code> 或任何會阻塞的東西。</strong><code>millis()</code> 在 ISR 裡甚至不會前進（它的計時器中斷被遮蔽了），而 <code>Serial</code> 依賴現在已被關閉的中斷——死鎖（deadlock）。<br>
+        <strong>3. 每個與 ISR 共用的變數都必須是 <code>volatile</code>。</strong></p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>為何 <code>volatile</code> 沒得商量</small></div>
+      <p><code>volatile</code> 告訴編譯器：「這個變數可能在你背後改變——每一次都要從記憶體重新讀取它，絕不要把它快取進暫存器或把存取最佳化掉。」少了它，最佳化器會假設 <code>loop()</code> 是唯一的寫入者。它可能把 <code>pulses</code> 提升（hoist）進一個 CPU 暫存器一次，然後永遠在那份過時的副本上打轉，從不看見 ISR 的更新。你的程式照樣編譯、照樣執行，然後悄無聲息地說謊。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——撕裂的讀取（torn read）</div>
+        <p>在 8 位元的 AVR 上，一個 32 位元的 <code>int32_t</code> 是以<em>四</em>個各自獨立的位元組操作來讀取的。如果 ISR 剛好<em>在</em>這些位元組<em>之間</em>觸發，你就會讀到一半的舊值加一半的新值——一次「撕裂的」讀取。這就是為什麼上面的快照用 <code>noInterrupts()/interrupts()</code> 把讀取包起來：它讓這個多位元組讀取變成<strong>原子的（atomic）</strong>。對單一個 <code>uint8_t</code> 旗標來說不需要這麼做；但對任何寬於 CPU 字長的東西來說，這是強制必要的。</p>
+      </div>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>腳位變化中斷 vs 外部中斷</small></div>
+      <p>兩個腳位往往不夠用。<strong>腳位變化中斷（Pin-change interrupts，PCINT）</strong>是替代方案：<em>幾乎每個</em>腳位都能引發一個，但它們較粗糙——一個共用的 ISR 會為整個<em>埠（port）</em>在<em>任何</em>邊緣（上升<em>或</em>下降）時觸發，而你的處理常式必須自己搞清楚是哪個腳位動了、往哪個方向動。能用外部中斷（腳位 2/3）時就用它——它們精確、按腳位區分、且可選擇邊緣。當你需要監看的腳位多到 INT0/INT1 涵蓋不了時，再退而求其次用腳位變化中斷。</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th></th><th>外部（INT0/INT1）</th><th>腳位變化（PCINT）</th></tr></thead>
+        <tbody>
+          <tr><td>腳位（Uno）</td><td>只有 2 和 3</td><td>幾乎全部 20 個</td></tr>
+          <tr><td>觸發</td><td>LOW / CHANGE / RISING / FALLING</td><td>只有任何 CHANGE</td></tr>
+          <tr><td>ISR 粒度</td><td>每腳位一個 ISR</td><td>每 8 腳位的埠一個 ISR</td></tr>
+          <tr><td>Arduino API</td><td><code>attachInterrupt()</code></td><td>暫存器層級（或一個函式庫）</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="real-case"><span class="sec-no">7</span>實際案例：確定性取樣與編碼器</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>這些都出貨在產品裡</small></div>
+      <p>本章的兩個模式在真實硬體裡無所不在，而且它們恰好對應到你剛認識的兩個中斷來源。</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 實際案例——精準的週期性取樣</div>
+        <p>一個數位音訊或振動感測器必須以<em>穩如磐石</em>的速率讀取，比方說 8 kHz，否則下游的 FFT 會糊掉。從 <code>loop()</code> 用 <code>millis()</code> 去讀它會抖動——有時迴圈正在忙。產品級的答案是一個設定為 8 kHz 的 <strong>Timer1 CTC 中斷</strong>：在 ISR 裡你讀一個 ADC 樣本進環形緩衝區（ring buffer）然後返回。取樣的瞬間現在是由石英振盪器定義，而不是靠軟體運氣。用預除器 8 設定 <span>$\text{OCR1A} = 16{\times}10^6/(8 \times 8000) - 1 = 249$</span>——正是 §5 的數學。</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 實際案例——零延遲的編碼器邊緣</div>
+        <p>一個馬達的正交編碼器發出脈衝的速度，比任何輪詢迴圈在高速時所能可靠捕捉的還快——漏掉一個邊緣，你的位置估測就會永遠漂移下去。把 A 通道接到一個<strong>外部中斷</strong>，代表每一個邊緣在它抵達的瞬間就讓計數遞增，不論 <code>loop()</code> 正在做什麼。這就是機器人輪子、CNC 軸與 3D 印表機如何精確知道自己在哪裡。ISR 只做一件事——<code>pulses++</code>——而沉重的控制數學稍後在 <code>loop()</code> 裡執行，去讀取那個 volatile 的快照。</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 分工</div>
+        <p>這個反覆出現的架構是：<strong>中斷負責捕捉，<code>loop()</code> 負責處理。</strong>ISR 在事件發生的精確時刻做不可再簡化的最低限度工作；而緩慢、複雜、能容忍阻塞的工作則回到非阻塞的主迴圈裡進行。掌握這個切分，你就能打造出既即時又有反應的韌體——這正是 <code>delay()</code> 永遠給不了你的東西。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>⑤ 換你上場</h2>
+      <div class="layer"><span class="step">⑤</span> 練習 <small>你來寫，你來決定</small></div>
+      <p>三道檢驗。點一個答案、輸入一個數字，或揭開一道程式挑戰。你的進度會儲存在這台裝置上，並顯示在首頁。</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="ard05-volatile-isr">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢驗</div>
+        <div class="ex-q">一個 ISR 遞增一個全域的 <code>int32_t pulses;</code>，而 <code>loop()</code> 讀取它。下列其中兩項是<em>錯</em>的。哪一行建議是<strong>正確</strong>的？</div>
+        <ul class="ex-options">
+          <li data-correct="false">在 ISR 裡呼叫 <code>Serial.println(pulses)</code>，這樣你就能看到每一個脈衝。</li>
+          <li data-correct="false">把 <code>pulses</code> 留成一個普通的 <code>int32_t</code>——編譯器總是會重新讀取全域變數。</li>
+          <li data-correct="true">把 <code>pulses</code> 宣告為 <code>volatile</code>，並在 <code>loop()</code> 裡使用它之前，於關閉中斷的狀態下快照它。</li>
+          <li data-correct="false">在 ISR 裡加一個 <code>delay(1)</code> 來為邊緣去彈跳（debounce）。</li>
+        </ul>
+        <div class="ex-explain">ISR 必須保持微小——<strong>不要 <code>Serial</code></strong>（它需要被遮蔽掉的中斷）以及<strong>不要 <code>delay()</code></strong>（<code>millis()</code> 被凍結，所以會卡住）。一個共用變數必須是 <code>volatile</code>，否則最佳化器可能快取一份過時的副本。而且因為在 8 位元的 AVR 上一個 32 位元值是以四次位元組操作讀取的，你要用 <code>noInterrupts()/interrupts()</code> 把讀取包起來，以避免撕裂的讀取。</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="ard05-ctc-ocr" data-answer="62499" data-tol="2">
+        <div class="ex-head"><span class="badge">Q2</span> 算出來</div>
+        <div class="ex-q">你把 <strong>Timer1</strong> 設定成 CTC 模式，<span>$f_{\text{clk}} = 16\ \text{MHz}$</span>、預除器 <span>$N = 256$</span>，想要一個 <strong>1 Hz</strong> 的中斷。<code>OCR1A</code> 裡要填什麼值？（使用 $\text{OCR1A} = \frac{f_{\text{clk}}}{N\,f_{\text{int}}} - 1$。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="OCR1A"><span class="ex-unit">計數</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$\text{OCR1A} = \dfrac{16\times10^6}{256 \times 1} - 1 = 62500 - 1 = 62499$。它放得進 16 位元暫存器（最大 65535）——這正是為何這需要 Timer1 而不是 8 位元的 Timer0/Timer2（最大 255）。代回去：$16{\times}10^6/(256\times62500) = 1\ \text{Hz}$。✓</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="ard05-two-leds">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰——兩顆 LED、兩種頻率、不用 <code>delay()</code></div>
+        <div class="ex-q">讓腳位 8 上的 LED A 以 <strong>2 Hz</strong>（每 250 ms 切換一次）閃爍、腳位 9 上的 LED B 以 <strong>5 Hz</strong>（每 100 ms 切換一次）<em>同時</em>閃爍，只用 <code>millis()</code> 慣用法——<strong>任何地方都不用 <code>delay()</code></strong>。這兩個閃爍必須完全獨立運行。</div>
+        <details class="ex-acc">
+          <summary>提示</summary>
+          <div class="acc-body">給每顆 LED 自己的 <code>last</code> 時間戳和自己的 <code>interval</code>。每一輪讀<em>一次</em> <code>now = millis()</code>，然後執行兩個獨立的 <code>if (now - lastX &gt;= intervalX)</code> 區塊。切換的寫法是 <code>state = !state; digitalWrite(pin, state);</code>。</div>
+        </details>
+        <details class="ex-acc">
+          <summary>顯示一個解答</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">two_leds.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t LED_A = 8, LED_B = 9;
+const uint32_t intervalA = 250;   // 2 Hz  → 每 250 ms 切換一次
+const uint32_t intervalB = 100;   // 5 Hz  → 每 100 ms 切換一次
+uint32_t lastA = 0, lastB = 0;
+bool stateA = false, stateB = false;
+
+void setup() {
+  pinMode(LED_A, OUTPUT);
+  pinMode(LED_B, OUTPUT);
+}
+
+void loop() {
+  uint32_t now = millis();        // 每一輪讀一次時鐘
+
+  if (now - lastA &gt;= intervalA) {  // LED A：獨立計時器
+    lastA = now;
+    stateA = !stateA;
+    digitalWrite(LED_A, stateA);
+  }
+
+  if (now - lastB &gt;= intervalB) {  // LED B：獨立計時器
+    lastB = now;
+    stateB = !stateB;
+    digitalWrite(LED_B, stateB);
+  }
+  // loop() 永不阻塞 → 兩顆 LED 各自保持自己的節奏，
+  // 而且這裡還有空間去讀按鈕或感測器。
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">這一課的重點：每個任務擁有自己的 <code>last</code> + <code>interval</code>，而 <code>loop()</code> 保持非阻塞。這就是 §3 那個協作式排程器的迷你版——再加上第三顆 LED、一個按鈕、一個感測器，它們全都能共存，因為沒有任何東西曾經靜止不動。試試用 <code>delay()</code> 來做，看著那兩種頻率相撞。</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> 本章回顧</div>
+        <p>你用三種方法逃離了 <code>delay()</code>。你能寫出防溢位的 <code>now - last &gt;= interval</code> 慣用法，並解釋<em>為何</em>無號減法能挺過 49.71 天的繞回。你能把 AVR 計時器設定成 CTC 模式——挑選預除器並求解 <span>$\text{OCRnA} = f_{\text{clk}}/(N f_{\text{int}}) - 1$</span>（Timer1 上 1 Hz 為 62499）——而且你知道 Timer0 是禁區。你能掛上一個外部中斷、讓它的 ISR 保持微小、把共用狀態標為 <code>volatile</code>，並原子地快照寬值。要記住的架構是：<strong>中斷負責捕捉，<code>loop()</code> 負責處理</strong>。下一章我們讓這些計時器派上用場，用 PWM 產生帶有類比感的輸出。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="回到頂端">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../../../assets/vendor/highlight.min.js"></script>
+<script src="../../../assets/katex/katex.min.js"></script>
+<script src="../../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../../assets/vendor/mermaid.min.js"></script>
+<script src="../../../assets/app.js"></script>
+
+<!-- chapter-specific simulator -->
+<script>
+EM.sim("sim-roll", {
+  height: 240,
+  params: [
+    { key: "now", label: "now（繞回後經過的 ms）", min: 0,  max: 400, step: 10, value: 150, unit: "ms" },
+    { key: "gap", label: "真實經過時間",            min: 50, max: 400, step: 10, value: 250, unit: "ms" }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h, pad = 44 * dpr;
+    var MOD = 4294967296;                       // 2^32
+    // 'last' 被放在繞回線前 'gap' ms 處；'now' 在它之後。
+    var last = (MOD - (v.gap - v.now));         // 就在繞回之前
+    if (v.now >= v.gap) last = (v.now - v.gap); // （邊界）無繞回情況
+    var nowVal = v.now;                         // 已繞回到很小的值
+
+    var signed   = nowVal - last;               // 看起來巨大地為負
+    var unsigned = ((nowVal - last) % MOD + MOD) % MOD; // 真實經過時間
+
+    // ---- 畫一條帶有繞回點的數線 ----
+    var y = H / 2;
+    var x0 = pad, x1 = W - 20 * dpr;
+    ctx.strokeStyle = "#262d3a"; ctx.lineWidth = 1.5 * dpr;
+    ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
+
+    // 繞回標記（2^32 → 0）
+    var xw = (x0 + x1) / 2;
+    ctx.strokeStyle = "#e05263"; ctx.setLineDash([4 * dpr, 4 * dpr]);
+    ctx.beginPath(); ctx.moveTo(xw, pad * 0.5); ctx.lineTo(xw, H - pad * 0.5); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#e05263"; ctx.font = (12 * dpr) + "px monospace";
+    ctx.fillText("2^32 → 0  (wrap)", xw + 6 * dpr, pad * 0.6 + 10 * dpr);
+
+    // 'last' 點（繞回左側），'now' 點（繞回右側）
+    var span = 30 * dpr;
+    var xLast = xw - (v.gap - v.now) * (span / 100);
+    var xNow  = xw + v.now * (span / 100);
+    ctx.fillStyle = "#f0a202";
+    ctx.beginPath(); ctx.arc(xLast, y, 6 * dpr, 0, 7); ctx.fill();
+    ctx.fillText("last", xLast - 12 * dpr, y - 14 * dpr);
+    ctx.fillStyle = "#2ec4b6";
+    ctx.beginPath(); ctx.arc(xNow, y, 6 * dpr, 0, 7); ctx.fill();
+    ctx.fillText("now", xNow - 8 * dpr, y - 14 * dpr);
+
+    return "有號 <b>now - last</b> = <span style='color:#e05263'>" +
+           signed.toLocaleString() + "</span>（壞掉）&nbsp;·&nbsp; " +
+           "無號 mod 2³² = <span style='color:#2ec4b6'>" + unsigned +
+           " ms</span> = 真實經過時間 ✓";
+  }
+});
+</script>
+</body>
+</html>

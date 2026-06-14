@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>DMA 深入剖析：通道、循環模式與雙緩衝 — Embedded Mastery</title>
+<link rel="stylesheet" href="../../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../../assets/styles.css">
+</head>
+<body class="track-stm32" data-course="embedded" data-track="stm32" data-chapter="08-dma">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">STM32 · 第 08 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">STM32 學習軌道 · 第 08 章 · 進階→大師</div>
+        <h1>DMA 深入剖析：通道、循環模式與雙緩衝</h1>
+        <p>DMA 是 STM32 不再只是「跑得比較快的 Arduino」、而開始像是另一個<em>等級</em>機器的關鍵時刻。一具獨立的引擎在週邊與記憶體之間搬運位元組，而 CPU 此時正在運算——或在睡眠。精通它，你就能解鎖無縫銜接的音訊、megabaud 等級的紀錄輸出，以及永不閃爍的 LED 燈條。我們會從匯流排往上建立模型、做吞吐量的數學運算，然後實際接出一個循環 DMA 的 ADC 擷取。</p>
+        <div class="meta">
+          <span>⏱ 約 50 分鐘</span><span>🧠 匯流排仲裁</span><span>⚡ 循環與雙緩衝</span><span>🔧 ADC · UART · SPI</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="what-is-dma"><span class="sec-no">1</span>DMA <em>究竟</em>是什麼？</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先建立整體畫面</small></div>
+      <p>沒有 DMA 時，週邊與記憶體之間搬移的每一個位元組都要<em>經過 CPU</em>。ADC 完成一次轉換、拉起一個旗標、CPU 醒來、把 <code>ADC1-&gt;DR</code> 讀進暫存器、再把暫存器寫進 RAM 陣列、把指標遞增、檢查計數器、迴圈。光是一個 16 位元樣本就是十幾條指令。在每秒一百萬次取樣（1 mega-sample）的速率下，CPU <em>除了</em>搬運位元組之外什麼都不做——根本沒有剩餘的週期可以真正拿來運算。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話模型</div>
+        <p><strong>DMA（Direct Memory Access，直接記憶體存取）是第二個資料搬運者</strong>——它是匯流排上一具小巧的專用引擎，在週邊與記憶體之間複製位元組，而且<em>完全不需要 CPU 碰到任何一個位元組</em>。你只需要程式化設定一次「從這裡、到那裡、搬多少個、每個多寬」，它就會在背景執行，而核心則去運算或睡眠。</p>
+      </div>
+
+      <p>DMA 控制器是一個匯流排主控（bus master），就跟 CPU 一模一樣。它向 AHB/APB 匯流排仲裁取得使用權、執行讀取與寫入、遞增位址、遞減計數器，而且只在真正值得通知你的時候才拉起中斷——通常是「緩衝區半滿」或「緩衝區滿」，而不是「一個位元組到了」。這種從<em>每位元組</em>的 CPU 工作量壓縮成<em>每緩衝區</em>的工作量，正是 DMA 的全部重點所在。</p>
+
+      <div class="mermaid">
+flowchart LR
+    subgraph SOC["STM32 — 晶片內匯流排"]
+        CPU["Cortex-M4 核心<br/>（空出來去運算／睡眠）"]
+        DMA["DMA 控制器<br/>（匯流排主控）"]
+        MEM["SRAM<br/>（你的緩衝區）"]
+        PER["週邊<br/>ADC · UART · SPI"]
+    end
+    PER -- "請求線" --> DMA
+    DMA -- "讀取 DR" --> PER
+    DMA -- "寫入並遞增" --> MEM
+    DMA -. "半滿／全滿 IRQ" .-> CPU
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 關鍵區別</div>
+        <p>輪詢（polling）與中斷（interrupt）兩者的成本都是<strong>每筆資料項目耗費的 CPU 時間</strong>。DMA 的成本則是<strong>每個傳輸區塊</strong>耗費的 CPU 時間。週邊的「資料就緒」訊號會直接以硬體<em>請求</em>送進 DMA 引擎——核心從頭到尾都不在這個迴圈裡。這就是為什麼 DMA 的吞吐量受限於<em>匯流排</em>，而不是受限於你的中斷延遲。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="controller-architecture"><span class="sec-no">2</span>控制器架構：串流（stream）、通道（channel）與請求對應</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>矽晶片是怎麼接線的</small></div>
+      <p>硬體會因系列而異，而這套術語每個人總會被絆倒一次。在 <strong>STM32F4</strong>（Cortex-M4）上有<strong>兩個 DMA 控制器</strong>，<strong>DMA1</strong> 與 <strong>DMA2</strong>。每個控制器有 <strong>8 個串流（stream）</strong>。每個串流可以連接到 <strong>8 個通道（channel）其中之一</strong>，而通道則選擇<em>哪一個週邊</em>來驅動該串流的請求線。所以串流是實體的傳輸引擎；通道則是一個多工器，用來選擇它的觸發來源。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 命名陷阱（F4 vs F1）</div>
+        <p>在 <strong>F4</strong> 上：<em>串流</em>是引擎，而你挑選一個<em>通道</em>（0–7）把週邊請求繞接到它上面。在較舊的 <strong>STM32F1</strong>（Cortex-M3）上則沒有串流——DMA1 有 <strong>7 個通道</strong>、DMA2 有 5 個，而且每個通道<em>本身就是</em>引擎，且週邊對應是固定的。同樣的概念，不同的用詞。當教學文件說「DMA channel」時，要先確認它指的是哪個系列。</p>
+      </div>
+
+      <p>請求對應在矽晶片中是固定的，並以表格形式印在參考手冊裡。你不能把任意週邊接到任意串流——舉例來說，在 F4 上，<strong>ADC1 是 DMA2、Stream 0、Channel 0</strong>（也可以用 Stream 4、Channel 0）。<strong>SPI1_TX</strong> 是 DMA2、Stream 3、Channel 3。挑錯了串流／通道組合，週邊的請求就根本到不了引擎，於是什麼都不會動。這就是最常見的「我的 DMA 完全沒反應」這個 bug。</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>週邊請求（F4）</th><th>控制器</th><th>串流（Stream）</th><th>通道（Channel）</th></tr></thead>
+        <tbody>
+          <tr><td><code>ADC1</code></td><td>DMA2</td><td>0（或 4）</td><td>0</td></tr>
+          <tr><td><code>SPI1_TX</code></td><td>DMA2</td><td>3（或 5）</td><td>3</td></tr>
+          <tr><td><code>USART2_TX</code></td><td>DMA1</td><td>6</td><td>4</td></tr>
+          <tr><td><code>USART2_RX</code></td><td>DMA1</td><td>5</td><td>4</td></tr>
+          <tr><td><code>DAC1</code></td><td>DMA1</td><td>5</td><td>7</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——串流衝突</div>
+        <p>兩個共用同一<em>串流</em>的週邊不能同時跑 DMA，就算它們用的是不同的通道也不行——因為每個串流只有一具引擎。如果你需要 ADC1 <em>和</em> SPI1_TX 都跑在 DMA2 上，就選用它們的<em>替代</em>串流對應，讓它們落在不同的串流上。在敲定接腳／週邊規劃之前，務必先對照請求表交叉檢查。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="transfer-parameters"><span class="sec-no">3</span>一次傳輸的解剖：六個參數</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>你實際上要設定什麼</small></div>
+      <p>每一次 DMA 傳輸都由一小組參數定義。把這些設對，引擎就會完全照你的意思做；設錯一個，你就會破壞 RAM 或讀到垃圾資料。這裡是整套詞彙：</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>參數</th><th>暫存器欄位</th><th>意義</th></tr></thead>
+        <tbody>
+          <tr><td><strong>方向（Direction）</strong></td><td><code>DMA_SxCR.DIR</code></td><td>週邊→記憶體、記憶體→週邊，或記憶體→記憶體</td></tr>
+          <tr><td><strong>週邊位址</strong></td><td><code>DMA_SxPAR</code></td><td>來源／目的週邊資料暫存器，例如 <code>&amp;ADC1-&gt;DR</code></td></tr>
+          <tr><td><strong>記憶體位址</strong></td><td><code>DMA_SxM0AR</code></td><td>你的 RAM 緩衝區基底指標</td></tr>
+          <tr><td><strong>資料寬度</strong></td><td><code>PSIZE</code> / <code>MSIZE</code></td><td>每一側的位元組（8）、半字（16）或字（32）</td></tr>
+          <tr><td><strong>遞增（Increment）</strong></td><td><code>PINC</code> / <code>MINC</code></td><td>每搬一項後遞進位址——通常是週邊固定、記憶體遞增</td></tr>
+          <tr><td><strong>計數（Count）</strong></td><td><code>DMA_SxNDTR</code></td><td>要搬移的<em>資料項目</em>數量（不是位元組數）</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——NDTR 算的是項目，不是位元組</div>
+        <p><code>NDTR</code> 是<em>傳輸</em>的數量，以來源寬度為單位。如果 <code>PSIZE</code> = 半字、而你想擷取 1024 個 ADC 樣本，請設 <code>NDTR = 1024</code>，<em>不是</em> 2048。引擎會搬移 <code>NDTR</code> 個項目然後停止（normal 模式）或重新載入（circular 模式）。這裡差了兩倍是經典的緩衝區溢位錯誤。</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 遞增才是魔法所在</div>
+        <p>週邊資料暫存器位於單一固定位址——也就是它的 <code>DR</code>——所以 <code>PINC = 0</code>。你的 RAM 緩衝區是一個陣列，所以 <code>MINC = 1</code>，引擎就會自動走訪 <code>buf[0]</code>、<code>buf[1]</code>、<code>buf[2]</code> …。這個單一的不對稱性——週邊固定、記憶體遞增——正是把一連串 <code>DR</code> 讀取轉化成一個被填滿的陣列、而且 CPU 完全不費力的關鍵。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="normal-vs-circular"><span class="sec-no">4</span>Normal 模式 vs Circular 模式</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>一次性 vs 永遠跑</small></div>
+      <p>在 <strong>normal 模式</strong>下，引擎搬移 <code>NDTR</code> 個項目、拉起「傳輸完成（transfer-complete）」中斷，然後<em>停止</em>。要再跑一次，你必須重新武裝它：清除旗標、重新載入 <code>NDTR</code>、再次啟用串流。這對一次性的區塊讀取沒問題；但對連續串流就毫無用處，因為你重新武裝的這段空檔意味著樣本會被丟掉。</p>
+
+      <p>在 <strong>circular 模式</strong>（設定 <code>DMA_SxCR.CIRC = 1</code>）下，當計數器歸零時，硬體會<em>自動重新載入</em> <code>NDTR</code> 與記憶體指標回到起點，並繼續跑下去。緩衝區變成一個環（ring）：ADC 寫入 <code>buf[0..N-1]</code>、繞回 <code>buf[0]</code>，永遠如此，完全不需要 CPU 介入。這就是 ADC 或音訊編解碼器能無限期串流的方式。</p>
+
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> Running
+    Running --> Half: NDTR 越過 N/2<br/>（HT 中斷）
+    Half --> Running
+    Running --> Reload: NDTR == 0<br/>（TC 中斷）
+    Reload --> Running: CIRC=1<br/>自動重載 NDTR 與指標
+    Running --> Stopped: NDTR == 0<br/>CIRC=0（normal）
+    Stopped --> [*]
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 何時該動用 circular 模式</div>
+        <p>只要資料是以固定速率<strong>連續且無限期</strong>地抵達，就用 circular 模式——ADC 取樣、I²S／音訊、週期性 DAC 波形輸出、連續 UART 接收。對於<strong>有限、按需</strong>的傳輸則用 normal 模式——從快閃晶片讀取 256 個位元組、送出一個遙測封包。準則就是：連續串流→circular；有界限的工作→normal。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="double-buffering"><span class="sec-no">5</span>雙緩衝與半傳輸技巧</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>填一個、處理另一個</small></div>
+      <p>circular 模式解決了「永不停止」，但它製造出一個新的隱患：如果引擎正在寫入的緩衝區，正是你正在讀取的那一個，你就會遇到<strong>競爭（race）</strong>——一半是新資料、一半是舊資料。修正的方法是在時間上把工作切開，讓生產者（DMA）與消費者（CPU）永遠不會同時碰到同一塊區域。</p>
+
+      <p>最省成本的版本利用單一 circular 緩衝區的<strong>半傳輸（HT，half-transfer）</strong>與<strong>傳輸完成（TC，transfer-complete）</strong>中斷。當引擎越過中點時 HT 中斷觸發，意思是<em>前半部</em>已滿、可以安全處理，而引擎正在填後半部。當繞回時 TC 中斷觸發，意思是<em>後半部</em>已滿，引擎現在正在重新填前半部。你永遠處理引擎<em>沒在</em>寫入的那一半。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 乒乓（ping-pong）的畫面</div>
+        <p>想像水龍頭下面有兩個水桶，水龍頭輪流去裝。當 A 桶在裝水時，你去倒 B 桶；A 一裝滿的瞬間，水龍頭就擺向 B，而你去倒 A。沒有人會去伸手進當下正在水龍頭底下的那個桶。<strong>無縫銜接（gapless）</strong>——水龍頭永遠不必停。STM32 甚至提供真正的<em>雙緩衝模式</em>（<code>DMA_SxCR.DBM = 1</code>），有兩個不同的位址 <code>M0AR</code> 與 <code>M1AR</code>，引擎會自動切換它們，並透過 <code>CT</code>（current target，當前目標）位元回報。</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    PER["ADC 串流"] --> ENG{{DMA 引擎}}
+    ENG -->|"填半部 A"| A["buf[0 .. N/2-1]"]
+    ENG -->|"填半部 B"| B["buf[N/2 .. N-1]"]
+    A -. "HT IRQ → CPU 處理 A" .-> CPU["Cortex-M4"]
+    B -. "TC IRQ → CPU 處理 B" .-> CPU
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——跟不上速度</div>
+        <p>雙緩衝只有在你<em>趕在</em>引擎填滿另一半之前處理完一半時才有效。如果你的處理常式跑得比半緩衝填滿的時間還久，引擎就會超前繞過你、覆寫掉尚未處理的資料——這是一種無聲的<strong>溢位（overrun）</strong>。修正方法是用更大的緩衝區（每一半有更多時間）或更快的處理常式。我們會在下一節計算這個填充時間的預算。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="throughput-math"><span class="sec-no">6</span>吞吐量數學：bytes/s 與緩衝區填滿時間</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>數字是怎麼來的</small></div>
+      <p>調整 DMA 緩衝區大小是純算術，而算對與否決定了你得到的是無縫串流、還是莫名其妙的喀嗒聲。一個串流產生的原始資料速率是三個東西的乘積——多頻繁、多少並行通道、以及每個樣本多寬：</p>
+
+      <div class="math-box">
+        $$ R = f_s \cdot N_{ch} \cdot W \quad\left[\tfrac{\text{bytes}}{\text{s}}\right] $$
+      </div>
+
+      <p>其中 <span>$f_s$</span> 是取樣率、<span>$N_{ch}$</span> 是通道數、<span>$W$</span> 是每個樣本的位元組數。以 CD 品質的立體聲音訊為例：<span>$f_s = 48\,\text{kHz}$</span>、<span>$N_{ch} = 2$</span>（左 + 右）、<span>$W = 2$</span> 位元組（16 位元）：</p>
+
+      <div class="math-box">
+        $$ R = 48{,}000 \times 2 \times 2 = 192{,}000 \;\tfrac{\text{B}}{\text{s}} \approx 187.5\,\text{KiB/s} $$
+      </div>
+
+      <p>那就是 DMA 引擎必須永遠吸收的位元組串流。現在來看緩衝區填滿時間。如果你的 circular 緩衝區容納 <span>$B$</span> 位元組，把它完全填滿的時間就只是大小除以速率：</p>
+
+      <div class="math-box">
+        $$ t_{\text{fill}} = \frac{B}{R}, \qquad t_{\text{half}} = \frac{B}{2R} $$
+      </div>
+
+      <p>對於一個 1024 <em>樣本</em>的立體聲緩衝區，<span>$B = 1024 \times 2 \times 2 = 4096$</span> 位元組，所以</p>
+
+      <div class="math-box">
+        $$ t_{\text{fill}} = \frac{4096}{192{,}000} \approx 21.3\,\text{ms}, \qquad t_{\text{half}} \approx 10.7\,\text{ms} $$
+      </div>
+
+      <p>那個 <span>$t_{\text{half}} \approx 10.7\,\text{ms}$</span> 就是你的<strong>即時預算</strong>：每一次 HT/TC 中斷，你的處理常式有約 10.7 ms 來處理 512 個樣本，在引擎超前繞過它之前。錯過這個預算，你就會溢位。緩衝區越大→餘裕越多，但延遲也越大；永遠是這個取捨。再換一個說法——對於單一單聲道通道，每個樣本之間的時間就只是週期 <span>$T_s = 1/f_s$</span>，而引擎必須在這個時間內好好地（well inside）完成一次 <code>DR</code>→RAM 傳輸（少數幾個匯流排週期）。</p>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-dma-wrap">
+        <div class="sim-title">🔬 即時模擬：DMA 緩衝區填滿預算</div>
+        <canvas id="sim-dma"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">拖動取樣率、通道數、寬度與緩衝區大小：觀看位元組速率 <em>R</em>、完整填滿時間，以及你每一半的處理預算即時重新計算。把速率往上推或把緩衝區往下調，看著預算朝零縮小。</p>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="bus-arbitration"><span class="sec-no">7</span>匯流排仲裁與 FIFO</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>共用匯流排</small></div>
+      <p>DMA 引擎與 CPU <em>兩者都是</em>匯流排主控，競爭同一個 AHB 矩陣。每個週期只有一個主控能驅動某個特定的匯流排從屬（slave），所以一個<strong>匯流排仲裁器（bus arbiter）</strong>來授予存取權。在 Cortex-M3/M4 的 STM32 上，這個矩陣是多層的（multi-layer），所以 DMA-到-SRAM 與 CPU-到-Flash 通常可以<em>並行</em>進行——但當它們瞄準同一個從屬（兩者都想要 SRAM）時，仲裁器會交錯處理它們，輸的那一方會停一個週期。DMA 通常會以優先權勝出，所以繁重的 DMA 流量會輕微拖慢 CPU。這就是「免費」傳輸的代價——它很便宜，但不是字面上的免費。</p>
+
+      <p>F4 的串流加上了一個 <strong>FIFO</strong>：一個位於週邊側與記憶體側之間的小型（4×32 位元）緩衝區。它的價值體現在兩個方面。第一，<strong>突發與打包（burst &amp; packing）</strong>：它讓引擎可以收集數個窄的週邊讀取，再以一次寬的突發寫入記憶體，減少匯流排交易的數量。第二，<strong>寬度轉換</strong>：開啟 FIFO 後，你可以從週邊讀取位元組，再把它們打包成 32 位元的記憶體字（word）。FIFO 停用時（<em>direct mode，直接模式</em>），<code>PSIZE</code> 與 <code>MSIZE</code> 必須相符，而且每一項都是立即的單次傳輸。</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——FIFO 為何對 SD 卡很重要</div>
+        <p>像 SDIO/SDMMC 介接 SD 卡這類高頻寬週邊，<em>要求</em>使用帶突發的 FIFO 模式。SD 時脈不會為了匯流排競爭而暫停，所以 DMA 必須使用突發傳輸才能跟上控制器的硬體 FIFO；直接模式根本無法維持這個速率，於是你會得到欠載（underrun）錯誤。FIFO 閾值（<code>1/4、1/2、3/4、滿</code>）可以調整 FIFO 在突發之前要裝多滿——這是你在追求吞吐量時會去轉的一個真正旋鈕。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="real-cases"><span class="sec-no">8</span>真實案例：ADC、UART、WS2812 與記憶體對記憶體</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>每一行都要讀</small></div>
+      <p>這裡是最招牌的用法：一個自由運行的 ADC 直接串流進一個 circular 緩衝區。CPU 設定它一次，之後就完全不參與樣本的搬移。為了清楚起見這是暫存器層級的寫法；HAL 包裝的也是同樣這些欄位。</p>
+
+      <div class="codeblock">
+        <div class="code-head">adc_dma_circular.c <span class="lang">C / STM32F4（暫存器層級）</span></div>
+<pre><code class="language-c">// ADC1 -&gt; SRAM，circular 模式，半字樣本。
+// F4 對應：ADC1 = DMA2, Stream 0, Channel 0。
+#define NSAMP 1024
+volatile uint16_t adc_buf[NSAMP];   // 16 位元 ADC 結果
+
+void adc_dma_init(void) {
+    RCC-&gt;AHB1ENR |= RCC_AHB1ENR_DMA2EN;   // 開啟 DMA2 控制器時脈
+
+    DMA2_Stream0-&gt;CR &amp;= ~DMA_SxCR_EN;     // 設定前先停用
+    while (DMA2_Stream0-&gt;CR &amp; DMA_SxCR_EN) { }  // 等到真正關閉
+
+    DMA2_Stream0-&gt;PAR  = (uint32_t)&amp;ADC1-&gt;DR;     // 來源：ADC 資料暫存器（固定）
+    DMA2_Stream0-&gt;M0AR = (uint32_t)adc_buf;       // 目的：RAM 緩衝區基底
+    DMA2_Stream0-&gt;NDTR = NSAMP;                   // 項目數（不是位元組數！）
+
+    DMA2_Stream0-&gt;CR =
+          (0u &lt;&lt; DMA_SxCR_CHSEL_Pos)   // Channel 0 選擇 ADC1 請求
+        | (1u &lt;&lt; DMA_SxCR_PSIZE_Pos)   // 週邊大小 = 半字（16 位元）
+        | (1u &lt;&lt; DMA_SxCR_MSIZE_Pos)   // 記憶體大小 = 半字
+        | DMA_SxCR_MINC               // 遞增記憶體位址
+        | DMA_SxCR_CIRC               // CIRCULAR：永遠自動重載
+        | DMA_SxCR_HTIE               // 啟用半傳輸中斷
+        | DMA_SxCR_TCIE;              // 啟用傳輸完成中斷
+        // DIR = 00（週邊到記憶體），PINC = 0（週邊固定）
+
+    NVIC_EnableIRQ(DMA2_Stream0_IRQn);
+    DMA2_Stream0-&gt;CR |= DMA_SxCR_EN;   // 武裝引擎
+
+    ADC1-&gt;CR2 |= ADC_CR2_DMA | ADC_CR2_DDS;  // ADC 發出 DMA 請求，持續請求
+    ADC1-&gt;CR2 |= ADC_CR2_CONT | ADC_CR2_ADON;  // 連續 + 開啟
+    ADC1-&gt;CR2 |= ADC_CR2_SWSTART;              // 啟動轉換
+}</code></pre>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 剛剛發生了什麼</div>
+        <p>在 <code>adc_dma_init()</code> 回傳之後，ADC 自行轉換、在每個結果之後拉起一個 DMA 請求，而引擎就把那個 16 位元值放進 <code>adc_buf[]</code> 的下一個槽位——因為設了 <code>CIRC</code>，所以會永遠繞回。CPU <em>唯一</em>剩下的工作就是下面這個 IRQ 處理常式，每個緩衝區會被呼叫兩次。注意 <code>DDS</code>（DMA Disable Selection，DMA 停用選擇）：它讓 ADC 在最後一次傳輸之後仍持續發出請求，這樣 circular 模式才不會卡住。</p>
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">dma2_stream0_irq.c <span class="lang">C / STM32F4</span></div>
+<pre><code class="language-c">void DMA2_Stream0_IRQHandler(void) {
+    if (DMA2-&gt;LISR &amp; DMA_LISR_HTIF0) {        // 半傳輸：前半部就緒
+        DMA2-&gt;LIFCR = DMA_LIFCR_CHTIF0;       // 清除旗標（寫 1 清除）
+        process_block(&amp;adc_buf[0], NSAMP / 2);   // 安全：引擎正在填後半部
+    }
+    if (DMA2-&gt;LISR &amp; DMA_LISR_TCIF0) {        // 傳輸完成：後半部就緒
+        DMA2-&gt;LIFCR = DMA_LIFCR_CTCIF0;       // 清除旗標
+        process_block(&amp;adc_buf[NSAMP / 2], NSAMP / 2);  // 安全：引擎正在重填前半部
+    }
+}</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——忘記清除旗標</div>
+        <p>DMA 狀態旗標是透過專用的 <code>LIFCR</code>/<code>HIFCR</code> 暫存器以「寫 1 清除（write-1-to-clear）」方式清除的——你不能藉由寫入狀態暫存器來清除它們。忘了清除，你的處理常式就會立刻重新觸發，把 CPU 卡進活鎖（livelock）。另外注意 F4 把 8 個串流分散在<em>兩對</em>暫存器中：串流 0–3 使用 <em>Low</em> 暫存器（<code>LISR</code>/<code>LIFCR</code>），串流 4–7 使用 <em>High</em> 的那組（<code>HISR</code>/<code>HIFCR</code>）。</p>
+      </div>
+
+      <p>同一具引擎，再來三種風味：</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——UART 紀錄串流、WS2812 與記憶體對記憶體</div>
+        <p><strong>UART TX（記憶體→週邊）：</strong>把 DMA 指向你的紀錄字串、設 <code>DIR</code> = 記憶體到週邊、<code>MINC = 1</code>、<code>PINC = 0</code>、<code>NDTR</code> = 長度、啟用 <code>USART-&gt;CR3.DMAT</code>。整個緩衝區會以線路速率串流出去，而 <code>main()</code> 繼續往前跑——不會有阻塞的 <code>printf</code>。<br>
+        <strong>WS2812 LED 燈條（記憶體→週邊，透過 SPI／計時器）：</strong>這些「NeoPixel」燈條需要精確的約 800 kHz 單線波形。把每個顏色位元編碼成一個 SPI 位元組（或一個計時器 PWM 工作週期），然後用 DMA 把整個編碼好的影格送到 <code>SPI-&gt;DR</code>。DMA 精準的時序正是讓燈條無瑕疵（glitch-free）的原因——若從 CPU 進行軟體位元操作（bit-banging）會產生抖動，燈條就會閃爍。<br>
+        <strong>記憶體對記憶體：</strong>設 <code>DIR</code> = 記憶體到記憶體（F4 上僅 DMA2 可用）、<code>PINC</code> 與 <code>MINC</code> 都 = 1，它就變成一個在 CPU 做其他工作時執行的硬體 <code>memcpy</code>。注意：circular 模式與 direct 模式對記憶體對記憶體不可用。</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>⑤ 換你上場</h2>
+      <div class="layer"><span class="step">⑤</span> 練習 <small>由你來寫與決定</small></div>
+      <p>三道檢核。點一個答案、輸入一個數字，或揭開一道程式挑戰。你的進度會儲存在這台裝置上，並顯示在首頁。</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="stm08-double-buffer">
+        <div class="ex-head"><span class="badge">Q1</span> 概念檢核</div>
+        <div class="ex-q">你正把 ADC 連續串流進一個單一的 circular 緩衝區，並在 CPU 上處理資料。<strong>半傳輸（half-transfer）</strong>與<strong>傳輸完成（transfer-complete）</strong>中斷（雙緩衝）實際上解決了什麼核心問題？</div>
+        <ul class="ex-options">
+          <li data-correct="false">它們藉由跳過匯流排仲裁器讓 DMA 引擎跑得更快</li>
+          <li data-correct="true">它們讓你能處理緩衝區的其中一半，而引擎安全地填另一半，避免對同一份資料發生讀／寫競爭</li>
+          <li data-correct="false">它們把週邊的位元組資料轉換成 32 位元的記憶體字</li>
+          <li data-correct="false">它們停下 ADC，好讓 CPU 在區塊之間趕上進度</li>
+        </ul>
+        <div class="ex-explain">雙緩衝講的是<strong>在時間上分開生產者與消費者</strong>。HT 中斷說「前半部滿了、後半部正在填——現在處理前半部」；TC 中斷說的則相反。你永遠碰引擎<em>沒在</em>寫入的那一半，所以從不發生競爭，串流也保持無縫。速度與寬度轉換是無關的工作（那些由 FIFO／突發處理）。</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="stm08-throughput" data-answer="192000" data-tol="1000">
+        <div class="ex-head"><span class="badge">Q2</span> 算算看</div>
+        <div class="ex-q">你以 <strong>48 kHz</strong> 擷取立體聲（<strong>2 通道</strong>）音訊，每個樣本 <strong>16 位元</strong>（2 位元組）。你的 DMA 串流必須維持的原始位元組速率是多少，以<strong>每秒位元組數</strong>計？（使用 $R = f_s \cdot N_{ch} \cdot W$。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="bytes/s"><span class="ex-unit">B/s</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$R = 48{,}000 \times 2 \times 2 = 192{,}000\ \text{B/s}$（≈ 187.5 KiB/s）。那麼一個 4096 位元組的緩衝區會在 $4096/192000 \approx 21.3\,\text{ms}$ 內填滿，給你約 10.7 ms 的每一半處理預算。把取樣率或寬度加倍，位元組速率——以及對你處理常式的壓力——也會跟著加倍。</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="stm08-circular-adc">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰——帶半／全完成回呼的 circular ADC（HAL）</div>
+        <div class="ex-q">使用 STM32 HAL，設定 ADC1 連續取樣進一個 256 個半字的 <strong>circular</strong> DMA 緩衝區，並實作<strong>半完成（half-complete）</strong>與<strong>全完成（full-complete）</strong>回呼，讓每一個都處理正確的那一半。假設 <code>hadc1</code> 及其連結的 DMA 控制代碼（handle）已由 CubeMX 以 circular 模式初始化好。思考一下每個回呼<em>擁有哪一半</em>。</div>
+        <details class="ex-acc">
+          <summary>提示</summary>
+          <div class="acc-body">用 <code>HAL_ADC_Start_DMA(&amp;hadc1, (uint32_t*)buf, 256)</code> 啟動串流一次——這個計數是以<em>項目</em>為單位。然後覆寫那兩個 weak 回呼：<code>HAL_ADC_ConvHalfCpltCallback</code> 在中點觸發（前 128 個樣本就緒），而 <code>HAL_ADC_ConvCpltCallback</code> 在繞回時觸發（後 128 個就緒）。每一個都應該處理引擎剛剛填完的那一半——而且至關重要的是，要回得夠快以贏過填滿時間。</div>
+        </details>
+        <details class="ex-acc">
+          <summary>顯示一個解答</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">adc_circular_hal.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">#define NSAMP 256
+static volatile uint16_t buf[NSAMP];   // circular DMA 目標
+
+void app_start(void) {
+    // 以 circular 模式啟動 ADC -&gt; DMA。計數以項目（ITEMS）為單位，不是位元組。
+    // CubeMX 已把 DMA 控制代碼設為 Circular + 啟用 HT/TC 中斷。
+    HAL_ADC_Start_DMA(&amp;hadc1, (uint32_t *)buf, NSAMP);
+}
+
+// 當引擎越過中點時觸發：buf[0 .. 127] 已滿，
+// 而引擎現在正在寫 buf[128 .. 255]。處理「前半部」。
+void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc) {
+    if (hadc-&gt;Instance == ADC1)
+        process_block((uint16_t *)&amp;buf[0], NSAMP / 2);
+}
+
+// 在繞回時觸發：buf[128 .. 255] 已滿，而引擎已繞回
+// 重新填 buf[0 .. 127]。處理「後半部」。
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc) {
+    if (hadc-&gt;Instance == ADC1)
+        process_block((uint16_t *)&amp;buf[NSAMP / 2], NSAMP / 2);
+}
+
+// 你的 DSP／拷出。必須在引擎填滿另一半之前完成。
+static void process_block(uint16_t *p, uint32_t n) {
+    for (uint32_t i = 0; i &lt; n; i++) {
+        // 例如：累加、濾波，或拷出到傳輸緩衝區
+        (void)p[i];
+    }
+}</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">這一課的重點是<strong>所有權分割</strong>：半完成回呼擁有索引 <code>[0, N/2)</code>、全完成回呼擁有 <code>[N/2, N)</code>，而引擎永遠在寫<em>另一</em>半——所以兩個回呼都不會與 DMA 競爭。讓 <code>process_block</code> 牢牢落在每一半的填滿預算內（§6），否則你會溢位。在 M7／帶快取的零件上為了絕對安全，也要對你讀取的那一半使無效化（invalidate）D-cache。</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> 本章回顧</div>
+        <p>你現在能把 DMA 解釋成第二個匯流排主控，它以每區塊而非每位元組的方式搬移位元組；能說出 F4 的架構（2 個控制器 × 8 個串流，每個串流選擇 8 個通道之一）並與 F1 的通道做對比；能列出六個傳輸參數以及「算項目不算位元組」的陷阱；能在 circular 與 normal 模式之間做選擇；並能運用半／全傳輸中斷來做無縫的雙緩衝串流。你能從 $R = f_s N_{ch} W$ 與 $t_{\text{fill}} = B/R$ 推算緩衝區大小、能推理匯流排仲裁與 FIFO，而且你接出了一個真正的 circular ADC 擷取，帶有正確的旗標清除與半／全回呼。下一步我們把這具引擎帶到 I²S 編解碼器，串流真正的音訊。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="回到頂端">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../../../assets/vendor/highlight.min.js"></script>
+<script src="../../../assets/katex/katex.min.js"></script>
+<script src="../../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../../assets/vendor/mermaid.min.js"></script>
+<script src="../../../assets/app.js"></script>
+
+<!-- chapter-specific simulator -->
+<script>
+EM.sim("sim-dma", {
+  height: 250,
+  params: [
+    { key: "fs",  label: "取樣率",     min: 8,   max: 192,  step: 1,   value: 48,   unit: "kHz" },
+    { key: "ch",  label: "通道數",     min: 1,   max: 8,    step: 1,   value: 2,    unit: "ch"  },
+    { key: "w",   label: "寬度",       min: 1,   max: 4,    step: 1,   value: 2,    unit: "B"   },
+    { key: "smp", label: "緩衝樣本數", min: 128, max: 4096, step: 128, value: 1024, unit: ""    }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h, pad = 44 * dpr;
+
+    // R 以 bytes/s 計；B 以 bytes 計；時間以 ms 計
+    var R = (v.fs * 1000) * v.ch * v.w;          // 每秒位元組數
+    var B = v.smp * v.ch * v.w;                  // 緩衝區大小（位元組）
+    var tFill = B / R * 1000;                    // 填滿整個緩衝區的 ms
+    var tHalf = tFill / 2;                       // 每一半的預算（ms）
+
+    // 把緩衝區畫成一條分成兩半的長條，附帶一個填充游標
+    var barY = pad, barH = 46 * dpr, barX = pad, barW = W - pad - 16 * dpr;
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.strokeStyle = "#2f3a4c"; ctx.fillStyle = "#161c27";
+    ctx.fillRect(barX, barY, barW, barH);
+    ctx.strokeRect(barX, barY, barW, barH);
+    // 中點分隔線
+    ctx.strokeStyle = "#3b4659";
+    ctx.beginPath();
+    ctx.moveTo(barX + barW / 2, barY); ctx.lineTo(barX + barW / 2, barY + barH);
+    ctx.stroke();
+
+    // 動畫填充游標橫掃而過（週期 = tFill，為視覺效果而設上限）
+    var period = Math.max(400, Math.min(tFill, 4000));   // ms，為顯示而限制範圍
+    var phase = (Date.now() % period) / period;          // 0..1
+    var inSecondHalf = phase >= 0.5;
+    ctx.fillStyle = inSecondHalf ? "#f4a259" : "#2ec4b6";
+    ctx.fillRect(barX, barY, barW * phase, barH);
+
+    // 兩個半部的標籤
+    ctx.fillStyle = "#9aa4b2"; ctx.font = (12 * dpr) + "px monospace";
+    ctx.fillText("半部 A (HT)", barX + 8 * dpr, barY + barH + 16 * dpr);
+    ctx.fillText("半部 B (TC)", barX + barW / 2 + 8 * dpr, barY + barH + 16 * dpr);
+
+    // 「引擎填這個／處理那個」註解
+    ctx.fillStyle = inSecondHalf ? "#f4a259" : "#2ec4b6";
+    ctx.fillText(inSecondHalf ? "引擎 → B，CPU 處理 A"
+                              : "引擎 → A，CPU 處理 B",
+                 barX, barY - 12 * dpr);
+
+    // 可讀的位元組速率字串
+    var rStr = R >= 1e6 ? (Math.round(R / 1e4) / 100) + " MB/s"
+                        : (Math.round(R / 100) / 10) + " kB/s";
+    return "R = <b>" + R.toLocaleString() + "</b> B/s (" + rStr +
+           ") &nbsp;·&nbsp; 緩衝區 = <b>" + B.toLocaleString() + "</b> B &nbsp;·&nbsp; 填滿 = <b>" +
+           (Math.round(tFill * 100) / 100) + "</b> ms &nbsp;·&nbsp; 每一半預算 = <b>" +
+           (Math.round(tHalf * 100) / 100) + "</b> ms";
+  }
+});
+</script>
+</body>
+</html>

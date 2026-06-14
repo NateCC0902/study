@@ -53,6 +53,9 @@
 
       <p>Logistic regression <em>is</em> a single neuron with a sigmoid $f$. That's the whole secret: a neural network is not an exotic new model, it's <strong>logistic regression repeated and wired together</strong>.</p>
 
+      <div class="sim"><div class="sim-title"><span>🧪</span> A single neuron’s activation field</div><canvas id="demo-neuron"></canvas></div>
+      <p>Tune the weights and pick an activation; see how one unit carves up the input space.</p>
+
       <p>So why stack them? Because one neuron can only draw a single straight cut through input space (lesson 04). Real signals aren't linearly separable. A sonar return that means "obstacle" vs "open water" lives in a tangled, curved region of feature space. One straight line can't fence it off.</p>
 
       <p>The trick: feed the outputs of one layer of neurons into another layer. Each layer is a linear map followed by a <em>bend</em> (the activation). Stack a few bends and you can trace any curve you like.</p>
@@ -421,5 +424,7 @@ print("rudder command:", controller(state))
 <script src="../assets/katex/contrib/auto-render.min.js"></script>
 <script src="../assets/vendor/mermaid.min.js"></script>
 <script src="../assets/app.js"></script>
+<script src="../assets/ml-demos.js"></script>
+<script>EM.mlDemo.neuron("demo-neuron");</script>
 </body>
 </html>

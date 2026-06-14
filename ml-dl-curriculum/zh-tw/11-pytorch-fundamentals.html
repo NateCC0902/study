@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>PyTorch 基礎 — 機器學習與深度學習</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="11-pytorch-fundamentals">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 11</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL 課程 · 11</div>
+        <h1>PyTorch 基礎</h1>
+        <p>上一課你親手寫了反向傳播。這一課你把<em>同一個網路、同一份資料、同樣的梯度</em>交給一個框架，由它記錄你的前向傳播，再反向重播一遍——自動、精確、而且跑在 GPU 上。底下每一個 PyTorch 呼叫都會精準地嵌進你親手搭建過的某個位置。</p>
+        <div class="meta"><span>📦 第 3 部分 · 第 11 課</span><span>🔥 技術棧：PyTorch</span><span>🧠 自動微分</span><span>🔁 標準迴圈</span></div>
+      </section>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 先備知識</div>
+        <p>請先讀 <a href="10-backpropagation.html">10 — 從零實作反向傳播</a> — 這一課用的是<em>同一個網路、同一份資料、同樣的梯度</em>，只是交給框架去處理。如果第 10 課的連鎖律和手寫更新迴圈還記憶猶新，那麼下面每一個 PyTorch 呼叫都會精準地對應到你親手搭建過的某個位置。</p>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎯</span> 學完本課你能</div>
+        <ul>
+          <li>建立並操作<strong>張量 (tensor)</strong>，用 <code>.to(device)</code> 把它們搬到 <strong>GPU</strong>，並說明張量與 numpy 陣列的差異。</li>
+          <li>解釋<strong>自動微分 (autograd)</strong>（<code>requires_grad</code> + <code>loss.backward()</code>）如何<em>自動</em>算出你上一課親手推導的那些<em>精確</em>梯度。</li>
+          <li>把模型定義為 <code>nn.Module</code>，挑選一個損失函數（<code>nn.BCELoss</code>、<code>nn.CrossEntropyLoss</code>）以及一個最佳化器（<code>torch.optim</code>）。</li>
+          <li>憑著肌肉記憶寫出<strong>標準訓練迴圈</strong> — <code>zero_grad → forward → loss → backward → step</code>。</li>
+          <li>用 <code>Dataset</code> / <code>DataLoader</code> 乾淨俐落地把資料分批，並把每一個 PyTorch 呼叫對應回它所取代的那一行 numpy 程式碼。</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>直覺理解</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺理解 <small>為什麼會有框架存在</small></div>
+      <p>上一課你親手寫了反向傳播 (backpropagation)：先做前向傳播 (forward pass)，然後沿著連鎖律 (chain rule) 小心翼翼地<em>往回走</em>，對每一個權重算出 $\partial \mathcal{L}/\partial W$，再執行 <code>W -= lr * grad</code>。它能跑，而且你現在<em>懂</em>它了。但那大約是 40 行脆弱的索引拼湊，而且還只是針對一個<strong>2 層網路</strong>。換成 50 層的 transformer 試試看，你會花一整週去除錯一個轉置錯誤的矩陣。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> PyTorch 的一個核心理念</div>
+        <p>你永遠只需要寫<strong>前向傳播</strong>。反向傳播會精確地替你算好。</p>
+      </div>
+
+      <p>怎麼辦到的？每當你對一個 <code>requires_grad=True</code> 的張量做運算時，PyTorch 會悄悄地把這個運算記錄到一張<strong>計算圖 (computation graph)</strong> 上 — 一個記錄著「這個張量是由那兩個相乘而來」的有向無環圖 (DAG)。當你呼叫 <code>loss.backward()</code>，它就反向走過這張圖，在每個節點套用連鎖律，把梯度存進每個參數的 <code>.grad</code>。它做的<em>正是你第 10 課親手做過的那套算術</em> — 只是自動幫你記帳而已。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 類比 — 行車記錄器</div>
+        <p>你手刻的反向傳播就像開車走一條路線，然後試著憑記憶重建每一個轉彎好倒著開回去。容易出錯。自動微分則像一台行車記錄器：它在你前進時把每一個運算都錄下來，所以倒帶重播路線（把損失歸咎到各處）就變得機械化而精確。你只管往前開；錄影帶會處理回程。</p>
+      </div>
+
+      <div class="mermaid">
+graph LR
+    subgraph "你寫的部分（前向）"
+        X[x] --> L1[Linear 2→8]
+        L1 --> A[tanh]
+        A --> L2[Linear 8→1]
+        L2 --> S[sigmoid]
+        S --> Loss[BCE 損失]
+    end
+    Loss -. "loss.backward&#40;&#41; 反向重播錄影帶" .-> X
+</div>
+
+      <p>PyTorch 的其餘部分都是建立在這之上的便利工具：<code>nn.Module</code> 用來打包權重，<code>torch.optim</code> 用來執行 <code>W -= lr*grad</code> 那一步（還有更聰明的變體），<code>DataLoader</code> 用來餵小批次。這些在概念上都不是新東西 — 它就是第 10 課的那個迴圈，只是把繁瑣、易錯的部分自動化並用 GPU 加速了。</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>數學原理</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>沒有新的數學 — 這正是重點</small></div>
+      <p>這一課<strong>沒有新的數學</strong> — 這正是重點。PyTorch 計算的量跟你在第 09、10 課推導出來的一模一樣。值得釐清的是<em>自動微分在機制上到底在做什麼</em>，這樣它就永遠不會讓人覺得像魔法。</p>
+
+      <h3 id="forward-pass-math">前向傳播（與第 09 課相同）</h3>
+      <p>對我們的 2 層網路，輸入 $\mathbf{x}\in\mathbb{R}^2$：</p>
+      <div class="math-box">$$
+\mathbf{z}^{(1)} = W^{(1)}\mathbf{x} + \mathbf{b}^{(1)}, \quad
+\mathbf{a}^{(1)} = \tanh(\mathbf{z}^{(1)}), \quad
+z^{(2)} = W^{(2)}\mathbf{a}^{(1)} + b^{(2)}, \quad
+\hat y = \sigma(z^{(2)})
+$$</div>
+      <p>其中 $W^{(1)}\in\mathbb{R}^{8\times2}$，$W^{(2)}\in\mathbb{R}^{1\times8}$，$\sigma$ 是 sigmoid 函數，$\hat y\in(0,1)$ 是屬於類別 1 的機率。</p>
+
+      <h3 id="the-loss-math">損失（二元交叉熵，來自第 04 課）</h3>
+      <div class="math-box">$$
+\mathcal{L} = -\frac{1}{N}\sum_{i=1}^{N}\Big[\, y_i \log \hat y_i + (1-y_i)\log(1-\hat y_i)\,\Big]
+$$</div>
+      <p>$y_i\in\{0,1\}$ 是真實標籤，$\hat y_i$ 是預測機率，$N$ 是批次大小。</p>
+
+      <h3 id="what-backward-computes"><code>backward()</code> 計算的是什麼</h3>
+      <p>自動微分會替<strong>每一個</strong>參數 $\theta$（$W^{(1)}, \mathbf b^{(1)}, W^{(2)}, b^{(2)}$ 的每一個元素）填入：</p>
+      <div class="math-box">$$
+\theta.\text{grad} \;=\; \frac{\partial \mathcal{L}}{\partial \theta}
+$$</div>
+      <p>它是沿著記錄下來的計算圖，<strong>逐節點套用連鎖律</strong>達成的。對一個單一的複合函數 $\mathcal{L}(g(h(\theta)))$，它會把局部導數相乘：</p>
+      <div class="math-box">$$
+\frac{\partial \mathcal{L}}{\partial \theta}
+= \frac{\partial \mathcal{L}}{\partial g}\cdot\frac{\partial g}{\partial h}\cdot\frac{\partial h}{\partial \theta}
+$$</div>
+      <p>這就是<strong>反向模式自動微分 (reverse-mode automatic differentiation)</strong>：從純量損失出發（梯度 $= 1$），把 $\partial\mathcal L/\partial(\text{節點})$ 往回傳播，一路累乘。它正是你第 10 課的反向傳播 — 同樣的乘法、同樣的轉置 — 但這次是從記錄下來的計算圖產生，而不是由你親手打出來的。因為它是解析的連鎖律（不是有限差分近似），所以這些梯度<strong>在浮點精度範圍內是精確的</strong>。</p>
+
+      <h3 id="the-update-math">更新（來自第 03 課）</h3>
+      <p>最佳化器會以學習率 $\eta$ 套用：</p>
+      <div class="math-box">$$
+\theta \leftarrow \theta - \eta\,\theta.\text{grad}
+$$</div>
+      <p>這就是單純的 SGD — <code>optimizer.step()</code>。更高級的最佳化器（Adam 等）會調整步伐<em>如何</em>被縮放；那些我們留到第 12 課再談。</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>程式碼</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>每一行都讀一遍</small></div>
+      <p>只需安裝一次：<code>pip install torch</code>（這一課用 CPU 版本就夠了）。底下所有程式都能在 CPU 上跑；如果你沒有 GPU，那些 GPU 相關的行會自動變成無作用。</p>
+
+      <h3 id="tensors">3.1 張量 — 會記住自己歷史、且能住在 GPU 上的 numpy 陣列</h3>
+      <div class="codeblock">
+        <div class="code-head">tensors.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import torch
+
+# 張量是一個 n 維陣列，就像 numpy 的 ndarray，但多了兩項超能力：
+#   1. 它可以被搬到 GPU 上
+#   2. 它可以追蹤運算以進行自動微分
+a = torch.tensor([[1.0, 2.0],
+                  [3.0, 4.0]])          # 2x2 的 float 張量
+print(a.shape, a.dtype)                 # -&gt; torch.Size([2, 2]) torch.float32
+
+# 大多數 numpy 運算在 PyTorch 都有 1:1 的對應寫法：
+print(a @ a)        # 矩陣乘法            (numpy: a @ a)
+print(a.T)          # 轉置                (numpy: a.T)
+print(a.mean())     # 約化為純量          (numpy: a.mean())
+
+# 需要時可以在 numpy 之間來回轉換（例如給 matplotlib 或 sklearn 用）：
+import numpy as np
+n = a.numpy()                  # 張量 -&gt; ndarray（在 CPU 上會共用記憶體！）
+back = torch.from_numpy(n)     # ndarray -&gt; 張量
+
+# --- 裝置處理：只寫一次，到處重用 ---------------------
+# 挑選可用的最佳加速器。'cuda' = NVIDIA GPU，'mps' = Apple Silicon。
+device = (
+    "cuda" if torch.cuda.is_available()
+    else "mps" if torch.backends.mps.is_available()
+    else "cpu"
+)
+print("device:", device)        # -&gt; device: cpu   （或 cuda / mps）
+
+a = a.to(device)                # 把資料搬到加速器上
+# 規則：一個運算中的每一個張量都必須在「同一個」裝置上，否則你會得到
+#       "Expected all tensors to be on the same device" — 初學者第一名的錯誤。
+</code></pre>
+      </div>
+      <p>對深度學習而言，把張量放到 GPU 上<em>就是</em>整個加速故事：成千上萬個矩陣乘法平行運行。你不必改數學 — 你只是用 <code>.to(device)</code> 改變<em>位元組住在哪裡</em>。</p>
+
+      <h3 id="autograd">3.2 自動微分 — <code>backward()</code> 重現你親手推導的梯度</h3>
+      <p>我們先在一個極小的東西上證明自動微分跟微積分一致，這樣你才會在大網路上信任它。取 $f(w) = w^2$，其導數為 $f'(w) = 2w$。</p>
+      <div class="codeblock">
+        <div class="code-head">autograd_scalar.py <span class="lang">Python</span></div>
+<pre><code class="language-python">w = torch.tensor(3.0, requires_grad=True)  # 「追蹤對這個變數的梯度」
+f = w ** 2                                  # PyTorch 記錄下：f 來自 w**2
+f.backward()                                # 反向走過計算圖
+print(w.grad)                               # -&gt; tensor(6.)   （ = 2*w = 2*3 ）
+</code></pre>
+      </div>
+      <p><code>w.grad</code> 存的是 $\partial f/\partial w$ — 而 <code>6.0</code> 正好就是 $2w$。沒有有限差分、沒有近似：就是解析的連鎖律。現在把同樣的概念用在向量損失上，對應第 10 課的手寫 <code>dW</code>：</p>
+      <div class="codeblock">
+        <div class="code-head">autograd_neuron.py <span class="lang">Python</span></div>
+<pre><code class="language-python">W = torch.randn(1, 2, requires_grad=True)   # 一個線性神經元的權重
+x = torch.tensor([[2.0, -1.0]])             # 一筆輸入（1x2）
+y = torch.tensor([[1.0]])                   # 目標
+
+y_hat = torch.sigmoid(x @ W.T)              # 前向傳播：與第 09 課相同
+loss  = -(y*torch.log(y_hat) + (1-y)*torch.log(1-y_hat)).mean()  # BCE，第 04 課
+loss.backward()                             # 自動微分填入 W.grad
+
+print(W.grad)   # -&gt; 你親手推導反向傳播會得到的那個精確 dL/dW
+</code></pre>
+      </div>
+      <p>如果你回到第 10 課，對這同一筆輸入親手算 <code>dW</code>，你會得到一模一樣到最後一位小數的數字。這個等價性正是值得信任這個框架的全部原因。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 兩個陷阱，現在就學起來</div>
+        <p>(1) 梯度會<strong>累加</strong> — <code>.backward()</code> 是<em>加</em>到 <code>.grad</code>，不是覆寫。這就是為什麼每個訓練迴圈都從 <code>zero_grad()</code> 開始。(2) 把推論/評估包在 <code>with torch.no_grad():</code> 裡，這樣當你不打算呼叫 <code>backward()</code> 時，PyTorch 就會跳過建立計算圖（更快、更省記憶體）。</p>
+      </div>
+
+      <h3 id="rebuild-net">3.3 重建第 10 課的網路 — <em>整個東西</em>只要約 15 行</h3>
+      <p>這裡是同一個 <code>2 → 8 (tanh) → 1 (sigmoid)</code> 網路、同一份 two-moons 資料、同樣的 BCE 損失和 SGD — 但現在權重、梯度和更新步驟都歸 PyTorch 管。注意看每一個 PyTorch 呼叫如何取代你一整塊 numpy 程式碼。</p>
+      <div class="codeblock">
+        <div class="code-head">train_moons.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from sklearn.datasets import make_moons
+from sklearn.preprocessing import StandardScaler
+
+torch.manual_seed(0)
+
+# ---- 1. 資料：與第 09/10 課相同的兩道交錯月牙 --------
+X_np, y_np = make_moons(n_samples=400, noise=0.20, random_state=0)
+X_np = StandardScaler().fit_transform(X_np)         # 標準化（第 09 課的陷阱！）
+
+# numpy -&gt; 張量。注意形狀：X 是 (N,2)，給 BCE 用的 y 必須是 (N,1) 的 float。
+device = (
+    "cuda" if torch.cuda.is_available()
+    else "mps" if torch.backends.mps.is_available()
+    else "cpu"
+)
+X = torch.tensor(X_np, dtype=torch.float32).to(device)
+y = torch.tensor(y_np, dtype=torch.float32).unsqueeze(1).to(device)  # (400,) -&gt; (400,1)
+
+# ---- 2. 模型：取代你的 MLP 類別 + W1/b1/W2/b2 初始化 -----------------
+# nn.Sequential 把各層串起來；nn.Linear 持有 W 和 b 並會把它們初始化。
+model = nn.Sequential(
+    nn.Linear(2, 8),    # 原本是：W1 (8x2), b1 (8,)   -- 權重就住在這裡面
+    nn.Tanh(),          # 原本是：你的 tanh()
+    nn.Linear(8, 1),    # 原本是：W2 (1x8), b2 (1,)
+    nn.Sigmoid(),       # 原本是：你的 sigmoid()  -&gt; 輸出是 P(class=1)
+)
+model.to(device)        # 把權重搬到加速器上 -- 必須與資料一致
+                        # （略過這行，你就會碰到 3.1 提過的裝置不一致當機）
+
+# ---- 3. 損失 + 最佳化器：取代你手寫的 BCE 和 W -= lr*grad --
+loss_fn   = nn.BCELoss()                                  # 二元交叉熵
+optimizer = torch.optim.SGD(model.parameters(), lr=0.5)   # 單純的梯度下降
+
+# ---- 4. 標準訓練迴圈 --------------------------------------
+for epoch in range(500):
+    optimizer.zero_grad()         # (a) 清掉舊梯度  -- 梯度會累加！
+    y_hat = model(X)              # (b) 前向傳播    -- 呼叫 model.forward()
+    loss  = loss_fn(y_hat, y)     # (c) 計算損失
+    loss.backward()               # (d) 自動微分：填入每個參數的 .grad
+    optimizer.step()              # (e) 更新：param -= lr * param.grad
+
+    if epoch % 100 == 0:
+        print(f"epoch {epoch:3d}  loss {loss.item():.4f}")
+
+# -&gt; epoch   0  loss 0.6780
+# -&gt; epoch 100  loss 0.3007
+# -&gt; epoch 200  loss 0.2851
+# -&gt; epoch 300  loss 0.2293
+# -&gt; epoch 400  loss 0.1776
+# （可重現：seed 與 random_state 都已固定。跨 torch 版本／硬體時最後一位數字可能
+#  有微小漂移，但整體軌跡是固定的。）
+</code></pre>
+      </div>
+
+      <p><strong>心智對照表 — 把這張表記在腦中：</strong></p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>第 10 課（numpy，親手寫）</th><th>第 11 課（PyTorch）</th><th>它做什麼</th></tr></thead>
+        <tbody>
+          <tr><td><code>W1 = rng.standard_normal(...) * scale</code></td><td><code>nn.Linear(2, 8)</code></td><td>配置並初始化權重 + 偏值</td></tr>
+          <tr><td><code>a1 = tanh(X @ W1.T + b1)</code> 等等</td><td><code>model(X)</code></td><td>前向傳播</td></tr>
+          <tr><td>手寫的 BCE 運算式</td><td><code>nn.BCELoss()(y_hat, y)</code></td><td>損失</td></tr>
+          <tr><td><code>dW1, db1, ... = backward(...)</code></td><td><code>loss.backward()</code></td><td>梯度（連鎖律）</td></tr>
+          <tr><td><code>W1 -= lr * dW1</code>（每個參數一行）</td><td><code>optimizer.step()</code></td><td>更新步驟</td></tr>
+          <tr><td>（你得記得重置 <code>dW</code>）</td><td><code>optimizer.zero_grad()</code></td><td>清掉累加的梯度</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 把順序背起來</div>
+        <p><code>(a)–(e)</code> 這五個步驟，就是你在本課程中對<strong>每一個</strong>模型都會寫的那個迴圈，從這個 MLP 到 transformer 都一樣：<strong>zero → forward → loss → backward → step。</strong>搞錯（例如忘了 <code>zero_grad</code>），訓練就會悄悄地出問題。</p>
+      </div>
+
+      <h3 id="visualize-boundary">3.4 視覺化學到的決策邊界</h3>
+      <div class="codeblock">
+        <div class="code-head">plot_boundary.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+# 在輸入空間上鋪一個網格
+xx, yy = np.meshgrid(np.linspace(-2.5, 2.5, 300), np.linspace(-2.5, 2.5, 300))
+grid = torch.tensor(np.c_[xx.ravel(), yy.ravel()], dtype=torch.float32).to(device)  # 與模型一致
+
+with torch.no_grad():                       # 推論：不需要計算圖
+    # 在 .numpy() 之前先 .cpu()：numpy 讀不了住在 GPU/MPS 上的張量
+    probs = model(grid).reshape(xx.shape).cpu().numpy()
+
+plt.contourf(xx, yy, probs, levels=20, cmap="RdBu_r", alpha=0.8)
+plt.contour(xx, yy, probs, levels=[0.5], colors="k", linewidths=2)  # 決策邊界
+plt.scatter(X_np[:, 0], X_np[:, 1], c=y_np, cmap="RdBu_r", edgecolors="k", s=18)
+plt.title("PyTorch MLP — learned decision boundary"); plt.show()
+</code></pre>
+      </div>
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">👁️</span> 你應該看到</div>
+        <p>一片平滑的藍↔紅機率場，有一條<strong>彎曲的</strong>黑色 0.5 等高線在兩道月牙之間蜿蜒，正確地把每個月牙圍起來。這就是你第 10 課從零得到的那條彎彎曲曲的邊界 — 同樣的模型，少了非常多程式碼。</p>
+      </div>
+
+      <h3 id="dataset-dataloader">3.5 <code>Dataset</code> 和 <code>DataLoader</code> — 免費分批</h3>
+      <p>上面我們是把全部 400 個點一次全塞進去（全批次）。真實的資料集放不進記憶體，而且<strong>小批次 (mini-batch)</strong> 訓練（第 03 課的 SGD）收斂得更快。<code>DataLoader</code> 會處理洗牌和分批，讓你再也不用親手去切陣列。</p>
+      <div class="codeblock">
+        <div class="code-head">dataloader.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from torch.utils.data import TensorDataset, DataLoader
+
+dataset = TensorDataset(X, y)                                  # 把 (x_i, y_i) 配成對
+loader  = DataLoader(dataset, batch_size=32, shuffle=True)     # 每批 32 列的小批次
+
+model.to(device)                     # 模型在 3.3 已經在 `device` 上 -- 這裡保留它
+                                     # 是為了讓這段程式也能獨立執行
+for epoch in range(200):
+    for xb, yb in loader:            # loader 每次迭代產出一個小批次
+        xb, yb = xb.to(device), yb.to(device)   # 把這批資料搬到與模型相同的裝置上
+        optimizer.zero_grad()
+        loss = loss_fn(model(xb), yb)
+        loss.backward()
+        optimizer.step()
+# 一樣的五個步驟 -- 只是現在改成每批跑一次，而不是每整份資料集跑一次。
+# 黃金守則：模型「和」這批資料要在「同一個」裝置上（見 3.1 的陷阱）。
+</code></pre>
+      </div>
+      <p>內層那四行就是逐字逐句的標準迴圈。<code>DataLoader</code> 唯一改變的是 <em><code>xb</code> 裝了什麼</em>（一個 32 列的切片，而不是全部 400 列）。這就是邁向大規模訓練在概念上的全部跳躍。</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>實際案例</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>那艘船，跑在 GPU 上</small></div>
+      <p><strong>USV 聲納障礙物分類器，GPU 就緒。</strong>回想第 09–10 課的貫穿範例：一艘無人水面載具 (USV) 讀取聲納/光達回波，必須判斷<strong>障礙物 vs. 開闊水域</strong> — 這是針對距離、方位等特徵的二元分類。決策區域是彎曲的（<em>正前方</em>近距離的強回波是障礙物；同樣距離但在<em>正橫方向</em>可能只是駛過的尾流），所以線性模型會失敗，而 2 層 MLP 正合適。</p>
+
+      <p>在船上的正式環境裡，跟我們玩具版本的差別只在後勤，不在概念：</p>
+      <ul>
+        <li><strong>輸入</strong>是真實的聲納特徵向量（距離區間、強度、方位），用在訓練資料上配適並儲存的<em>同一個</em> <code>StandardScaler</code> 來標準化 — 推論時絕不重新配適。</li>
+        <li><strong>模型是一模一樣</strong>的 <code>nn.Sequential</code> 程式碼；你只需把 <code>nn.Linear(2, 8)</code> 改成符合你的特徵數量。</li>
+        <li><strong>訓練搬到 GPU</strong> 只需在模型和每一批資料上加 <code>.to(device)</code> — 那五個步驟的迴圈完全不變。一份 10 萬筆記錄的聲納回波資料集在 CPU 上慢如龜爬，在 GPU 上幾秒就訓練完，因為每個 <code>nn.Linear</code> 都是批次矩陣乘法，這正是 GPU 的天生強項。</li>
+        <li><strong>部署</strong>時在 ROS2 感知節點裡僅以前向方式跑在 <code>torch.no_grad()</code> 中，輸出 $\hat y &gt; 0.5 \Rightarrow$「障礙物」給規劃器。沒有自動微分、沒有最佳化器 — 就只有前向傳播，比方說以 20 Hz 執行。</li>
+      </ul>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🌊</span> 經典資料集印證</div>
+        <p>完全一樣的程式碼，把 <code>nn.Linear(2, 8)</code> → 輸入大小 64，<code>nn.BCELoss</code> → <code>nn.CrossEntropyLoss</code>（多類別），就能在 <code>digits</code> 資料集（<code>sklearn.datasets.load_digits</code>，8×8 影像攤平成 64 個特徵，10 個類別）上訓練一個數字分類器。注意損失的替換：<strong>多類別時，請用 <code>nn.CrossEntropyLoss</code> 並餵給它原始 logits — 拿掉最後的 <code>nn.Sigmoid</code>/<code>nn.Softmax</code>。</strong><code>CrossEntropyLoss</code> 內部會套用 log-softmax 以維持數值穩定。那一個替換就是 PyTorch 中二元與多類別分類的差別；迴圈裡其他一切都相同。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>常見陷阱與技巧</h2>
+      <ul>
+        <li><strong>忘了 <code>optimizer.zero_grad()</code>。</strong>梯度是刻意設計成會<em>累加</em>的（對某些技巧很方便）。略過重置，每一步就會加上<em>之前所有</em>的梯度 — 你的損失會劇烈跳動或發散。這是最常見的無聲訓練 bug。永遠把它放在迴圈的第一行。</li>
+        <li><strong>裝置不一致。</strong>模型在 GPU、資料在 CPU → <code>RuntimeError: Expected all tensors to be on the same device</code>。把模型（<code>model.to(device)</code>，一次）和<em>每一批</em>輸入（<code>xb.to(device)</code>，每次迭代）<em>都</em>搬過去。</li>
+        <li><strong>與損失之間的形狀/dtype 不一致。</strong><code>nn.BCELoss</code> 要的目標形狀是 <code>(N, 1)</code> 且為 <strong>float</strong>；<code>nn.CrossEntropyLoss</code> 要的目標形狀是 <code>(N,)</code> 且為 <strong>long（整數）類別索引</strong>，輸入則是<em>原始 logits</em>（不經 softmax）。不一致會丟出晦澀的錯誤，更糟的是悄悄地在垃圾上訓練。</li>
+        <li><strong>先 <code>Sigmoid</code> 再 <code>BCELoss</code> vs. 原始 logits 再 <code>BCEWithLogitsLoss</code>。</strong>後者把 sigmoid + BCE 融合在一起以獲得更好的數值穩定性，在實務上較受青睞。我們這裡用 <code>Sigmoid + BCELoss</code> 只是因為它能 1:1 對應到你剛學的第 10 課數學。</li>
+        <li><strong>評估時忘了關掉自動微分。</strong>推論時忘了 <code>torch.no_grad()</code>，會浪費記憶體去建立一張你永遠不會反向傳播的計算圖 — 在大型評估集上還可能悄悄地耗盡記憶體 (OOM)。</li>
+        <li><strong>跨批次大小比較損失。</strong>全批次損失和 32 列小批次損失無法直接比較（平均的範圍不同、雜訊更多）。看趨勢，別看單一數字。</li>
+      </ul>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>自我檢測</h2>
+
+      <p><strong>Q1.</strong> <code>requires_grad=True</code> 實際上開啟了什麼？哪個方法會消費這項資訊？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>它告訴 PyTorch 把所有牽涉到該張量的運算<strong>記錄</strong>到計算圖上（那台「行車記錄器」）。接著 <code>loss.backward()</code> 反向走過這張記錄下來的圖，套用連鎖律，把 $\partial\mathcal{L}/\partial\theta$ 寫進每個被追蹤張量的 <code>.grad</code>。沒有 <code>requires_grad</code>，就沒有記錄，也就沒有梯度。</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> 依序寫出標準訓練迴圈的五個步驟，並說明如果刪掉第一個會壞掉什麼。</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p><code>zero_grad → forward → loss → backward → step</code>。刪掉 <code>zero_grad()</code>，梯度就會跨迭代<strong>累加</strong>（<code>.backward()</code> 是加，不是覆寫），所以每次 <code>step()</code> 用的是過去所有梯度的總和 — 訓練會變得不穩定或發散。這是第一名的無聲 bug。</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> 你的手刻網路需要明確的 <code>W1, b1, W2, b2</code> 陣列，還有一個會縮放亂數的 <code>init</code>。這些在 PyTorch 版本裡都跑去哪了？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>都進了 <code>nn.Linear</code> 裡面。每個 <code>nn.Linear(in, out)</code> 會配置自己的權重矩陣和偏值向量，<em>而且</em>自動用一套合理的方案把它們初始化。<code>model.parameters()</code> 把整批參數交給最佳化器，所以你完全不必碰那些個別的陣列。</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> 你用 <code>model.to("cuda")</code> 把模型搬到 GPU，但訓練在第一批就當掉了。最可能的原因？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>輸入資料還在 CPU 上 — <code>Expected all tensors to be on the same device</code>。修法：把每一批也搬過去，<code>xb, yb = xb.to(device), yb.to(device)</code>。模型的權重和它運算的資料必須住在同一個裝置上。</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> 你從二元改成 10 類別分類。哪兩行要改？又為什麼要拿掉最後的 <code>Sigmoid</code>？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>把輸出層改成 <code>nn.Linear(H, 10)</code>，損失改成 <code>nn.CrossEntropyLoss</code>。拿掉 <code>nn.Sigmoid</code>（以及任何 <code>Softmax</code>），因為 <code>CrossEntropyLoss</code> 期待的是<strong>原始 logits</strong> — 它內部會套用 log-softmax 以維持數值穩定。目標也變成形狀為 <code>(N,)</code> 的 <code>long</code> 類別索引，而不是獨熱編碼的 float。</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>換你試試</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml11-zero-grad">
+        <div class="ex-head"><span class="badge">Q1</span> 概念檢查</div>
+        <div class="ex-q">為什麼 <code>optimizer.zero_grad()</code> 必須是訓練迴圈裡的第一行？</div>
+        <ul class="ex-options">
+          <li data-correct="false">它每個 epoch 都把模型的權重重設回最初的隨機值。</li>
+          <li data-correct="true">因為 <code>.backward()</code> 是<em>加</em>到 <code>.grad</code> 而不是覆寫它，所以沒有重置的話每一步用的都是過去所有梯度的總和。</li>
+          <li data-correct="false">它在 <code>step()</code> 執行前把梯度搬到 GPU 上。</li>
+          <li data-correct="false">它從頭重新計算損失，讓前向傳播是全新的。</li>
+        </ul>
+        <div class="ex-explain">自動微分刻意設計成會<strong>累加</strong>梯度 — <code>loss.backward()</code> 是把新的梯度加進每個參數既有的 <code>.grad</code>。略過重置，<code>optimizer.step()</code> 套用的就是歷來算過的所有梯度的累計總和，於是損失會劇烈跳動或發散。這是第一名的無聲訓練 bug。它不會碰到權重<em>數值</em>（那是最佳化器的工作），也不會把任何東西在裝置間搬來搬去。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml11-autograd-grad" data-answer="6.0" data-tol="0.001">
+        <div class="ex-head"><span class="badge">Q2</span> 算算看</div>
+        <div class="ex-q">對 $f(w) = w^2$，且 <code>w = torch.tensor(3.0, requires_grad=True)</code>，你呼叫 <code>f.backward()</code>。<code>w.grad</code> 會存什麼值？</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">w.grad</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">自動微分精確地算出解析導數 $f'(w) = 2w$（沒有有限差分）。在 $w = 3$ 時，那就是 $2 \times 3 = 6.0$ — 跟你親手算的數字一樣。這正是 §3.2 那個小小的證明：反向傳播與微積分在浮點精度範圍內一致。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml11-multiclass-swap">
+        <div class="ex-head"><span class="badge">Q3</span> 改造網路 — 從二元到 10 類別</div>
+        <div class="ex-q">從 §3.3 的 <code>nn.Sequential</code> 二元 MLP 出發，要在 8×8 的 <code>digits</code> 資料集（64 個特徵、10 個類別）上做分類，你究竟要改什麼？目標張量的形狀和 dtype 又會怎麼變？</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">想三件事：第一個 <code>nn.Linear</code> 的<em>輸入</em>維度、最後一個 <code>nn.Linear</code> 的<em>輸出</em>維度，以及哪個損失期待的是原始 logits 而非機率。其中一個激活層也得拿掉。</div></details>
+        <details class="ex-acc"><summary>看一個解法</summary><div class="acc-body">
+          <p>對模型/損失做三處編輯，再加上一個目標的改動：</p>
+          <ul>
+            <li><strong>第一層：</strong><code>nn.Linear(2, 8)</code> → <code>nn.Linear(64, 8)</code>（或更大的隱藏層大小），以符合 64 個攤平的像素特徵。</li>
+            <li><strong>輸出層：</strong><code>nn.Linear(8, 1)</code> → <code>nn.Linear(8, 10)</code> — 每個類別一個 logit。</li>
+            <li><strong>整個拿掉最後的 <code>nn.Sigmoid()</code></strong>，並把 <code>nn.BCELoss()</code> → <code>nn.CrossEntropyLoss()</code>。<code>CrossEntropyLoss</code> 期待的是<strong>原始 logits</strong>，且內部會套用 log-softmax 以維持數值穩定，所以你自己再加 Sigmoid/Softmax 會重複一次而傷害準確率。</li>
+            <li><strong>目標：</strong>不再是形狀 <code>(N, 1)</code> 的 float 標籤，目標變成形狀 <code>(N,)</code> 的 <strong>long</strong>（整數）類別索引 — 值是 <code>0..9</code>，而不是獨熱編碼的 float。</li>
+          </ul>
+          <p>那五個步驟的迴圈 — <code>zero_grad → forward → loss → backward → step</code> — 其餘部分逐字逐句完全相同。那一個替換<em>就是</em> PyTorch 中二元與多類別分類的差別。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本課回顧</div>
+        <p><strong>張量</strong>是一個能追蹤梯度、能住在 <strong>GPU</strong> 上的 numpy 陣列 — 把裝置寫一次，然後對所有東西 <code>.to(device)</code>。<strong>自動微分</strong>記錄前向傳播，並在 <code>loss.backward()</code> 時反向重播，算出你第 10 課親手推導的那些<em>精確</em>梯度 — 沒有近似、沒有手寫連鎖律。<code>nn.Module</code>/<code>nn.Linear</code> 持有並初始化權重；<code>torch.optim</code> 負責更新；你永遠只需要寫<strong>前向傳播</strong>。<strong>標準迴圈</strong>是固定順序的五個步驟：<strong>zero_grad → forward → loss → backward → step</strong>，而 <code>Dataset</code>/<code>DataLoader</code> 免費地為它餵入會洗牌的小批次。我們用一小部分的程式碼，在完全相同的資料上重建了第 10 課那個一模一樣的網路 — 證明這個框架在不改變數學的前提下自動化了繁瑣的部分。下一課（<a href="12-training-deep-nets.html">12 — 訓練真正能收斂的深度網路</a>）：深度網路<em>為何</em>無法收斂 — Adam、學習率排程、權重初始化、正規化，以及正則化。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

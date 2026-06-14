@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>數位 I/O：GPIO、歐姆定律、按鈕與去彈跳 — Embedded Mastery</title>
+<link rel="stylesheet" href="../../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../../assets/styles.css">
+</head>
+<body class="track-arduino" data-course="embedded" data-track="arduino" data-chapter="02-gpio">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">Arduino · 第 02 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Arduino 學習路線 · 第 02 章 · 初級→中級</div>
+        <h1>數位 I/O：GPIO、歐姆定律、按鈕與去彈跳</h1>
+        <p>接腳是晶片與實體世界握手的地方。第 1 章我們讓一顆 LED 閃爍。現在我們要讓接腳<em>真正做事</em>——驅動 LED 而不燒掉它們、傾聽按鈕而不自欺欺人，並馴服金屬接點「啪」一聲閉合時那混亂的電氣現實。這正是韌體與烙鐵交會之處。</p>
+        <div class="meta">
+          <span>⏱ 約 45 分鐘</span><span>🧠 GPIO 模型</span><span>⚡ 歐姆定律</span><span>🔘 按鈕</span><span>🪲 去彈跳</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="gpio-as-switch"><span class="sec-no">1</span>一支 GPIO 接腳就是一個可控制的開關</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先建立整體圖像</small></div>
+      <p><strong>GPIO</strong> = 通用輸入/輸出（General-Purpose Input/Output）。Uno 排針上那些編號的接腳，每一支都是一條直通矽晶片的導線，而一小段邏輯電路決定這條導線要做什麼。關鍵在於：GPIO 接腳具有<em>方向</em>，而在任一瞬間，它只可能是以下兩者其中之一：</p>
+
+      <ul>
+        <li><strong>OUTPUT（輸出）</strong>——接腳<em>驅動</em>。晶片把導線箝制在約 5&nbsp;V（<code>HIGH</code>）或 0&nbsp;V（<code>LOW</code>）。你在<em>說話</em>。</li>
+        <li><strong>INPUT（輸入）</strong>——接腳<em>傾聽</em>。晶片放手不管導線，量測其他電路施加在上面的電壓。你在<em>讀取</em>。</li>
+      </ul>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話模型</div>
+        <p>GPIO 接腳是一個由軟體控制的開關：作為 <strong>OUTPUT</strong> 時，它把導線連接到 +5&nbsp;V 或接地；作為 <strong>INPUT</strong> 時，它斷開連接並安靜地感測任何傳來的電壓。</p>
+      </div>
+
+      <p>當輸出為 <code>HIGH</code> 時，電流從接腳<em>流出</em>進入你的電路——接腳<strong>提供（source）</strong>電流。當它為 <code>LOW</code> 時，電流從你的電路<em>流入</em>接腳再往下流到地——接腳<strong>吸收（sink）</strong>電流。同一支接腳，相反的電流方向。你採用哪一種，會改變 LED 的接線方式，後面就會看到。</p>
+
+      <div class="mermaid">
+flowchart TB
+    REG["DDRx 暫存器位元<br/>（方向）"] --> DIR{0 或 1？}
+    DIR -- "1 = OUTPUT" --> DRV["驅動器把導線箝制<br/>到 5V 或 0V"]
+    DIR -- "0 = INPUT" --> SNS["高阻抗緩衝器<br/>讀取導線"]
+    DRV --> PIN(["實體接腳"])
+    SNS --> PIN
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 每支接腳背後的兩個暫存器</div>
+        <p>在 AVR 上，接腳的<em>方向</em>是 <code>DDRx</code> 暫存器（資料方向暫存器，Data Direction Register）中的一個位元，而它的<em>輸出準位</em>是 <code>PORTx</code> 中的一個位元。讀取輸入接腳則是讀取 <code>PINx</code> 暫存器。<code>pinMode()</code> 與 <code>digitalWrite()</code> 只是友善的包裝，替你翻動那些位元而已。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="ohms-law"><span class="sec-no">2</span>電氣模型：歐姆定律與電流上限</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>電壓推動，電阻阻擋</small></div>
+      <p>在把任何東西接到接腳之前，你必須以<strong>伏特</strong>、<strong>安培</strong>、<strong>歐姆</strong>來思考。電壓（<span>$V$</span>，伏特）是電的「壓力」。電流（<span>$I$</span>，安培）是電荷流動的速率。電阻（<span>$R$</span>，歐姆）阻擋這種流動。三者之間的關係，是整個電子學中最重要的一條方程式：</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>推導出電阻值</small></div>
+      <div class="math-box">$$ V = I \cdot R \qquad\Longleftrightarrow\qquad I = \frac{V}{R} \qquad\Longleftrightarrow\qquad R = \frac{V}{I} $$</div>
+
+      <p>現在來看新手經典錯誤：把 LED 直接從接腳接到地。LED 是一顆<strong>二極體</strong>——一旦超過它的順向電壓 <span>$V_f$</span>，它幾乎像短路一樣，於是電流暴衝，直到某個元件燒熔。我們用一顆串聯的<strong>限流電阻</strong>來馴服它。沿著迴路套用克希荷夫電壓定律：接腳供應 <span>$V_{cc}$</span>，LED 壓降 <span>$V_f$</span>，而電阻必須承擔剩下的部分，也就是 <span>$V_{cc}-V_f$</span>。對電阻套用歐姆定律：</p>
+
+      <div class="math-box">$$ R = \frac{V_{cc} - V_f}{I} $$</div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 範例演算——計算 LED 電阻值</div>
+        <p>用一支 5&nbsp;V 接腳驅動一顆紅色 LED（<span>$V_f \approx 2\,\text{V}$</span>），目標電流 <span>$I = 10\,\text{mA} = 0.010\,\text{A}$</span>：</p>
+        <div class="math-box">$$ R = \frac{5\,\text{V} - 2\,\text{V}}{0.010\,\text{A}} = \frac{3\,\text{V}}{0.010\,\text{A}} = 300\ \Omega $$</div>
+        <p>套件裡沒有 300&nbsp;Ω？往<strong>大</strong>取最接近的庫存值（330&nbsp;Ω）——電阻愈大代表電流<em>愈小</em>，這是安全的方向。220&nbsp;Ω 會推出 <span>$I = 3/220 \approx 13.6\,\text{mA}$</span>：仍然沒問題，只是更亮一點。</p>
+      </div>
+
+      <p>那顆電阻會散逸多少熱？功率等於電壓乘以電流，再結合歐姆定律，可得到你最常引用的幾種形式：</p>
+
+      <div class="math-box">$$ P = V \cdot I = I^2 \cdot R = \frac{V^2}{R} $$</div>
+
+      <p>對我們這顆電阻而言：<span>$P = I^2 R = (0.010)^2 \times 300 = 0.03\,\text{W} = 30\,\text{mW}$</span>。一顆標準的 ¼ 瓦（250&nbsp;mW）電阻對此不屑一顧——將近 10 倍的餘裕。功率計算只有在你驅動馬達或許多 LED 時才會變得<em>有趣</em>，但檢查它的習慣現在就要養成。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——Uno 接腳的電流上限是玩真的</div>
+        <p>ATmega328P 的接腳<em>物理上</em>大約可以提供或吸收 <strong>40&nbsp;mA 的絕對最大值</strong>——超過它，你就有永久損壞接腳驅動電路的風險。<strong>安全的設計目標是每支接腳 ≤ 20&nbsp;mA</strong>，而整顆晶片還有一個合計上限（所有接腳加總約 200&nbsp;mA，並有各埠（port）的個別上限）。我們的 10&nbsp;mA LED 安穩地落在界線之下。需要驅動耗電的東西？用電晶體或 MOSFET——絕對不要用裸接腳。</p>
+      </div>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-led-wrap">
+        <div class="sim-title">🔬 即時：LED 電阻與功率計算器</div>
+        <canvas id="sim-led"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">拖曳 <em>V<sub>cc</sub></em>、<em>V<sub>f</sub></em> 與目標 <em>I</em>。模擬器會解出 $R=(V_{cc}-V_f)/I$ 與功率 $P=I^2R$，若你的電流超過 20&nbsp;mA 安全上限，便以紅色警告。</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="driving-outputs"><span class="sec-no">3</span>輸出：提供、吸收與 LED 極性</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>逐行讀</small></div>
+      <p>設定一個輸出只需兩個呼叫：在 <code>setup()</code> 裡設定一次方向，然後用 <code>digitalWrite()</code> 驅動準位。以下是接在第&nbsp;8 腳上的單顆外接 LED，採<strong>高態動作（active-high）</strong>接線（接腳 → 電阻 → LED → 地），讓它閃爍：</p>
+
+      <div class="codeblock">
+        <div class="code-head">led_output.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t LED_PIN = 8;          // 我們 LED 的陽極側，經一顆 330R 電阻
+
+void setup() {
+  pinMode(LED_PIN, OUTPUT);         // D8 的 DDRB 位元 := 1  → 接腳現在「驅動」
+}
+
+void loop() {
+  digitalWrite(LED_PIN, HIGH);      // 接腳 = 5V → 電流從接腳「提供」流出 → LED 亮
+  delay(300);
+  digitalWrite(LED_PIN, LOW);       // 接腳 = 0V → LED 上無壓降 → LED 滅
+  delay(300);
+}
+</code></pre>
+      </div>
+
+      <p>那顆 LED 是<strong>高態動作</strong>的：<code>HIGH</code> 讓它亮，因為電流從接腳<em>流出</em>（提供），穿過 LED，到地。但你也可以反過來接線。改接成 <code>+5V → 電阻 → LED → 接腳</code>，現在接腳必須拉到 <code>LOW</code> 才能點亮它——電流<em>流入</em>接腳（吸收）往地的方向去。這就是<strong>低態動作（active-low）</strong>輸出。</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>接線方式</th><th>讓 LED 亮的接腳準位</th><th>電流方向</th><th>術語</th></tr></thead>
+        <tbody>
+          <tr><td>接腳 → R → LED → GND</td><td><code>HIGH</code>（5&nbsp;V）</td><td>流出接腳</td><td>高態動作（提供電流）</td></tr>
+          <tr><td>+5V → R → LED → 接腳</td><td><code>LOW</code>（0&nbsp;V）</td><td>流入接腳</td><td>低態動作（吸收電流）</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 為什麼有時偏好吸收電流</div>
+        <p>許多 MCU（以及一般的邏輯家族）能<em>吸收</em>的電流比能提供的略多一點，而且吸收方式讓 LED 維持在固定的 +5&nbsp;V 軌上，而不是取決於接腳那略低於 5&nbsp;V 的高準位。對單顆 LED 來說這幾乎無所謂；但對 LED 陣列與七段顯示器就有差。重點是保持一致，並<em>清楚自己接的是哪一種</em>——當「我的 LED 該滅的時候卻亮著」時，軟體裡邏輯接反通常就是元兇。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="inputs-pullups"><span class="sec-no">4</span>輸入與浮接接腳的陷阱</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>未接的輸入接腳就是一支天線</small></div>
+      <p>讀取一支接腳聽起來不難：呼叫 <code>digitalRead()</code>，得到 <code>HIGH</code> 或 <code>LOW</code>。陷阱在於：當沒有任何東西主動驅動接腳時會發生什麼。一支裸 <code>INPUT</code> 接腳具有極高的阻抗——它幾乎不抽取任何電流——所以如果你讓它懸空，它並不會讀到乾淨的 0。它會<strong>浮接（float）</strong>：它撿起你手部、市電配線、附近馬達的雜散電磁雜訊，在 <code>HIGH</code> 與 <code>LOW</code> 之間隨機跳動。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——浮接的輸入</div>
+        <p>按鈕通常在<em>按下時</em>把接腳連到地，放開時則把它連到<strong>什麼都沒有</strong>。配上單純的 <code>INPUT</code>，「什麼都沒有」就意味著浮接，所以放開時讀到的是垃圾。解法是用一顆<strong>上/下拉電阻</strong>，溫和地把接腳綁到一個已知電壓。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>為什麼「拉」需要一顆電阻</small></div>
+      <p><strong>上拉（pull-up）</strong>電阻把接腳連到 +5&nbsp;V；<strong>下拉（pull-down）</strong>則把它連到地。它把閒置的接腳「拉」到一個明確的準位。為什麼不用一條普通導線？因為當按鈕<em>確實</em>把接腳連到相反的電軌時，上/下拉電阻與按鈕會構成一條從 5&nbsp;V 到地的通路——電阻把那股短路電流限制到無害的程度：</p>
+
+      <div class="math-box">$$ I_{\text{pull}} = \frac{V_{cc}}{R_{\text{pull}}} $$</div>
+
+      <p>AVR 的<strong>內部上拉</strong>大約是 <span>$R_{\text{pull}} \approx 20\text{–}50\,\text{k}\Omega$</span>。取中間值 30&nbsp;kΩ：當按鈕被按下時它把接腳綁到地，通過上拉的電流為 <span>$I = 5/30000 \approx 0.17\,\text{mA}$</span>——微不足道，卻足以在按鈕開路時維持一個穩固的邏輯準位。那高電阻正是它「弱」的原因：強到足以定義閒置狀態，弱到讓按鈕能輕易壓過它。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> <code>INPUT_PULLUP</code>——免費、內建、正確的預設</div>
+        <p>與其焊一顆外接電阻，AVR 在<em>每一支</em> GPIO 裡都內建了上拉。用 <code>pinMode(pin, INPUT_PULLUP)</code> 啟用它。接腳閒置時為 <code>HIGH</code>；接到地的按鈕按下時讀到 <code>LOW</code>。這是在 Arduino 上讀按鈕的標準做法——不需額外零件。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="buttons"><span class="sec-no">5</span>讀取按鈕：低態動作邏輯</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>按下 = LOW，這不是 bug</small></div>
+      <p>把一顆瞬時按鈕（momentary push-button）接在第&nbsp;2 腳與地之間，啟用內部上拉，你就得到了 Arduino 的標準按鈕。以下用圖來表示這個電路：</p>
+
+      <div class="mermaid">
+flowchart LR
+    VCC["+5V（內部）"] -- "約 30kΩ 上拉" --> NODE(("接腳 D2"))
+    NODE --> MCU["digitalRead(2)"]
+    NODE -- "按鈕（瞬時）" --> GND["GND"]
+      </div>
+
+      <p>追蹤兩種狀態。<strong>放開：</strong>按鈕開路，所以只有上拉勝出，把 D2 維持在 +5&nbsp;V → <code>digitalRead</code> 回傳 <code>HIGH</code>。<strong>按下：</strong>按鈕把 D2 短接到地，壓過微弱的上拉，所以 D2 停在 0&nbsp;V → <code>digitalRead</code> 回傳 <code>LOW</code>。按下狀態讀到 <code>LOW</code>：這就是<strong>低態動作</strong>邏輯，而且這是使用上拉時正常、正確的結果。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>逐行讀</small></div>
+      <div class="codeblock">
+        <div class="code-head">button_read.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t BTN_PIN = 2;          // 按鈕接在 D2 與 GND 之間
+const uint8_t LED_PIN = LED_BUILTIN;
+
+void setup() {
+  pinMode(BTN_PIN, INPUT_PULLUP);   // 閒置 HIGH；按下拉到 LOW
+  pinMode(LED_PIN, OUTPUT);
+}
+
+void loop() {
+  // 低態動作：LOW 代表按下。反相一下，讓「按下」讀起來為 true。
+  bool pressed = (digitalRead(BTN_PIN) == LOW);
+  digitalWrite(LED_PIN, pressed ? HIGH : LOW);   // LED 反映按鈕狀態
+}
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 讓意圖一目了然</div>
+        <p>拿結果與 <code>LOW</code> 比較，並把它命名為 <code>pressed</code>，就把低態動作的反相藏在一個可讀的字眼背後。未來的你（以及下一位工程師）永遠不該需要在腦中重新推導「等等，LOW 是按下還是放開？」——變數名稱就回答了這個問題。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="bounce"><span class="sec-no">6</span>問題：接點彈跳</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>金屬拍打金屬會「彈響」</small></div>
+      <p>按鈕是兩片有彈性的金屬接點。當你按下時，它們不會乾淨俐落地貼合——它們猛然撞在一起、<em>彈開</em>、再撞、來回顫動數毫秒，才終於安定下來。在電氣上，接腳看到的不是一道乾淨的 <code>HIGH→LOW</code> 邊緣；它看到的是一串爆發的邊緣。典型的機械開關彈跳約 <strong>1–10&nbsp;ms</strong>。以下是示波器波形，用時間順序來描述：</p>
+
+      <div class="mermaid">
+flowchart LR
+    A["放開<br/>HIGH"] --> B["按下！<br/>↯ 彈跳<br/>LOW-HIGH-LOW-HIGH"]
+    B --> C["安定<br/>LOW（1–10ms 後）"]
+    C --> D["放開！<br/>↯ 再次彈跳"]
+    D --> E["放開<br/>HIGH"]
+      </div>
+
+      <p>CPU 每秒執行 <code>loop()</code> 數百萬次，遠比那些彈跳快得多。所以單一次的實體按壓，在天真的程式碼看來就像<strong>好幾次按壓</strong>。如果你在切換一顆 LED，或更糟——在<em>計數</em>按壓次數，那麼一次按壓就會被記成三次、五次、一個隨機數字。這是初學嵌入式時最常見的「我的程式碼鬧鬼了」bug。</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——說謊的計數器</div>
+        <p>有一台工業零件計數器，盯著輸送帶上的限位開關，每件物品經過時觸發一次。沒有去彈跳的情況下，接點彈跳讓它在實際只通過 9,800 件時卻計到 12,000 件——22% 的幽靈超計，搞砸了庫存盤點，也導致出貨短缺。輸入<strong>調理（conditioning）</strong>（韌體裡的去彈跳，有時是硬體的 RC 濾波器）不是錦上添花；它是「可信賴的計數」與「不可信的計數」之間的差別。每一台 PLC、每一個產品級的按鈕輸入，都會去彈跳。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="debouncing"><span class="sec-no">7</span>去彈跳：從阻塞式到非阻塞式</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>等到「彈響」停止</small></div>
+      <p>去彈跳的意思是：<em>忽略那串顫動，回報一次乾淨的轉態</em>。有三種逐步升級的做法。</p>
+
+      <p><strong>1. 阻塞式的 <code>delay()</code> 取巧法。</strong>看到一道邊緣後，用 <code>delay(20)</code> 睡過彈跳的時間窗，然後再讀一次。簡單，而且有效——但它讓整個程式凍結 20&nbsp;ms。其他什麼都動不了：其他按鈕不行、感測器不行、閃爍也不行。對單按鈕的玩具還行，在真實產品裡卻是致命的。</p>
+
+      <div class="codeblock">
+        <div class="code-head">debounce_blocking.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">if (digitalRead(BTN_PIN) == LOW) {  // 可能按下了
+  delay(20);                        // ⛔ 讓所有東西凍結 20 ms
+  if (digitalRead(BTN_PIN) == LOW)  // 還按著？那就是真的
+    handlePress();
+}
+</code></pre>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>挑選時間窗</small></div>
+      <p>該等多久？久到能撐過彈跳，短到讓人感覺即時。彈跳最長到 <span>$t_b \approx 10\,\text{ms}$</span> 時，去彈跳時間窗 <span>$t_d$</span> 必須滿足：</p>
+
+      <div class="math-box">$$ t_b < t_d \ll t_{\text{human}} \qquad\Rightarrow\qquad 10\,\text{ms} < t_d \ll 100\,\text{ms} $$</div>
+
+      <p>人按按鈕的速度不可能快過每秒約 10 次（相隔約 100&nbsp;ms），所以從 <strong>20–50&nbsp;ms</strong> 之間任選一個值，都安穩地落在「比彈跳久」與「比一次真正的二度按壓短」之間。我們會用 25&nbsp;ms。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>非阻塞式的 millis() 去彈跳</small></div>
+      <p><strong>2. 非阻塞式的 <code>millis()</code> 去彈跳。</strong>我們不去睡覺，而是<em>記住最後一次彈跳的時間</em>，只有在輸入維持穩定整個時間窗之後才接受它。<code>millis()</code> 回傳開機以來的毫秒數，而且永不阻塞。我們追蹤最後一次的原始讀值、最後一次<em>穩定</em>的讀值，以及一個時間戳記——這是典型的<strong>狀態追蹤</strong>：</p>
+
+      <div class="codeblock">
+        <div class="code-head">debounce_millis.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t BTN_PIN = 2;
+const unsigned long DEBOUNCE_MS = 25;     // &gt; 最大彈跳，&lt; 人類反應
+
+int  lastRaw     = HIGH;                   // 前一次的*原始*讀值
+int  stableState = HIGH;                   // 最後一次*接受*（去彈跳後）的準位
+unsigned long lastChange = 0;              // 原始讀值最後一次翻轉的時刻
+long pressCount = 0;
+
+void setup() {
+  pinMode(BTN_PIN, INPUT_PULLUP);
+  Serial.begin(9600);
+}
+
+void loop() {
+  int raw = digitalRead(BTN_PIN);          // 低態動作：LOW == 按下
+
+  if (raw != lastRaw) {                     // 原始讀值翻轉 → （重新）啟動計時器
+    lastChange = millis();                  // 記下彈跳的「時刻」
+    lastRaw = raw;
+  }
+
+  // 原始準位維持穩定的時間，是否已超過去彈跳時間窗？
+  if ((millis() - lastChange) &gt;= DEBOUNCE_MS) {
+    if (raw != stableState) {               // 一個全新、已安定的準位
+      stableState = raw;
+      if (stableState == LOW) {             // 安定在 LOW = 一次真正的按下
+        pressCount++;
+        Serial.println(pressCount);
+      }
+    }
+  }
+  // loop() 永不阻塞——其他工作每一輪都能在這裡執行。
+}
+</code></pre>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 計時器真正量的是什麼</div>
+        <p>每當原始接腳<em>變化</em>時，我們就把 <code>lastChange</code> 重設為「現在」。所以 <code>millis() - lastChange</code> 就是「接腳安靜了多久」。我們只有在那段安靜的時間超過 25&nbsp;ms 之後才信任這個讀值——也就是說，當彈跳已明確停止之後。只在 <code>HIGH→LOW</code> 的安定邊緣上計數（而非每一道邊緣），正是保證每次按壓只計一次的關鍵。</p>
+      </div>
+
+      <p>這與你會在第&nbsp;5 章遇到的非阻塞式閃爍是同一種模式：保存一個時間戳記、與 <code>millis()</code> 比較、永不 <code>delay()</code>。它是在單執行緒 MCU 上同時做許多事情的骨幹。</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 別永遠重造輪子——但要徹底理解它一次</div>
+        <p>正式產品的程式碼常會採用經過驗證的函式庫，例如 <code>Bounce2</code>，它正是包裝了這套狀態機。那很好——<em>前提是</em>你能從零自己寫出來。一個你不理解的函式庫，就是一個你修不了的 bug。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>⑤ 換你上場</h2>
+      <div class="layer"><span class="step">⑤</span> 練習 <small>你來寫，你來決定</small></div>
+      <p>三道檢核。點一個答案、輸入一個數字，或揭開一道程式挑戰。你的進度會儲存在這台裝置上，並顯示在首頁。</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="ard02-pullup">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢核</div>
+        <div class="ex-q">你把一顆按鈕接在 D2 與 GND 之間，並使用 <code>pinMode(2, INPUT_PULLUP)</code>。當按鈕<strong>被按下</strong>時，<code>digitalRead(2)</code> 回傳什麼，又為什麼？</div>
+        <ul class="ex-options">
+          <li data-correct="false"><code>HIGH</code>——上拉會在按下時強迫它為高</li>
+          <li data-correct="true"><code>LOW</code>——按鈕把接腳短接到地，壓過了微弱的上拉</li>
+          <li data-correct="false"><code>HIGH</code>——按下時把接腳連到了 +5&nbsp;V</li>
+          <li data-correct="false">它會隨機浮接，因為沒有東西驅動這支接腳</li>
+        </ul>
+        <div class="ex-explain">配上上拉，接腳閒置時為 <code>HIGH</code>。按下時把它連到地，而由於內部上拉很弱（約 20–50&nbsp;kΩ），按鈕輕鬆勝出，把接腳拖到 0&nbsp;V → <code>LOW</code>。這就是<strong>低態動作</strong>邏輯：<em>按下 = LOW</em>。這不是 bug；這是上拉按鈕被定義好的行為。</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="ard02-resistor" data-answer="193" data-tol="8">
+        <div class="ex-head"><span class="badge">Q2</span> 算一算</div>
+        <div class="ex-q">替一顆順向電壓 <strong>$V_f = 2.1\,\text{V}$</strong>、由 <strong>$V_{cc} = 5\,\text{V}$</strong> 驅動、目標電流 <strong>$I = 15\,\text{mA}$</strong> 的 LED 計算限流電阻。使用 $R = (V_{cc}-V_f)/I$。以<strong>歐姆</strong>為單位給出 $R$。</div>
+        <input class="ex-input" type="number" step="any" placeholder="歐姆"><span class="ex-unit">Ω</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$R = \dfrac{5 - 2.1}{0.015} = \dfrac{2.9}{0.015} \approx 193\,\Omega$。實務上你會往<em>大</em>取一顆庫存的 220&nbsp;Ω（電流略小，是安全的方向）。消耗的功率為 $P = I^2R = (0.015)^2 \times 193 \approx 43\,\text{mW}$——對一顆 ¼ 瓦的元件來說輕而易舉。</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="ard02-toggle">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰——非阻塞式切換計數器</div>
+        <div class="ex-q">寫一支草稿碼（sketch），對一顆按鈕（D2，<code>INPUT_PULLUP</code>）使用<strong>非阻塞式的 <code>millis()</code> 去彈跳</strong>，在每一次<em>乾淨</em>的按壓時<strong>切換（toggle）</strong>內建 LED，並透過序列埠（Serial）印出累計的按壓次數。任何地方都不准用 <code>delay()</code>。關鍵限制：無論接點彈跳得多糟，每一次實體按壓都剛好切換一次。</div>
+        <details class="ex-acc">
+          <summary>提示</summary>
+          <div class="acc-body">重複使用狀態追蹤的模式：儲存 <code>lastRaw</code>、<code>stableState</code> 與 <code>lastChange</code>。每當原始讀值翻轉時就重設 <code>lastChange = millis()</code>。只有在 <code>millis() - lastChange &gt;= 25</code> <em>且</em>安定後的準位是一個全新的 <code>LOW</code> 時才動作。在那道安定為 LOW 的邊緣上，翻轉一個 <code>ledOn</code> 布林值並用 <code>digitalWrite</code> 寫出它。</div>
+        </details>
+        <details class="ex-acc">
+          <summary>顯示一個解答</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">toggle_counter.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t BTN = 2, LED = LED_BUILTIN;
+const unsigned long DEBOUNCE_MS = 25;
+
+int  lastRaw     = HIGH;
+int  stableState = HIGH;
+unsigned long lastChange = 0;
+bool ledOn = false;
+long presses = 0;
+
+void setup() {
+  pinMode(BTN, INPUT_PULLUP);
+  pinMode(LED, OUTPUT);
+  Serial.begin(9600);
+}
+
+void loop() {
+  int raw = digitalRead(BTN);
+
+  if (raw != lastRaw) {              // 彈跳或真實邊緣：重新啟動計時器
+    lastChange = millis();
+    lastRaw = raw;
+  }
+
+  if ((millis() - lastChange) &gt;= DEBOUNCE_MS) {
+    if (raw != stableState) {        // 安定到一個新準位
+      stableState = raw;
+      if (stableState == LOW) {      // 安定的按下 → 只動作一次
+        ledOn = !ledOn;              // 切換
+        digitalWrite(LED, ledOn ? HIGH : LOW);
+        presses++;
+        Serial.println(presses);
+      }
+    }
+  }
+  // ...其他非阻塞式工作可以放在這裡；loop() 永不卡住。
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">訣竅是只在<strong>安定後的 <code>HIGH→LOW</code> 轉態</strong>上動作，而非每一道原始邊緣——這正是把一串雜訊爆發塌縮成單一次切換的關鍵。因為沒有任何東西阻塞，你可以在同一個 <code>loop()</code> 裡替十顆按鈕去彈跳、並讓三顆 LED 閃爍。那種可組合性，正是我們捨棄 <code>delay()</code> 的全部理由。</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> 本章回顧</div>
+        <p>你現在能把一支 GPIO 接腳推理為一個<em>提供/吸收</em>電流的 OUTPUT，或一個<em>傾聽</em>的 INPUT；用 $R=(V_{cc}-V_f)/I$ 計算 LED 電阻，並用 $P=I^2R$ 檢查它的功率；遵守 20&nbsp;mA 安全 / 40&nbsp;mA 最大的接腳上限；用 <code>INPUT_PULLUP</code> 消滅浮接的輸入並正確讀取低態動作的按鈕；解釋接點彈跳；並寫出一套非阻塞式的 <code>millis()</code> 去彈跳，每次按壓恰好回報一個事件。接下來我們會在那些邊緣背後放上一個真正的計時器，開始同時做許多事情。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="回到頂部">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../../../assets/vendor/highlight.min.js"></script>
+<script src="../../../assets/katex/katex.min.js"></script>
+<script src="../../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../../assets/vendor/mermaid.min.js"></script>
+<script src="../../../assets/app.js"></script>
+
+<!-- chapter-specific simulator -->
+<script>
+EM.sim("sim-led", {
+  height: 250,
+  params: [
+    { key: "vcc", label: "Vcc（供應電壓）",  min: 3,  max: 12, step: 0.1, value: 5,  unit: "V" },
+    { key: "vf",  label: "Vf（LED 壓降）", min: 1.6, max: 3.4, step: 0.1, value: 2,  unit: "V" },
+    { key: "i",   label: "I（目標電流）",    min: 1,  max: 30, step: 1,   value: 10, unit: "mA" }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h, pad = 24 * dpr;
+    var iA = v.i / 1000;                                  // mA → A
+    var headroom = v.vcc - v.vf;                          // 電阻上的壓降（伏特）
+    var safe = (v.i <= 20) && (headroom > 0);
+
+    // --- draw a tiny schematic: Vcc -[R]- LED -GND ---
+    var midY = H * 0.42;
+    ctx.lineWidth = 2 * dpr;
+    ctx.strokeStyle = safe ? "#2ec4b6" : "#ff5c5c";
+    ctx.fillStyle = "#9aa4b2";
+    ctx.font = (13 * dpr) + "px monospace";
+
+    var x0 = pad, x1 = W - pad;
+    // supply node
+    ctx.beginPath(); ctx.moveTo(x0, midY); ctx.lineTo(x0 + 60 * dpr, midY); ctx.stroke();
+    ctx.fillText(v.vcc.toFixed(1) + "V", x0, midY - 10 * dpr);
+    // resistor (zigzag)
+    var rx = x0 + 60 * dpr, rw = 90 * dpr, zig = 8 * dpr;
+    ctx.beginPath(); ctx.moveTo(rx, midY);
+    for (var k = 0; k < 6; k++) {
+      ctx.lineTo(rx + (k + 0.5) * (rw / 6), midY + (k % 2 ? zig : -zig));
+    }
+    ctx.lineTo(rx + rw, midY); ctx.stroke();
+    // wire to LED
+    var lx = rx + rw;
+    ctx.beginPath(); ctx.moveTo(lx, midY); ctx.lineTo(lx + 50 * dpr, midY); ctx.stroke();
+    // LED triangle
+    var tx = lx + 50 * dpr;
+    ctx.beginPath();
+    ctx.moveTo(tx, midY - 12 * dpr); ctx.lineTo(tx, midY + 12 * dpr);
+    ctx.lineTo(tx + 22 * dpr, midY); ctx.closePath();
+    ctx.fillStyle = safe ? "#2ec4b6" : "#ff5c5c"; ctx.fill();
+    ctx.fillStyle = "#9aa4b2";
+    // wire to GND
+    ctx.beginPath(); ctx.moveTo(tx + 22 * dpr, midY); ctx.lineTo(x1, midY); ctx.stroke();
+    ctx.fillText("GND", x1 - 34 * dpr, midY - 10 * dpr);
+
+    // --- compute results ---
+    var out;
+    if (headroom <= 0) {
+      out = "<b style='color:#ff5c5c'>Vcc 必須大於 Vf</b>——沒有剩餘電壓可驅動電流。";
+    } else {
+      var R = headroom / iA;                              // ohms
+      var P = iA * iA * R;                                // watts, I^2 R
+      var warn = (v.i > 20)
+        ? " &nbsp;·&nbsp; <b style='color:#ff5c5c'>⚠ I &gt; 20 mA——超過安全的接腳上限！</b>"
+        : "";
+      out = "R = (V<sub>cc</sub>−V<sub>f</sub>)/I = (" + v.vcc.toFixed(1) + "−" +
+            v.vf.toFixed(1) + ")/" + (v.i) + "mA = <b>" + (Math.round(R)) + " Ω</b>" +
+            " &nbsp;·&nbsp; P = I²R = <b>" + (Math.round(P * 1000)) + " mW</b>" + warn;
+    }
+    return out;
+  }
+});
+</script>
+</body>
+</html>

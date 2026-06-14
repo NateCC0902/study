@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>類比世界：ADC、感測器與訊號調理 — Embedded Mastery</title>
+<link rel="stylesheet" href="../../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../../assets/styles.css">
+</head>
+<body class="track-arduino" data-course="embedded" data-track="arduino" data-chapter="03-analog">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">Arduino · 第 03 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Arduino 學習軌 · 第 03 章 · 中階</div>
+        <h1>類比世界：ADC、感測器與訊號調理</h1>
+        <p>到目前為止，你的接腳都活在二元宇宙裡——<code>HIGH</code> 或 <code>LOW</code>，開或關。但溫度、光線、壓力與電池電壓都是<em>連續</em>的。要讀取它們，你需要這顆晶片中最被低估的周邊：<strong>類比數位轉換器（ADC）</strong>。我們會從直覺把它建立起來，把它的精度推導到毫伏的層級，並接上真正出貨於真實產品中的感測器。</p>
+        <div class="meta">
+          <span>⏱ 約 45 分鐘</span><span>🧠 量化</span><span>⚡ 真實感測器</span><span>📐 分壓器數學</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="analog-vs-digital"><span class="sec-no">1</span>類比 vs 數位：世界是一條平滑曲線</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先建立圖像</small></div>
+      <p>數位訊號恰好只有兩種狀態。<strong>類比</strong>訊號則可以是某個範圍內的<em>任何</em>值，隨時間平滑變化——麥克風的電壓、溫度感測器的緩慢漂移、旋鈕的位置。大自然不處理 <code>HIGH</code> 與 <code>LOW</code>；它處理的是無限精細的漸層。</p>
+
+      <p>然而，你那顆 8 位元的 AVR 只懂數字。它無法把「3.27 伏特」當成一個連續量保存下來——它必須把那個電壓轉換成可以儲存並做運算的<em>整數</em>。執行這項轉譯的周邊就是 <strong>ADC</strong>（類比數位轉換器），而 <code>analogRead()</code> 就是你通往它的一行門票。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話的模型</div>
+        <p>ADC 是一把<strong>量電壓的尺</strong>。它在量測範圍上鋪設固定數量、間距均勻的刻度，然後回報你的輸入電壓<em>最接近哪一格刻度</em>——以一個普通整數的形式。</p>
+      </div>
+
+      <p>「最接近」這個詞就是整個故事的核心。一把以毫米為刻度的尺無法告訴你某物是 4.37 mm——它會四捨五入到 4 mm。ADC 對電壓做的事一模一樣。這種捨入稱為<strong>量化</strong>，搞懂它，正是「信任你的感測器資料」與「被它愚弄」之間的分野。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 兩個接腳世界</div>
+        <p>Uno 上標示為 <code>D0</code>–<code>D13</code> 的接腳是<strong>數位</strong>（兩種狀態）。標示為 <code>A0</code>–<code>A5</code> 的六支接腳則接到 <strong>ADC</strong>，每一支都能被<em>讀取</em>為連續電壓。（它們也可以兼作數位腳——但只有 A0–A5 能通到轉換器。）</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="adc-resolution"><span class="sec-no">2</span>解析度：尺上有多少格刻度？</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>推導精度</small></div>
+      <p>ADC 的<strong>解析度</strong>是指它能輸出多少個不同的值，由它的位元數 <span>$N$</span> 決定。用 <span>$N$</span> 個位元，你可以編碼出</p>
+
+      <div class="math-box">
+        $$ \text{levels} = 2^{N} $$
+      </div>
+
+      <p>ATmega328P 的 ADC 是 <strong>10 位元</strong>，所以它會產生</p>
+
+      <div class="math-box">
+        $$ 2^{10} = 1024 \text{ levels}, \quad \text{numbered as codes } 0,1,2,\dots,1023 $$
+      </div>
+
+      <p>編碼 <code>0</code> 代表「電壓在範圍底端或更低」；編碼 <code>1023</code> 代表「在頂端或更高」。介於兩者之間的一切都會對應到 1022 個內部刻度之一。一格刻度的大小——也就是 ADC 能分辨的最小電壓變化——稱為 <strong>LSB</strong>（最低有效位元），其值由整個範圍除以<em>步進數</em>而得：</p>
+
+      <div class="math-box">
+        $$ V_{\text{LSB}} = \frac{V_{\text{ref}}}{2^{N}} = \frac{V_{\text{ref}}}{1024} $$
+      </div>
+
+      <p>在 Uno 的預設參考電壓 <span>$V_{\text{ref}} = 5\,\text{V}$</span> 下：</p>
+
+      <div class="math-box">
+        $$ V_{\text{LSB}} = \frac{5\,\text{V}}{1024} \approx 4.883\,\text{mV} $$
+      </div>
+
+      <p>這就是你的下限：Uno 無法區分相差小於約 4.9 mV 的兩個電壓。想要更細的解析度？要嘛縮小 <span>$V_{\text{ref}}$</span>（1.1 V 的內部參考可給出約 1.07 mV/LSB，但範圍只有 0–1.1 V），要嘛換到一顆具備 12 位元或 16 位元 ADC 的晶片。</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 量化誤差是有界的</div>
+        <p>因為 ADC 會捨入到最接近的刻度，任何一筆讀數的偏差最多就是<strong>半格刻度</strong>。最差情況的量化誤差為</p>
+        <div class="math-box">$$ \varepsilon_{q} = \pm\tfrac{1}{2}V_{\text{LSB}} = \pm\frac{V_{\text{ref}}}{2048} \approx \pm 2.44\,\text{mV} $$</div>
+        <p>這個誤差是與生俱來的——即使輸入完美、毫無雜訊，它依然存在。這是用整數去表示一個平滑世界所必須付出的代價。</p>
+      </div>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>ADC 位元數 <span>$N$</span></th><th>位階數 <span>$2^N$</span></th><th>5 V 下的 LSB</th><th>常見落腳處</th></tr></thead>
+        <tbody>
+          <tr><td>8 位元</td><td>256</td><td><code>19.5 mV</code></td><td>廉價轉換器</td></tr>
+          <tr><td><strong>10 位元</strong></td><td><strong>1024</strong></td><td><code>4.88 mV</code></td><td><strong>Arduino Uno（ATmega328P）</strong></td></tr>
+          <tr><td>12 位元</td><td>4096</td><td><code>1.22 mV</code></td><td>STM32、ESP32、Due</td></tr>
+          <tr><td>16 位元</td><td>65536</td><td><code>76.3 µV</code></td><td>外接式 ADC（ADS1115）</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="conversion-analogread"><span class="sec-no">3</span>從編碼到伏特：<code>analogRead()</code> 與 AREF</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>反轉映射</small></div>
+      <p><code>analogRead(pin)</code> 交給你的是整數編碼，不是電壓。要還原電壓，你得把這把尺反過來算。微妙之處在於：雖然有 1024 個<em>位階</em>，但全幅讀數是從編碼 0 跨到編碼 1023，總共 1023 個<em>步進</em>，因此 Arduino 的慣例是把編碼線性映射到 <span>$[0, V_{\text{ref}}]$</span>：</p>
+
+      <div class="math-box">
+        $$ V = \frac{\text{adc}}{1023}\, V_{\text{ref}} $$
+      </div>
+
+      <p>所以在 <span>$V_{\text{ref}} = 5\,\text{V}$</span> 下，讀數 <code>512</code> 對應的是 <span>$\tfrac{512}{1023}\times 5 \approx 2.503\,\text{V}$</span>——幾乎正好是中刻度，正如你所預期。（你會在後面的練習中再次遇到這個運算。）</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>逐行細讀</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">read_voltage.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t SENSE_PIN = A0;     // 類比輸入 A0
+const float   VREF      = 5.0;    // 參考電壓（Uno 預設）
+
+void setup() {
+  Serial.begin(9600);
+  // 類比腳做 analogRead 時不需要 pinMode——ADC 的
+  // 多工器會處理通道選擇。但讓它們保持未被驅動的狀態。
+}
+
+void loop() {
+  int   raw     = analogRead(SENSE_PIN);   // 0..1023，耗時約 104 µs
+  float volts   = (raw / 1023.0) * VREF;   // 反轉量化器
+
+  Serial.print(raw);
+  Serial.print(F("  ->  "));
+  Serial.print(volts, 3);                  // 小數點後 3 位
+  Serial.println(F(" V"));
+  delay(200);
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——整數除法吃掉你的讀數</div>
+        <p>若寫成 <code>raw / 1023</code>（兩者皆整數），C++ 會做<em>整數</em>除法：任何低於 1023 的編碼都會變成 <code>0</code>。你必須以 <code>raw / 1023.0</code>（注意那個 <code>.0</code>）強制使用浮點數，分數電壓才能保留下來。這個沉默的 bug 幾乎每位初學者都會中招一次。</p>
+      </div>
+
+      <p><span>$V_{\text{ref}}$</span> 在物理上是什麼？它是 ADC 拿來比對的電壓——它的「尺頂」。在 Uno 上，你用 <code>analogReference()</code> 來選擇它：</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>選項</th><th>參考電壓</th><th>LSB</th><th>使用時機……</th></tr></thead>
+        <tbody>
+          <tr><td><code>DEFAULT</code></td><td>5 V（V<sub>CC</sub>）</td><td>4.88 mV</td><td>一般用途；範圍與 5 V 邏輯相符</td></tr>
+          <tr><td><code>INTERNAL</code></td><td>1.1 V（晶片內建能隙基準）</td><td>1.07 mV</td><td>微弱訊號；即使 V<sub>CC</sub> 下垂仍穩定</td></tr>
+          <tr><td><code>EXTERNAL</code></td><td><code>AREF</code> 腳上的電壓</td><td>V<sub>AREF</sub>/1024</td><td>你自備精密參考電壓</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——AREF 短路</div>
+        <p>若你先把外部電壓接到 <code>AREF</code> 腳，<em>然後</em>才呼叫 <code>analogReference(EXTERNAL)</code>，沒問題。但若順序顛倒——在仍連接著預設內部參考的情況下去驅動 AREF——你就會把內部源短路到你的外部源。永遠要在第一次 <code>analogRead()</code> <strong>之前</strong>就選好 <code>EXTERNAL</code>。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="sampling-nyquist"><span class="sec-no">4</span>它能多快取樣？預除器與奈奎斯特</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>速度從何而來</small></div>
+      <p>轉換並非瞬間完成——ADC 使用<strong>逐次逼近</strong>，本質上是一場二分搜尋，把一個比較電壓對半切十次，逐一鎖定全部十個位元。它由自己的時脈驅動，而該時脈是經由<strong>預除器</strong>從 16 MHz 系統時脈導出的。AVR 資料手冊規定 ADC 時脈應落在 50 kHz 到 200 kHz 之間，才能維持完整的 10 位元準確度，因此 Arduino 核心選用了 <strong>128</strong> 的預除值：</p>
+
+      <div class="math-box">
+        $$ f_{\text{ADC}} = \frac{f_{\text{clk}}}{128} = \frac{16\,\text{MHz}}{128} = 125\,\text{kHz} $$
+      </div>
+
+      <p>一次正常轉換需要 <strong>13 個 ADC 時脈週期</strong>。所以每次取樣的時間與由此得到的吞吐量為</p>
+
+      <div class="math-box">
+        $$ t_{\text{conv}} = \frac{13}{f_{\text{ADC}}} = \frac{13}{125\,000} \approx 104\,\mu\text{s}, \qquad f_{s} = \frac{f_{\text{ADC}}}{13} \approx 9.6\,\text{ksps} $$
+      </div>
+
+      <p>就是這樣——在預設設定下大約每秒 <strong>9600 次取樣</strong>，這正是上面程式中 <code>~104 µs</code> 註解背後的數字。如果你能接受低位元稍微多一些雜訊，可以把預除器降到 16（1 MHz 的 ADC 時脈），達到約 77 ksps——這是音訊級取樣常用的招數。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 一行講完奈奎斯特</div>
+        <p>要重建頻率為 <span>$f_{\text{sig}}$</span> 的訊號，你的取樣速度必須快過它的<strong>兩倍</strong>：</p>
+        <div class="math-box">$$ f_{s} > 2\,f_{\text{sig}} $$</div>
+        <p>在 9.6 ksps 下，Uno 可以忠實捕捉到約 4.8 kHz 以下的訊號。餵給它任何更快的訊號，它就會<em>混疊（alias）</em>——一個 10 kHz 的音調會偽裝成一道緩慢的幽靈波。這就是為什麼音訊設備會在 ADC 之前放一個低通的「抗混疊」濾波器。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="voltage-dividers"><span class="sec-no">5</span>分壓器：你的萬用感測器介面</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>把電阻變成電壓</small></div>
+      <p>大多數廉價感測器並不輸出電壓——它們改變的是自身的<em>電阻</em>：光敏電阻（LDR）在受光時電阻變小，熱敏電阻在變熱時電阻變小。但 ADC 只會讀電壓。連接兩者的橋樑，是整個電子學中最常用的電路：<strong>分壓器</strong>。</p>
+
+      <p>把兩個電阻串聯跨接在你的電源上。兩者之間的中點電位由它們的比值決定。若 <span>$R_1$</span> 在上方（朝向 V<sub>in</sub>），<span>$R_2$</span> 在下方（朝向接地），則中點電壓為</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>從歐姆定律推導</small></div>
+      <div class="math-box">
+        $$ V_{\text{out}} = V_{\text{in}}\,\frac{R_2}{R_1 + R_2} $$
+      </div>
+
+      <p>為什麼？同一股電流 <span>$I = V_{\text{in}}/(R_1+R_2)$</span> 流過兩個電阻（串聯）。下方電阻上的電壓是 <span>$I\,R_2$</span>；代入 <span>$I$</span>，那個 <span>$R_1+R_2$</span> 的分母就出現了。檢驗一下極端情況：若 <span>$R_2 \to 0$</span>，輸出為 0 V；若 <span>$R_2 \to \infty$</span>，輸出趨近於完整的 <span>$V_{\text{in}}$</span>。比值不過是把中點上下滑動而已。</p>
+
+      <div class="mermaid">
+flowchart LR
+    SENSOR["電阻式感測器<br/>LDR / 熱敏電阻"] --> DIV["分壓器<br/>固定 R + 感測器"]
+    DIV --> ADC["ADC<br/>10 位元量化器"]
+    ADC --> CODE["analogRead()<br/>編碼 0..1023"]
+    CODE --> CALC["你的程式<br/>伏特 → 物理單位"]
+      </div>
+
+      <p>這條鏈——<strong>感測器 → 分壓器 → ADC → 編碼 → 物理單位</strong>——是你日後幾乎所有類比量測的骨架。徹底掌握它一次，每一個電阻式感測器都會變成同一個問題。</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 挑選固定電阻</div>
+        <p>為了得到最佳靈敏度，要把<em>固定</em>電阻選在感測器<strong>於你最在意的那個值</strong>時的電阻附近。室溫下的 10 kΩ 熱敏電阻與一個 10 kΩ 固定電阻搭配得天衣無縫——分壓器輸出此時正好在你量測的位置擺幅最陡。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="real-sensors"><span class="sec-no">6</span>三個真實感測器：LDR、熱敏電阻與 TMP36</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>以及每一個背後的數學</small></div>
+
+      <p><strong>LDR（光線）。</strong>光敏電阻的阻值在黑暗中高達數百萬歐姆，在強光下則降到幾百歐姆。把它接成分壓器的上方電阻，下方接一個固定的 10 kΩ 到接地；光線越亮，ADC 讀數越高。不需要花俏的數學——你只要把編碼映射成「較暗/較亮」，或對照已知的勒克斯（lux）做校正即可。</p>
+
+      <p><strong>NTC 熱敏電阻（溫度，非線性）。</strong>它的電阻隨溫度升高而下降，但是以<em>指數</em>方式，而非線性。簡單的 <strong>Beta 模型</strong>把它的電阻 <span>$R$</span> 與以克耳文為單位的溫度連結起來：</p>
+
+      <div class="math-box">
+        $$ \frac{1}{T} = \frac{1}{T_0} + \frac{1}{B}\ln\!\left(\frac{R}{R_0}\right) $$
+      </div>
+
+      <p>此處 <span>$R_0$</span> 是在參考溫度 <span>$T_0$</span>（通常為 25 °C = 298.15 K）下的標稱電阻，而 <span>$B$</span> 是資料手冊上的「Beta」常數（常見的 10 kΩ 元件約為 3950 K）。你讀取分壓器，解出熱敏電阻的 <span>$R$</span>，然後代入方程式。若要更高的準確度，完整的 <strong>Steinhart–Hart</strong> 方程式會再加兩個係數，但在一般從室溫到烤箱的範圍內，Beta 模型的誤差在零點幾度以內。</p>
+
+      <div class="codeblock">
+        <div class="code-head">thermistor.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;math.h&gt;
+
+const float VREF   = 5.0;
+const float R_FIX  = 10000.0;   // 10 kΩ 固定電阻（接 GND）
+const float R0     = 10000.0;   // 熱敏電阻 @ 25 °C 為 10 kΩ
+const float T0     = 298.15;    // 25 °C 換算為克耳文
+const float BETA   = 3950.0;    // 資料手冊 Beta 常數（K）
+
+void setup() { Serial.begin(9600); }
+
+void loop() {
+  int   raw   = analogRead(A0);
+  float v     = (raw / 1023.0) * VREF;
+
+  // 熱敏電阻是上方電阻；R_FIX 接 GND 為下方電阻。
+  // Vout = VREF * R_FIX / (R_therm + R_FIX)  ->  解出 R_therm：
+  float rTherm = R_FIX * (VREF / v - 1.0);
+
+  // Beta 方程式：1/T = 1/T0 + (1/B)·ln(R/R0)
+  float invT  = 1.0 / T0 + (1.0 / BETA) * log(rTherm / R0);
+  float tempC = (1.0 / invT) - 273.15;   // 克耳文 -> 攝氏
+
+  Serial.print(tempC, 2);
+  Serial.println(F(" C"));
+  delay(500);
+}
+</code></pre>
+      </div>
+
+      <p><strong>TMP36（溫度，線性又簡單）。</strong>這顆主動式感測器在內部把難算的部分都做掉了，輸出一個乾淨的電壓：0 °C 時為 500 mV，之後每升高 1 °C 規規矩矩地上升 <strong>10 mV</strong>。不用分壓器、不用對數——只要把一條直線反過來算：</p>
+
+      <div class="math-box">
+        $$ T_{\circ C} = \frac{V_{\text{out}} - 0.5\,\text{V}}{0.01\,\text{V}/^{\circ}\text{C}} $$
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">tmp36.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const float VREF = 5.0;
+
+void setup() { Serial.begin(9600); }
+
+void loop() {
+  int   raw   = analogRead(A0);
+  float v     = (raw / 1023.0) * VREF;       // 感測器輸出，單位伏特
+  float tempC = (v - 0.5) / 0.01;            // 0°C 時 500 mV，每 °C 10 mV
+
+  Serial.print(tempC, 1);
+  Serial.println(F(" C"));
+  delay(500);
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——5 V 參考會晃動</div>
+        <p>上面每一條公式都假設 <span>$V_{\text{ref}}$</span> 恰好是 5.000 V。以 USB 供電時，你那條「5 V」電軌在負載下可能下垂到 4.7 V，使每一筆讀數偏掉約 6%。做溫度量測時，請改用 <code>analogReference(INTERNAL)</code>（穩如磐石的 1.1 V 能隙基準），或量測你實際的 V<sub>CC</sub> 並把它當作 <span>$V_{\text{ref}}$</span>——這正是我們接下來要用的技巧。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="noise-averaging"><span class="sec-no">7</span>雜訊與平均：用 √N 買位元</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>訊噪比的縮放</small></div>
+      <p>原始 ADC 讀數會抖動。電氣雜訊、不乾淨的供電，以及量化下限本身，都會讓對穩定電壓連續取樣的結果跳動個一兩格。最廉價的療法是<strong>過取樣（oversampling）</strong>：取許多筆讀數再求平均。</p>
+
+      <p>如果雜訊是隨機且不相關的，對 <span>$N$</span> 筆樣本求平均會讓<em>訊號</em>維持不變，卻把雜訊的標準差縮小 <span>$\sqrt{N}$</span> 倍。所以訊噪比的改善為</p>
+
+      <div class="math-box">
+        $$ \text{SNR}_{\text{avg}} = \sqrt{N}\;\cdot\;\text{SNR}_{\text{single}} $$
+      </div>
+
+      <p>對 16 筆樣本求平均，雜訊降為 <span>$\sqrt{16}=4\times$</span>；64 筆樣本則降為 <span>$8\times$</span>。平方根裡藏著一個代價——邊際效益遞減。從 16 筆增加到 64 筆（4 倍的工作量），雜訊削減量也只翻一倍。每多得一個<em>位元</em>的有效解析度，都要付出 <span>$4\times$</span> 的樣本數，因為 <span>$\sqrt{4}=2$</span>。</p>
+
+      <div class="codeblock">
+        <div class="code-head">averaged_read.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">// 讀取某腳 N 次，並以浮點編碼回傳平均值。
+float readAveraged(uint8_t pin, uint8_t n) {
+  uint32_t sum = 0;                  // 32 位元：64 × 1023 不會溢位
+  for (uint8_t i = 0; i &lt; n; i++) {
+    sum += analogRead(pin);
+    // 切換 ADC 通道後，加一點微小的安定延遲會有幫助
+    delayMicroseconds(50);
+  }
+  return (float)sum / n;             // 平均後的編碼，0..1023
+}
+
+void loop() {
+  float code  = readAveraged(A0, 64);     // 64 筆樣本平均
+  float volts = (code / 1023.0) * 5.0;
+  Serial.println(volts, 4);
+  delay(100);
+}
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 硬體勝過軟體</div>
+        <p>軟體平均有幫助，但要先從源頭殺掉雜訊：在類比腳（或 AREF）與接地之間焊上一個 <strong>0.1 µF 去耦電容</strong>。它會與感測器的電阻形成一個低通濾波器，在高頻雜波抵達取樣保持電路之前就把它吞掉。一顆便宜的陶瓷電容，往往比 64 筆平均讀數還管用。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="battery-monitor"><span class="sec-no">8</span>真實案例：監控一顆你無法直接讀取的電池</h2>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>這會出貨於產品中</small></div>
+      <p>這是每個電池供電產品都會面臨的問題。一組 2 串（2-cell）的鋰聚合物（LiPo）電池滿電時約在 <strong>8.4 V</strong>——但 ADC 的上限只到 5 V。把 8.4 V 灌進 <code>A0</code>，你就會把晶片的魔法青煙放出來。解法正是你剛學會的那個分壓器：把電池電壓縮放到 ADC 的安全窗口內，再用軟體把那個<em>數字</em>放大回去。</p>
+
+      <p>選 <span>$R_1 = 100\,\text{k}\Omega$</span>（上方，接電池）與 <span>$R_2 = 47\,\text{k}\Omega$</span>（下方，接地）。在滿電的 8.4 V 下，分壓器輸出為</p>
+
+      <div class="math-box">
+        $$ V_{\text{out}} = 8.4 \times \frac{47\text{k}}{100\text{k}+47\text{k}} = 8.4 \times 0.320 \approx 2.69\,\text{V} $$
+      </div>
+
+      <p>舒舒服服地落在 5 V 以下。比值 <span>$(R_1+R_2)/R_2 \approx 3.13$</span> 就是你的軟體乘數：量得 <span>$V_{\text{out}}$</span>，乘回去，就還原出真實的電池組電壓。較大的電阻值（數百 kΩ）能把分壓器的待機電流壓在微安等級——當你想讓電池撐久一點時，這很重要。</p>
+
+      <div class="codeblock">
+        <div class="code-head">battery_monitor.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t BATT_PIN = A0;
+const float   VREF     = 5.0;
+const float   R1       = 100000.0;   // 上方電阻（接電池 +）
+const float   R2       = 47000.0;    // 下方電阻（接 GND）
+
+// 我們必須在軟體中還原的分壓增益：
+const float DIVIDER_GAIN = (R1 + R2) / R2;   // ≈ 3.128
+
+void setup() { Serial.begin(9600); }
+
+void loop() {
+  // 平均以馴服長感測線上的雜訊
+  uint32_t sum = 0;
+  for (uint8_t i = 0; i &lt; 16; i++) sum += analogRead(BATT_PIN);
+  float code   = sum / 16.0;
+
+  float vAdc   = (code / 1023.0) * VREF;      // 接腳上的電壓
+  float vBatt  = vAdc * DIVIDER_GAIN;         // 縮放回電池組電壓
+
+  Serial.print(F("Battery: "));
+  Serial.print(vBatt, 2);
+  Serial.println(F(" V"));
+
+  if (vBatt &lt; 6.4) Serial.println(F("!! LOW — shut down soon"));
+  delay(1000);
+}
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——電位器也是一個分壓器</div>
+        <p>你儀表板上那個旋鈕？<strong>電位器就是一個帶有可動抽頭的分壓器</strong>。把外側兩腳接到 5 V 與 GND，中間的滑臂（wiper）接到 <code>A0</code>，轉動它就會讓滑臂電壓從 0 掃到 5 V——編碼 0 到 1023。音量旋鈕、搖桿、油門握把、馬達調速盤，全都是這個完全相同的電路。你剛剛學會的，正是消費性電子產品中最常見的類比輸入。</p>
+      </div>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-adc-wrap">
+        <div class="sim-title">🔬 即時：ADC 量化探索器</div>
+        <canvas id="sim-adc"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">拖曳輸入電壓：看著連續值吸附到最接近的 10 位元刻度上。讀數會顯示原始編碼、晶片實際回報的量化電壓，以及你永遠無法擺脫的量化誤差。</p>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>⑤ 換你上場</h2>
+      <div class="layer"><span class="step">⑤</span> 練習 <small>由你動筆並做出判斷</small></div>
+      <p>三道檢核。點一個答案、輸入一個數字，或揭曉一道程式挑戰。你的進度會存在這台裝置上，並顯示於首頁。</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="ard03-resolution">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢核</div>
+        <div class="ex-q">Uno 的 ADC 是 10 位元，配 5 V 參考電壓，得到約 4.88 mV 的 LSB。這個 LSB 值對你的量測來說實際<em>意味</em>著什麼？</div>
+        <ul class="ex-options">
+          <li data-correct="false">ADC 每次轉換耗時 4.88 ms。</li>
+          <li data-correct="true">ADC 能分辨的最小電壓變化約為 4.88 mV；比這更細微的差異會被捨入到相同的編碼。</li>
+          <li data-correct="false">接腳能讀到的最大電壓是 4.88 mV。</li>
+          <li data-correct="false">每一筆讀數都會隨機地恰好偏掉 4.88 mV。</li>
+        </ul>
+        <div class="ex-explain">LSB 是<strong>一個編碼步進所代表的電壓</strong>：$V_{\text{LSB}} = V_{\text{ref}}/2^{N} = 5/1024 \approx 4.88\,\text{mV}$。相距小於此值的兩個輸入會對應到同一個整數——這就是解析度下限。量化誤差被限制在<em>半個</em> LSB（±2.44 mV），而轉換<em>時間</em>（約 104 µs）完全是另一回事。</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="ard03-code-to-volts" data-answer="2.5" data-tol="0.05">
+        <div class="ex-head"><span class="badge">Q2</span> 算一算</div>
+        <div class="ex-q">在 <span>$V_{\text{ref}} = 5\,\text{V}$</span> 下，<code>analogRead()</code> 回傳 <strong>512</strong>。接腳上的電壓是多少伏特？（使用 $V = \dfrac{\text{adc}}{1023}\,V_{\text{ref}}$。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="伏特"><span class="ex-unit">V</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$V = \dfrac{512}{1023}\times 5 = 2.503\,\text{V} \approx 2.50\,\text{V}$。編碼 512 基本上就是中刻度，所以它對應到 5 V 範圍的一半——正是直覺所預測的。（若改除以 1024 而非 1023，會得到 2.500 V；差異是千分之一，遠在容差之內。）</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="ard03-averaging">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰——N 筆樣本平均</div>
+        <div class="ex-q"><code>A0</code> 上的光感測器讀數會抖動 ±3 個編碼。請寫一個函式 <code>float smoothRead(uint8_t pin, uint16_t n)</code>，以浮點編碼（0–1023）回傳 <strong><code>n</code> 筆樣本的平均值</strong>，然後用它印出一個穩定的電壓。請仔細思考你那個累加和（running sum）的資料型別——如果你用 <code>int</code> 去累加 1000 筆讀數，會發生什麼事？</div>
+        <details class="ex-acc">
+          <summary>提示</summary>
+          <div class="acc-body">AVR 上的單一 <code>int</code> 是 16 位元，上限為 32767。光是累加 33 筆全幅讀數（33 × 1023 = 33759）就已經溢位並繞回成垃圾值。請用一個 <strong>32 位元</strong>累加器（<code>uint32_t</code>），在迴圈中逐一加上每筆 <code>analogRead()</code>，然後以浮點數除以 <code>n</code>，讓小數部分能保留下來。</div>
+        </details>
+        <details class="ex-acc">
+          <summary>顯示一種解法</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">smooth_read.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">// 以分數編碼（0..1023）回傳 n 筆樣本的平均值。
+float smoothRead(uint8_t pin, uint16_t n) {
+  uint32_t sum = 0;                 // 32 位元，所以大的 n 也不會溢位
+  for (uint16_t i = 0; i &lt; n; i++) {
+    sum += analogRead(pin);
+  }
+  return (float)sum / n;            // 除法「之前」先轉型 → 保留小數
+}
+
+void setup() { Serial.begin(9600); }
+
+void loop() {
+  float code  = smoothRead(A0, 64);          // √64 = 雜訊降為 1/8
+  float volts = (code / 1023.0) * 5.0;
+  Serial.println(volts, 4);                  // 現在這 4 位小數才有意義
+  delay(100);
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">兩個陷阱分別是 <strong>32 位元的累加和</strong>（16 位元的 <code>int</code> 在約 32 筆全幅讀數後就溢位）以及在除法<em>之前</em>轉型成 <code>float</code>（這樣才不會把平均值截斷）。用 64 筆樣本時，雜訊下降為 $\sqrt{64}=8\times$——此時那 4 位小數才真正有意義，而不是隨機閃爍。</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> 本章回顧</div>
+        <p>你現在能解釋為什麼類比世界必須被量化，能從位元數計算出 ADC 的解析度與 LSB（$V_{\text{LSB}} = V_{\text{ref}}/2^{N}$），能把原始編碼換算回伏特，並能對取樣率與奈奎斯特進行推理。你能把一個電阻式感測器透過分壓器接起來（$V_{\text{out}} = V_{\text{in}}\,R_2/(R_1+R_2)$）、把 TMP36 線性化或套用熱敏電阻的 Beta 方程式，並用 $\sqrt{N}$ 平均與去耦電容把雜訊壓下去。電池監控器與電位器證明了這些並非玩具——它們是真實產品的類比前端。下一章，我們要用 PWM 讓接腳產生平滑變化的<em>輸出</em>。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="回到頂端">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../../../assets/vendor/highlight.min.js"></script>
+<script src="../../../assets/katex/katex.min.js"></script>
+<script src="../../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../../assets/vendor/mermaid.min.js"></script>
+<script src="../../../assets/app.js"></script>
+
+<!-- chapter-specific simulator: ADC quantization explorer -->
+<script>
+EM.sim("sim-adc", {
+  height: 250,
+  params: [
+    { key: "vin",  label: "V_in",  min: 0,    max: 5,   step: 0.001, value: 3.271, unit: "V" },
+    { key: "vref", label: "V_ref", min: 1.1,  max: 5,   step: 0.1,   value: 5.0,   unit: "V" }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h, pad = 46 * dpr;
+    var top = pad, bot = H - pad;
+
+    // 把輸入鉗制在參考範圍內
+    var vin = Math.min(v.vin, v.vref);
+
+    // 10 位元量化
+    var levels = 1024;
+    var lsb    = v.vref / levels;                 // 每個編碼步進的伏特數
+    var code   = Math.round((vin / v.vref) * 1023);
+    if (code > 1023) code = 1023;
+    if (code < 0)    code = 0;
+    var vq     = (code / 1023) * v.vref;          // 晶片回報的電壓
+    var err    = vq - vin;                        // 量化誤差
+
+    // --- 畫出「尺」：橫跨範圍的淡刻度線 ---
+    ctx.strokeStyle = "#262d3a"; ctx.lineWidth = 1 * dpr;
+    ctx.fillStyle = "#6e7681"; ctx.font = (12 * dpr) + "px monospace";
+    var nTicks = 10;                               // 顯示 10 條粗略的導引刻度
+    for (var i = 0; i <= nTicks; i++) {
+      var y = top + (bot - top) * (i / nTicks);
+      ctx.beginPath();
+      ctx.moveTo(pad, y); ctx.lineTo(W - 16 * dpr, y); ctx.stroke();
+      var vlabel = v.vref * (1 - i / nTicks);
+      ctx.fillText(vlabel.toFixed(1) + "V", 6 * dpr, y + 4 * dpr);
+    }
+
+    // 把電壓映射到 y 像素（頂端 = vref，底端 = 0）
+    function yOf(volt) { return bot - (volt / v.vref) * (bot - top); }
+
+    var xMid = (pad + W - 16 * dpr) / 2;
+
+    // --- 連續輸入：左半邊的綠色標記 ---
+    ctx.strokeStyle = "#2ec4b6"; ctx.lineWidth = 2.5 * dpr;
+    var yIn = yOf(vin);
+    ctx.beginPath();
+    ctx.moveTo(pad + 8 * dpr, yIn); ctx.lineTo(xMid, yIn); ctx.stroke();
+    ctx.fillStyle = "#2ec4b6";
+    ctx.beginPath(); ctx.arc(pad + 8 * dpr, yIn, 5 * dpr, 0, 6.2832); ctx.fill();
+
+    // --- 量化輸出：吸附到刻度的琥珀色標記 ---
+    ctx.strokeStyle = "#f4a259"; ctx.lineWidth = 2.5 * dpr;
+    var yQ = yOf(vq);
+    ctx.beginPath();
+    ctx.moveTo(xMid, yQ); ctx.lineTo(W - 16 * dpr, yQ); ctx.stroke();
+    ctx.fillStyle = "#f4a259";
+    ctx.beginPath(); ctx.arc(W - 16 * dpr, yQ, 5 * dpr, 0, 6.2832); ctx.fill();
+
+    // 顯示捨入跳動的連接線
+    ctx.strokeStyle = "#5a6273"; ctx.lineWidth = 1 * dpr;
+    ctx.setLineDash([4 * dpr, 4 * dpr]);
+    ctx.beginPath(); ctx.moveTo(xMid, yIn); ctx.lineTo(xMid, yQ); ctx.stroke();
+    ctx.setLineDash([]);
+
+    return "編碼 <b>" + code + "</b>/1023 &nbsp;·&nbsp; LSB = " +
+           (lsb * 1000).toFixed(2) + " mV &nbsp;·&nbsp; 量化值 = <b>" +
+           vq.toFixed(3) + " V</b> &nbsp;·&nbsp; 誤差 = " +
+           (err >= 0 ? "+" : "") + (err * 1000).toFixed(2) + " mV";
+  }
+});
+</script>
+</body>
+</html>

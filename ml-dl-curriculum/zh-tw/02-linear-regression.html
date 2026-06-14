@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>線性迴歸 — 機器學習與深度學習</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="02-linear-regression">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 02</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL 課程 · 02</div>
+        <h1>線性迴歸</h1>
+        <p>最簡單而實用的預測器——輸入的加權總和再加上一個偏移量——同時也是後續一切的種子：邏輯迴歸、神經網路、Transformer。在這裡把它徹底搞懂，課程剩下的部分就只是在這一個想法上栓進各種變化而已。</p>
+        <div class="meta"><span>⏱ ~35 分鐘</span><span>🧮 正規方程式</span><span>📐 投影幾何</span><span>🐍 NumPy 從零實作</span></div>
+      </section>
+
+      <p><em>第 1 部分 · 第 02 課 · 程式技術棧：numpy-from-scratch</em></p>
+      <p><strong>先備知識：</strong> <a href="01-math-foundations.html">01 — 數學工具箱</a></p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎯</span> 學完本課你能</div>
+        <ul>
+          <li>寫出線性假設 $\hat{y} = Xw + b$，並從原始特徵組裝出<strong>設計矩陣 (design matrix)</strong>。</li>
+          <li>解釋我們<em>為什麼</em>要對誤差取平方，以及<strong>均方誤差 (mean squared error, MSE)</strong> 損失實際上在衡量什麼。</li>
+          <li>推導並運用<strong>正規方程式 (normal equation)</strong> $w = (X^\top X)^{-1} X^\top y$，並把它讀作幾何上的<strong>投影 (projection)</strong>。</li>
+          <li>在 NumPy 中完整實作整套流程：產生資料、擬合、畫出迴歸線、畫出殘差。</li>
+          <li>辨識何時<strong>特徵縮放 (feature scaling)</strong> 很重要（以及對正規方程式而言何時其實無所謂）。</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>直覺理解</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺理解 <small>先把畫面建起來</small></div>
+      <p>線性迴歸是最簡單而實用的預測器：假設你想預測的東西是<strong>輸入的加權總和</strong>，再加上一個常數偏移量。就這樣。本課程中的其他一切——邏輯迴歸、神經網路、Transformer——都是這個想法再加上各種變化，所以把它徹底搞懂非常划算。</p>
+
+      <p>用你熟悉的領域打個具體比方：你的無人水面載具 (USV) 在移動時會消耗電力。你猜想電力大致與速度成正比（再加上電子設備永遠開著的基礎耗電）。於是你猜：</p>
+
+      <div class="math-box">$$\text{power} \approx w \cdot \text{speed} + b$$</div>
+
+      <p>$w$ 是「每 (m/s) 消耗的瓦數」——也就是斜率，代表電力隨速度爬升得多陡。$b$ 是零速度時的基礎耗電——也就是截距。線性迴歸的工作，就是去看記錄下來的 <code>(speed, power)</code> 配對，並挑出讓直線<em>盡可能貼近</em>這團點雲的 $w$ 與 $b$。「盡可能貼近」這部分我們得講清楚，而這份精確正是整堂課的重點。</p>
+
+      <div class="mermaid">
+flowchart LR
+    A["原始特徵&lt;br/&gt;speed, payload, current"] --> B["設計矩陣 X&lt;br/&gt;(列 = 樣本)"]
+    B --> C["假設&lt;br/&gt;ŷ = Xw + b"]
+    C --> D["與真值 y 比較&lt;br/&gt;殘差 r = ŷ - y"]
+    D --> E["MSE 損失&lt;br/&gt;r² 的平均"]
+    E -->|"最小化"| F["最佳 w, b"]
+    F -.->|"代回"| C
+</div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 關鍵的心智圖像</div>
+        <p>我們有一團資料點，然後滑動／傾斜一條直線（在更高維度則是一塊平坦的平面／超平面），直到它與各點之間垂直間隙的平方總和小到不能再小。因為損失是一個平滑的碗狀曲面，所以恰好存在唯一一條最佳直線，而且我們可以直接解出它——不需要任何試誤。那個直接解就是正規方程式。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>數學原理</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>把它推導出來</small></div>
+
+      <h3 id="hypothesis-design-matrix">假設與設計矩陣</h3>
+      <p>我們有 $n$ 個樣本，每個樣本有 $d$ 個特徵。把它們堆疊成一個矩陣 $X \in \mathbb{R}^{n \times d}$，其中第 $i$ 列是某個樣本的特徵。<strong>權重向量 (weight vector)</strong> $w \in \mathbb{R}^d$ 為每個特徵各保留一個係數，而<strong>偏值 (bias，截距)</strong> $b \in \mathbb{R}$ 是單一的純量偏移量。一次對所有樣本的預測是：</p>
+
+      <div class="math-box">$$\hat{y} = Xw + b \quad\in \mathbb{R}^n$$</div>
+
+      <p>這裡 $\hat{y}_i$ 是樣本 $i$ 的預測目標，$y_i$ 是真實目標。一直把 $b$ 分開帶著很煩，所以標準技巧是<strong>把偏值吸收進權重裡</strong>：在 $X$ 前面加上一整欄的 1。定義<strong>增廣設計矩陣 (augmented design matrix)</strong> $\tilde{X} = [\mathbf{1} \mid X] \in \mathbb{R}^{n \times (d+1)}$ 與擴展權重 $\tilde{w} = [b, w_1, \dots, w_d]^\top$。於是</p>
+
+      <div class="math-box">$$\hat{y} = \tilde{X}\tilde{w}.$$</div>
+
+      <p>這欄 1 之所以管用，是因為這個特徵永遠是 $1$，所以它的係數 $b$ 會無條件地加到每一筆預測上——這正是截距該做的事。從這裡開始我會省略那些波浪號，直接寫成 $X$ 與 $w$，並假設那欄 1 已經內含其中。</p>
+
+      <h3 id="mse-loss">MSE 損失——以及為什麼要平方</h3>
+      <p>我們用<strong>殘差 (residual)</strong> $r_i = \hat{y}_i - y_i$ 來衡量誤差。<strong>均方誤差</strong>就是殘差平方的平均：</p>
+
+      <div class="math-box">$$L(w) = \frac{1}{n}\sum_{i=1}^{n}(\hat{y}_i - y_i)^2 = \frac{1}{n}\lVert Xw - y \rVert_2^2$$</div>
+
+      <p>其中 $\lVert \cdot \rVert_2$ 是歐幾里得 (L2) 範數。為什麼要對誤差<em>取平方</em>，而不是比方說取絕對值呢？</p>
+      <ul>
+        <li><strong>不分正負且平滑。</strong> 取平方會消掉正負號（高估與低估都同樣付出代價），而且不像 $|r|$，它處處可微——包括在零點。正是這份平滑性，讓我們能把導數設為零並求出閉式解。</li>
+        <li><strong>它是一個拋物面。</strong> 把 $L$ 視為 $w$ 的函數，它是一個凸的二次碗狀曲面，只有單一的全域最小值。沒有會卡住的區域最小值。</li>
+        <li><strong>統計意義。</strong> 如果 $y$ 上的雜訊是高斯分布，那麼最小化平方誤差正好就是<strong>最大概似 (maximum likelihood)</strong> 估計（我們會在 <a href="05-overfitting-evaluation.html">05 — 過度擬合與評估</a> 再談）。鐘形曲線與拋物線講的是同一個故事：$\log(e^{-r^2}) = -r^2$。</li>
+      </ul>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 另一面：離群值會佔據主導</div>
+        <p>取平方也意味著離群值會佔據主導地位。一個 10 的殘差會貢獻 100；十個 1 的殘差總共才貢獻 10。一筆糟糕的聲納讀數就能把你整條擬合線拖歪。</p>
+      </div>
+
+      <div class="sim"><div class="sim-title"><span>🧪</span> 拖動直線——最小化 MSE</div><canvas id="demo-linfit"></canvas></div>
+      <p>移動斜率與截距；讀數會顯示 MSE 以及綠色的最小平方最佳解。</p>
+
+      <h3 id="normal-equation">正規方程式</h3>
+      <p>要最小化這個碗，就對 $L$ 取相對於 $w$ 的梯度並設為零。利用 $\lVert Xw - y\rVert^2 = (Xw-y)^\top(Xw-y)$ 與矩陣微積分規則 $\nabla_w (Xw-y)^\top(Xw-y) = 2X^\top(Xw - y)$：</p>
+
+      <div class="math-box">$$\nabla_w L = \frac{2}{n} X^\top (Xw - y) = 0 \;\Longrightarrow\; X^\top X w = X^\top y.$$</div>
+
+      <p>最後那些式子就是<strong>正規方程式 (normal equations)</strong>。解出 $w$：</p>
+
+      <div class="math-box">$$\boxed{\,w = (X^\top X)^{-1} X^\top y\,}$$</div>
+
+      <p>前提是 $X^\top X$ 可逆（只要你的特徵欄彼此不冗餘，它就是可逆的——詳見「常見陷阱」）。$X^\top X \in \mathbb{R}^{(d+1)\times(d+1)}$ 很小（每個特徵對應一列／一欄），所以即使有上百萬筆樣本，反轉它仍然很便宜。</p>
+
+      <h3 id="geometric-meaning">幾何意義：投影到欄空間</h3>
+      <p>這部分值得真正內化。把 $y$ 想成 $\mathbb{R}^n$ 中的單一一點（每個樣本對應一個座標）。<em>所有可能預測值</em> $Xw$ 構成的集合——當 $w$ 取遍一切時——就是 $X$ 的<strong>欄空間 (column space)</strong>：由你的各特徵欄所張成的子空間。通常 $y$ <strong>並不</strong>落在那個子空間裡（你的特徵無法完美解釋目標），所以我們能做到最好的，就是在子空間中找出<em>最靠近</em> $y$ 的那一點。那個最近點正是 $y$ 在欄空間上的<strong>正交投影 (orthogonal projection)</strong>。</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 投影 = 正規方程式</div>
+        <p>「歐幾里得距離上最近」字面上就是「$\lVert Xw - y\rVert$ 最小」——這正是 MSE 所最小化的東西。而正交投影意味著殘差向量 $r = Xw - y$ <strong>垂直於每一個特徵欄</strong>，亦即 $X^\top r = 0$，整理後就得到 $X^\top X w = X^\top y$。所以正規方程式<em>就是</em>「讓殘差正交於欄空間」這個陳述。</p>
+      </div>
+
+      <div class="mermaid">
+flowchart TB
+    subgraph plane["X 的欄空間（所有可能的 Xw）"]
+        P["ŷ = Xw（投影）"]
+    end
+    Y["y（真實目標，落在平面之外）"]
+    Y -. "殘差 r ⟂ 平面" .- P
+</div>
+
+      <p>擬合出的 $\hat{y} = X(X^\top X)^{-1}X^\top y = Hy$，其中 $H = X(X^\top X)^{-1}X^\top$ 是<strong>帽子矩陣 (hat matrix)</strong>（它「把帽子戴到 $y$ 頭上」）。$H$ 是一個投影：$H^2 = H$。你不需要把這背下來，但這是個乾淨的方式，讓你看清擬合<em>就是在投影</em>。</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>程式碼</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>每一行都讀過</small></div>
+      <p>純 NumPy，不用 scikit-learn。我們產生合成的 USV 電力資料，用正規方程式擬合，然後畫圖。（透過梯度下降做迭代式擬合是<em>下一</em>課的內容——這裡我們直接求解。）</p>
+
+      <div class="codeblock">
+        <div class="code-head">fit_normal_equation.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+rng = np.random.default_rng(42)  # 可重現的隨機性
+
+# --- 1. 產生合成資料 -------------------------------------------
+# 假裝我們記錄了一艘 USV 以各種速度巡航時的耗電量。
+# 我們假裝「不知道」的真實關係：power = 18 * speed + 40 + noise
+n = 80
+speed = rng.uniform(0.0, 6.0, size=n)          # m/s，n 個樣本
+true_w, true_b = 18.0, 40.0                     # 每 (m/s) 的瓦數、基礎瓦數
+noise = rng.normal(0.0, 12.0, size=n)           # 感測器／量測雜訊
+power = true_w * speed + true_b + noise          # 觀測到的目標 y
+
+# --- 2. 建立增廣設計矩陣 ---------------------------------
+# 在前面加上一整欄的 1，讓偏值只是另一個權重。
+# X 的形狀為 (n, 2)：第 0 欄 = 1（偏值），第 1 欄 = speed。
+X = np.column_stack([np.ones(n), speed])         # 形狀 (80, 2)
+y = power                                         # 形狀 (80,)
+
+# --- 3. 解正規方程式：w = (XᵀX)⁻¹ Xᵀ y ------------------------
+# 我們用 np.linalg.solve(A, b) 而不是 inv(A) @ b：它直接解 A w = b，
+# 比起先算出 inv(A) 更快、在數值上也更穩定。
+XtX = X.T @ X                                     # (2, 2)
+Xty = X.T @ y                                     # (2,)
+w = np.linalg.solve(XtX, Xty)                     # [bias, slope]
+print(f"fitted bias b = {w[0]:.2f}, slope = {w[1]:.2f}")
+# -&gt; 擬合出的偏值 b = 35.69，斜率 = 18.93   （接近真實的 40 與 18）
+
+# --- 4. 預測並衡量 -----------------------------------------------
+y_hat = X @ w                                     # 預測，形狀 (80,)
+residuals = y_hat - y
+mse = np.mean(residuals**2)
+# R^2：被解釋的變異數比例（1.0 = 完美，0 = 不比取平均好）
+ss_res = np.sum(residuals**2)
+ss_tot = np.sum((y - y.mean())**2)
+r2 = 1 - ss_res / ss_tot
+print(f"MSE = {mse:.2f}, R^2 = {r2:.3f}")
+# -&gt; MSE = 123.00，R^2 = 0.884
+</code></pre>
+      </div>
+
+      <p>程式碼中有幾件事值得注意：</p>
+      <ul>
+        <li><code>np.linalg.solve(XtX, Xty)</code> 是「套用 $(X^\top X)^{-1}$」的正式生產級做法。只要能避免，就<strong>絕不要</strong>呼叫 <code>np.linalg.inv</code>——明確地反轉矩陣會丟失精度。</li>
+        <li>擬合出的斜率 (18.93) 與偏值 (35.69) 落在真實的 18 與 40 附近。它們不會完全準確，因為我們加了雜訊；樣本更多時就會收得更緊。</li>
+        <li>$R^2 \approx 0.88$ 代表我們的直線解釋了電力 88% 的變異數。很扎實——剩下的 12% 就是我們注入的量測雜訊。</li>
+      </ul>
+
+      <p>現在把擬合與殘差視覺化——這是迴歸之後你<em>永遠</em>該看的兩張圖。</p>
+
+      <div class="codeblock">
+        <div class="code-head">plot_fit_and_residuals.py <span class="lang">Python</span></div>
+<pre><code class="language-python">fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5))
+
+# 左圖：資料點雲 + 擬合線
+order = np.argsort(speed)                         # 排序以畫出乾淨的線
+ax1.scatter(speed, power, alpha=0.6, label="logged data")
+ax1.plot(speed[order], y_hat[order], "r-", lw=2, label="fit: ŷ = Xw")
+ax1.set_xlabel("speed (m/s)"); ax1.set_ylabel("power (W)")
+ax1.set_title("Fit"); ax1.legend()
+
+# 右圖：殘差 vs 預測（應該看起來像一條沒有結構的帶狀）
+ax2.scatter(y_hat, residuals, alpha=0.6)
+ax2.axhline(0, color="k", lw=1)
+ax2.set_xlabel("predicted power (W)"); ax2.set_ylabel("residual (ŷ - y)")
+ax2.set_title("Residuals")
+plt.tight_layout(); plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 你應該看到什麼</div>
+        <p>左圖——紅線乾淨俐落地穿過點雲的正中央，並隨速度上升而往上傾斜。右圖——殘差隨機散布在以零為中心的水平帶狀區內，<strong>沒有漏斗狀、也沒有曲線</strong>。那條沒有結構的帶狀正是一個設定良好的線性模型在視覺上的特徵。如果你反而看到一個 U 形，就代表真實關係是非線性的，而直線是錯誤的假設（這暗示著之後會用到的多項式特徵）。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>實際案例</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>為什麼這很重要</small></div>
+      <p><strong>USV 測繪任務的電力預算編列。</strong> 電池容量是固定的；任務規劃者需要預測能耗，這樣才不會讓船隻擱淺在外海。一個一階能量模型告訴我們，流體動力阻力功率會隨速度陡峭地增長，但在某個<em>巡航區間</em>（比方說 1–5 m/s）內，一條直線是非常好的區域近似，而且從遙測資料擬合它再簡單不過。</p>
+
+      <p>你會從馬達控制器記錄幾趟航程的 <code>(speed, power)</code>，把它們丟進上面的程式碼，然後讀出：</p>
+      <ul>
+        <li><strong>斜率 $w$</strong> → 每多 1 m/s 所增加的邊際瓦數。告訴你開得更快的能量代價。</li>
+        <li><strong>偏值 $b$</strong> → 即使停在原地也要付出的基礎內務負載（運算、感測器、通訊）。</li>
+      </ul>
+
+      <p>那麼，以速度 $v$ 行駛距離 $D$ 的航段，估計能量為 $E \approx (w v + b)\cdot (D/v) = D\,(w + b/v)$。注意這個<em>線性</em>模型隱含著什麼：$E$ 隨 $v$ 上升而單調下降（$dE/dv = -Db/v^2 &lt; 0$），所以對於固定的電池，航程 $D_{\max} = E_{\max}\,v/(wv+b)$ 永遠只會隨速度<em>增加</em>——線性模型說的是「能開多快就開多快」。這裡並不存在內部的航程最佳巡航速度。真正的甜蜜點只有在功率呈<strong>超線性</strong>增長（也就是本課延後到後面才談的 $v^2$ 阻力項）時才會出現：屆時基礎耗電 $b$ 會懲罰開太慢，而阻力會懲罰開太快，這個權衡就有了一個內部最小值。所以要把這兩個擬合出的數字當成巡航區間內可解讀的規劃輸入——而不是當成尋找最佳速度的工具，因為線性形式根本產不出那種最佳速度。（一旦推到高速，阻力大致以 $v^2$ 甚至更糟的方式增長，這條直線無論如何都會崩壞——見「常見陷阱」與殘差圖。）</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🌊</span> 用來落地的經典資料集</div>
+        <p><strong>加州房價 (California Housing)</strong> 資料集（<code>sklearn.datasets.fetch_california_housing</code>）——從中位數收入、平均房間數等 8 個特徵預測房屋中位數價值。這裡 $d=8$，所以加上那欄 1 之後 $X$ 是 $(20640, 9)$，而同樣的 <code>np.linalg.solve(X.T@X, X.T@y)</code> 會一次擬合全部九個係數。幾何意義完全相同；你只是沒辦法把那個 8 維超平面畫出來。最有用的診斷工具依然是殘差圖。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>常見陷阱與技巧</h2>
+
+      <ul>
+        <li><strong>奇異的 $X^\top X$（共線性）。</strong> 如果兩個特徵欄是線性相依的——例如你同時放進了以 m/s <em>和</em>以節 (knots) 為單位的速度，或是某個值是常數的特徵——那麼 $X^\top X$ 就不可逆，<code>np.linalg.solve</code> 會炸掉。解法：刪掉冗餘的那一欄，或改用 <code>np.linalg.lstsq(X, y, rcond=None)</code>，它會透過偽逆優雅地處理秩虧損。</li>
+        <li><strong>特徵縮放：<em>對正規方程式而言</em>沒你想得那麼重要。</strong> 閉式解在答案上是尺度不變的——不管單位是什麼，它都會找到正確的 $w$。但如果特徵量級差異懸殊（例如一個特徵在 $10^{-3}$ 量級、另一個在 $10^6$），就會使 $X^\top X$ <strong>病態 (ill-conditioned)</strong>，導致反矩陣失去精度。把特徵標準化成平均 0、標準差 1（<code>(X - X.mean(0)) / X.std(0)</code>），讓矩陣保持良好性質。對於下一課的<em>梯度下降</em>，縮放就不是選配的了——未縮放的特徵會讓收斂慢如龜爬。</li>
+        <li><strong>離群值會毀掉平方損失。</strong> 一個被標錯的樣本，或一筆出包、殘差巨大的感測器讀數，就會把整條線往它那邊拉（記得：殘差 10 → 成本 100）。檢查殘差圖；如果少數幾個點佔了主導地位，可以考慮穩健損失（Huber）或清理資料。</li>
+        <li><strong>不要外推超出你的資料範圍。</strong> 在 1–5 m/s 上擬合出的線，對 9 m/s 完全沒有任何可信度。線性模型在訓練範圍之外是「很有自信的騙子」。</li>
+        <li><strong>高 $R^2$ 不等於「正確」。</strong> $R^2$ 衡量的是在你訓練所用資料上的擬合程度。它對泛化、對線性<em>形式</em>是否正確都隻字未提。殘差圖能抓出 $R^2$ 所掩蓋的形式錯誤。</li>
+        <li><strong>永遠記得加上偏值欄。</strong> 忘了那欄 1，就會逼著直線通過原點（$b=0$），而這幾乎從來不是你想要的——你的 USV 在零速度時也是會耗電的。</li>
+      </ul>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>自我檢測</h2>
+
+      <p><strong>Q1.</strong> 為什麼我們要在 $X$ 前面加上一整欄的 1，而不是在數學裡把偏值 $b$ 當成獨立變數來處理？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>一整欄的 1 是一個永遠為 1 的特徵，所以它的係數會被無條件地加到每一筆預測上——這正是截距該做的事。把它折疊進來，讓我們能把整個模型寫成單一一個矩陣乘積 $\hat{y}=Xw$，並推導出單一而乾淨的正規方程式，而不必在每條公式裡都分開帶著 $b$。</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> 正規方程式說殘差 $r = \hat{y}-y$ 正交於 $X$ 的欄空間，亦即 $X^\top r = 0$。用一句話說明，為什麼<em>最佳</em>擬合一定要具備這個性質？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>如果殘差有任何分量落<em>在</em>欄空間<em>之內</em>，我們就能藉由調整 $w$ 把那個分量扣掉，並嚴格地更靠近 $y$——所以最靠近（距離最小、MSE 最小）的那一點，就是殘差純粹垂直於子空間的那一點。垂直 = 在平面內已經沒有任何可改進的空間了。</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> 你對 USV 的電力 vs 速度擬合了一條直線，而殘差圖呈現明顯的 U 形（中間是負殘差，兩端是正殘差）。這告訴你什麼？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>真實關係是彎曲的，而非線性的（這與阻力功率隨速度增長得比線性更快是一致的）。在這個範圍內，直線是錯誤的假設。你會在設計矩陣裡加進一個像 $\text{speed}^2$ 這樣的非線性特徵，這樣能讓模型在彎曲擬合的同時<em>仍對權重保持線性</em>（所以同一條正規方程式依然管用）。</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> 你的同事用 <code>np.linalg.inv(X.T @ X) @ X.T @ y</code> 計算 $w$。它能跑，但給出的數字比 <code>np.linalg.solve(X.T @ X, X.T @ y)</code> 稍微差一點。為什麼要偏好 <code>solve</code>？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p><code>solve</code> 透過分解直接解線性系統 $X^\top X\,w = X^\top y$，這樣更快、在數值上也更穩定。用 <code>inv</code> 明確算出反矩陣會做額外的運算，並放大浮點誤差，在 $X^\top X$ 病態時尤其嚴重。經驗法則：你幾乎永遠不需要明確的反矩陣。</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> 你設計矩陣裡的兩個特徵是「以 m/s 表示的速度」與「以節表示的速度」。當你呼叫 <code>np.linalg.solve(X.T @ X, X.T @ y)</code> 時會發生什麼事，又該怎麼修？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>這兩欄彼此互為純量倍數，所以 $X$ 是秩虧損的，而 $X^\top X$ 是奇異的（不可逆）——<code>solve</code> 會丟出 <code>LinAlgError</code>（或者若因浮點而僅僅是「差一點點才奇異」，則會回傳垃圾值）。修法：刪掉其中一個冗餘欄，或改用 <code>np.linalg.lstsq</code>，它使用偽逆並回傳一個有效的最小範數解。</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>換你試試</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml02-why-square">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">為什麼線性迴歸在 MSE 中對殘差取平方，而不是把它們的絕對值加總？</div>
+        <ul class="ex-options">
+          <li data-correct="false">取平方會讓損失變大，這能加速收斂。</li>
+          <li data-correct="true">取平方處處可微，並讓 $L$ 成為一個凸的二次碗，所以我們能把梯度設為零並求出閉式解。</li>
+          <li data-correct="false">絕對值無法處理負的殘差，但取平方可以。</li>
+          <li data-correct="false">取平方讓擬合對離群值穩健。</li>
+        </ul>
+        <div class="ex-explain">$r^2$ 與 $|r|$ 兩者都不分正負，所以處理負值並不是問題所在。真正的優勢在於 $r^2$ 是平滑的（連在 $0$ 也可微）且凸，給出單一全域最小值，我們透過 $\nabla_w L = 0 \Rightarrow X^\top X w = X^\top y$ 抵達它。但其代價——也正好與最後一個選項相反——是取平方讓離群值<em>佔據主導</em>（殘差 10 → 成本 100），而不是更穩健。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml02-leg-energy" data-answer="26068" data-tol="50">
+        <div class="ex-head"><span class="badge">Q2</span> 動手算</div>
+        <div class="ex-q">用擬合出的模型（$w = 18.93$ W/(m/s)，$b = 35.69$ W），估計以 $v = 5$ m/s 巡航、距離 $D = 1000$ m 的航段所需能量。使用 $E \approx D\,(w + b/v)$。請以<strong>焦耳</strong>給出 $E$。</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">J</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$E \approx 1000 \times (18.93 + 35.69/5) = 1000 \times (18.93 + 7.138) = 1000 \times 26.068 \approx 26068$ J。$b/v$ 這一項是基礎內務負載攤提到較慢航程上的結果；把 $v$ 拉高，這一項就會縮小，所以線性模型永遠獎勵開得更快（沒有內部最佳解——延後處理的 $v^2$ 阻力項才是創造出真正甜蜜點的東西）。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml02-derive-normal-eq">
+        <div class="ex-head"><span class="badge">Q3</span> 推導——一路推到正規方程式</div>
+        <div class="ex-q">從 $L(w) = \frac{1}{n}\lVert Xw - y\rVert_2^2$ 出發，透過把梯度設為零來推導正規方程式 $X^\top X w = X^\top y$，並說明這個結果的幾何意義。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">把平方範數寫成內積 $(Xw-y)^\top(Xw-y)$，並使用矩陣微積分規則 $\nabla_w (Xw-y)^\top(Xw-y) = 2X^\top(Xw-y)$。然後在把它設為零時，把那個非零的純量因子丟掉。</div></details>
+        <details class="ex-acc"><summary>顯示一種解法</summary><div class="acc-body">
+          <p>展開損失：$L(w) = \frac{1}{n}(Xw-y)^\top(Xw-y)$。對 $w$ 取梯度：</p>
+          <p>$\nabla_w L = \frac{2}{n} X^\top (Xw - y).$</p>
+          <p>設為零。純量 $\frac{2}{n}$ 非零，所以它會被約掉：$X^\top(Xw - y) = 0$，亦即 $X^\top X w = X^\top y$。若 $X^\top X$ 可逆，則 $w = (X^\top X)^{-1} X^\top y$。</p>
+          <p><strong>幾何意義：</strong> $X^\top(Xw - y) = 0$ 表示殘差 $r = Xw - y$ 正交於 $X$ 的每一欄——亦即垂直於欄空間。所以擬合出的 $\hat{y} = Xw$ 是 $y$ 在欄空間上的<em>正交投影</em>，是子空間中最靠近 $y$ 的那一點。最小化 MSE <em>就是</em>在投影。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本課回顧</div>
+        <p>一旦你把偏值當成設計矩陣裡的一欄 1 吸收進來，線性假設 $\hat{y}=Xw+b$ 就變成了單一一個矩陣乘積 $\hat{y}=Xw$。我們透過最小化 <strong>MSE</strong>，$\frac{1}{n}\lVert Xw-y\rVert^2$ 來擬合——之所以用平方誤差，是因為它平滑、凸，而且是高斯雜訊下的最大概似選擇（但對離群值敏感）。<strong>正規方程式</strong> $w=(X^\top X)^{-1}X^\top y$ 以閉式解解出它，其<em>意義</em>是把 $y$ 正交投影到 $X$ 的欄空間上——殘差最終會垂直於每一個特徵。在 NumPy 中：用一欄 1 建出 $X$，用 <code>np.linalg.solve(X.T@X, X.T@y)</code> 擬合，並<strong>永遠</strong>同時看擬合線與殘差圖。特徵縮放對閉式解的<em>答案</em>幾乎沒有影響，但能讓 $X^\top X$ 保持良態；對接下來的迭代方法而言，它則變成必不可少。正規方程式是精確的，但要反轉一個 $(d+1)\times(d+1)$ 的矩陣——特徵只有寥寥幾個時還好，但當 $d$ 龐大或資料以串流方式湧入時就很痛苦。接下來我們會學著在 MSE 碗上<em>往下坡走</em>，而不是一次解出它。下一課：<a href="03-gradient-descent.html">03 — 梯度下降</a>。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+<script src="../../assets/ml-demos.js"></script>
+<script>EM.mlDemo.linearFit("demo-linfit");</script>
+</body>
+</html>

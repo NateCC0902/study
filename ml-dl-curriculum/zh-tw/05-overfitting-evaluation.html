@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>過度擬合、正則化與評估 — 機器學習與深度學習</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="05-overfitting-evaluation">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 05</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL 課程 · 05</div>
+        <h1>過度擬合、正則化與評估</h1>
+        <p>一個在訓練資料上拿到 100% 分數的模型，到了實地仍可能毫無用處。本章談的是唯一真正重要的事——<em>泛化 (generalization)</em>——以及達成它的工具箱：偏差-變異數權衡、誠實的資料切分、L1/L2 懲罰，以及在故障罕見時不會說謊的指標。</p>
+        <div class="meta"><span>⏱ 約 45 分鐘</span><span>🧠 偏差-變異數</span><span>🧰 scikit-learn</span><span>📈 ROC / PR-AUC</span></div>
+      </section>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 程式技術棧與先備知識</div>
+        <p>第 1 部分 · 第 05 課 · 程式技術棧：scikit-learn（+ 一點 numpy）。<strong>先備知識：</strong><a href="04-logistic-regression.html">04 — 邏輯迴歸與分類</a>。</p>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎯</span> 學完本課你能</div>
+        <ul>
+          <li>用<strong>偏差-變異數權衡 (bias–variance tradeoff)</strong> 解釋為什麼一個在訓練資料上拿到 100% 分數的模型，到了實地仍可能毫無用處。</li>
+          <li>正確地把資料切分成<strong>訓練/驗證/測試 (train / validation / test)</strong>，並在不洩漏資訊的前提下執行 <strong>k 折交叉驗證 (k-fold cross-validation)</strong>。</li>
+          <li>套用 <strong>L2 (ridge)</strong> 與 <strong>L1 (lasso) 正則化 (regularization)</strong>，並預測各自對權重的影響。</li>
+          <li>為任務挑出正確的<strong>評估指標</strong>，並解釋為什麼在像稀有故障偵測這類類別不平衡的資料上<strong>準確率會說謊</strong>。</li>
+          <li>看懂<strong>學習曲線 (learning curve)</strong> 與 <strong>ROC 曲線</strong>，診斷模型到底哪裡真正出了問題。</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>直覺理解</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺理解 <small>先建立全貌</small></div>
+      <p>模型唯一的工作就是<strong>泛化 (generalize)</strong>：在它<em>從未見過</em>的資料上表現良好。訓練準確率是個陷阱，因為模型總是能靠死背來作弊。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 比喻——背答案卷的學生</div>
+        <p>兩位學生準備考試：</p>
+        <ul>
+          <li><strong>學生 A（低度擬合/高偏差）</strong> 只草草翻了一頁就斷定「答案永遠是 B」。模擬考錯、正式考也錯。太簡單，無法捕捉真實情況。</li>
+          <li><strong>學生 B（過度擬合/高變異數）</strong> 把每一道模擬題連同錯字都一字不漏地背下來。模擬考滿分，但題目一換句話問就全亂了。他背的是雜訊，而不是規律。</li>
+          <li><strong>學生 C（剛剛好）</strong> 學到了背後的規則。模擬考略有瑕疵，但正式考很穩。</li>
+        </ul>
+        <p>你的模型就是這三者之一。整個遊戲就是讓它盡量靠近 C。</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    A["模型太簡單<br/>(參數太少)"] -->|"高偏差<br/>低度擬合"| B["甜蜜點<br/>泛化良好"]
+    C["模型太靈活<br/>(參數太多)"] -->|"高變異數<br/>過度擬合"| B
+    style B fill:#1f6f3f,color:#fff
+</div>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>為何此刻重要</small></div>
+      <p>換到我們無人水面載具 (USV) 的情境：想像用 8 個帶雜訊的紀錄點來擬合一個模型，由速度預測阻力。一條直線可能會低度擬合（真實曲線其實是二次的）。一個 7 次多項式會<em>精準地</em>穿過全部 8 個點——然後在你沒記錄到的某個速度上預測出 −400 N 的阻力。它背的是雜訊。</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>數學原理</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>推導它</small></div>
+
+      <h3 id="bias-variance-decomposition">偏差-變異數分解</h3>
+      <p>假設真實情況是 $y = f(x) + \varepsilon$，其中 $f$ 是真正的函數，$\varepsilon$ 是變異數為 $\sigma^2$ 的不可約雜訊（你永遠無法建模掉的感測器抖動）。我們在一個隨機資料集上訓練出模型 $\hat{f}$。在測試點 $x_0$ 上、對所有可能的訓練集取平均後的<strong>期望平方誤差</strong>，可以分解成三個部分：</p>
+      <div class="math-box">$$
+\mathbb{E}\big[(y - \hat{f}(x_0))^2\big] = \underbrace{\big(\,\mathbb{E}[\hat{f}(x_0)] - f(x_0)\,\big)^2}_{\text{Bias}^2} + \underbrace{\mathbb{E}\big[(\hat{f}(x_0) - \mathbb{E}[\hat{f}(x_0)])^2\big]}_{\text{Variance}} + \underbrace{\sigma^2}_{\text{Irreducible}}
+$$</div>
+      <p>它的來源：在平方項裡加減 $\mathbb{E}[\hat{f}(x_0)]$ 再展開；交叉項在取期望後消失，剛好就留下這三項。</p>
+      <ul>
+        <li><strong>偏差 (Bias)</strong> = <em>平均</em>模型離真實情況有多遠。太簡單的模型偏差高（低度擬合）。</li>
+        <li><strong>變異數 (Variance)</strong> = 當你重新洗牌訓練資料時，模型<em>抖動</em>得有多厲害。太靈活的模型變異數高（過度擬合）。</li>
+        <li><strong>不可約 (Irreducible)</strong> $\sigma^2$ = 雜訊地板。沒有任何模型能贏過它。</li>
+      </ul>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 一句話講清楚權衡</div>
+        <p>你無法把偏差和變異數同時壓到零。提高模型複雜度會降低偏差但拉高變異數。<strong>正則化就是你用一點點偏差去換掉大量變異數的手段。</strong></p>
+      </div>
+
+      <div class="sim"><div class="sim-title"><span>🧪</span> 偏差-變異數：多項式次數</div><canvas id="demo-biasvar"></canvas></div>
+      <p>提高次數：訓練 RMSE 持續下降，而驗證 RMSE 卻反轉回升——過度擬合就在一根滑桿裡。</p>
+
+      <h3 id="ridge-and-lasso">Ridge (L2) 與 Lasso (L1)</h3>
+      <p>從任意一個損失函數 $L(\mathbf{w})$ 出發——比方說<a href="02-linear-regression.html">第 02 課</a>的均方誤差，其中 $\mathbf{w} \in \mathbb{R}^d$ 是權重向量。正則化會加上一個<strong>對權重大小的懲罰項</strong>：</p>
+      <div class="math-box">$$
+\text{Ridge:}\quad J(\mathbf{w}) = L(\mathbf{w}) + \alpha \sum_{j=1}^{d} w_j^2 = L(\mathbf{w}) + \alpha\,\lVert \mathbf{w} \rVert_2^2
+$$</div>
+      <div class="math-box">$$
+\text{Lasso:}\quad J(\mathbf{w}) = L(\mathbf{w}) + \alpha \sum_{j=1}^{d} |w_j| = L(\mathbf{w}) + \alpha\,\lVert \mathbf{w} \rVert_1
+$$</div>
+      <p>這裡 $\alpha \ge 0$ 是<strong>正則化強度</strong>（你自己選的旋鈕；$\alpha = 0$ 時退回成普通迴歸）。大權重現在變得很昂貴，所以最佳化器會偏好更小、更平滑的解——抖動更少，變異數更小。</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 為什麼 L1 會產生稀疏性（零值）而 L2 不會</div>
+        <p>用幾何角度想。在權重大小有預算上限的限制下最小化 $L$，等價於把 $\mathbf{w}$ 限制在一個球體裡。L2 的球是一個<strong>圓</strong>（平滑、沒有角）；L1 的球是一個<strong>菱形</strong>，而且角<em>落在座標軸上</em>。損失等高線會一直擴張，直到碰到限制區域——而菱形被碰到的地方是<strong>角</strong>，那裡有些座標恰好是 $0$。</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    subgraph L2["L2 / Ridge — 圓形"]
+      direction TB
+      a["等高線在離軸處碰到圓<br/>→ 所有權重都很小，<br/>沒有任何一個恰好為 0"]
+    end
+    subgraph L1["L1 / Lasso — 菱形"]
+      direction TB
+      b["等高線在軸上碰到角<br/>→ 某些權重 = 0<br/>(特徵選擇)"]
+    end
+</div>
+
+      <p>所以：<strong>ridge 把所有權重往零的方向縮小；lasso 縮小的同時還把某些權重歸零</strong>，等於在做特徵選擇。如果你懷疑 30 個 IMU/聲納特徵裡只有少數幾個重要，lasso 會告訴你是哪幾個。</p>
+
+      <h3 id="evaluation-metrics">評估指標</h3>
+      <p><strong>迴歸</strong>（預測值 $\hat{y}_i$、真實值 $y_i$、$n$ 個樣本）：</p>
+      <div class="math-box">$$
+\text{MAE} = \frac{1}{n}\sum_i |y_i - \hat{y}_i|, \qquad
+\text{MSE} = \frac{1}{n}\sum_i (y_i - \hat{y}_i)^2, \qquad
+\text{RMSE} = \sqrt{\text{MSE}}
+$$</div>
+      <div class="math-box">$$
+R^2 = 1 - \frac{\sum_i (y_i - \hat{y}_i)^2}{\sum_i (y_i - \bar{y})^2}
+$$</div>
+      <ul>
+        <li><strong>MAE（平均絕對誤差）</strong> 採用原始單位（公尺、牛頓），並對每個誤差一視同仁。</li>
+        <li><strong>MSE/RMSE（均方誤差）</strong> 把誤差平方，所以會更嚴厲地懲罰大錯；RMSE 又回到原始單位。當少數幾個大誤差很危險時就用這些（一個 5 公尺的位置誤差比五個 1 公尺誤差更要命）。</li>
+        <li><strong>$R^2$（決定係數）</strong> 把你的模型和「永遠預測平均值 $\bar{y}$」這個無腦基準比較。$R^2 = 1$ 是完美，$R^2 = 0$ 代表不比平均值好，而<strong>負的 $R^2$ 代表你比瞎猜平均值還糟</strong>（沒錯，這真的會發生）。</li>
+      </ul>
+
+      <p><strong>分類。</strong>一切都從<strong>混淆矩陣 (confusion matrix)</strong> 開始，它計算 True/False Positives/Negatives 的數量：</p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th></th><th>Predicted Positive</th><th>Predicted Negative</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Actual Pos</strong></td><td>TP</td><td>FN</td></tr>
+          <tr><td><strong>Actual Neg</strong></td><td>FP</td><td>TN</td></tr>
+        </tbody>
+      </table></div>
+      <div class="math-box">$$
+\text{Accuracy} = \frac{TP+TN}{TP+TN+FP+FN}, \quad
+\text{Precision} = \frac{TP}{TP+FP}, \quad
+\text{Recall} = \frac{TP}{TP+FN}
+$$</div>
+      <div class="math-box">$$
+F_1 = 2 \cdot \frac{\text{Precision} \cdot \text{Recall}}{\text{Precision} + \text{Recall}} \quad(\text{the harmonic mean — punishes lopsided scores})
+$$</div>
+      <ul>
+        <li><strong>精確率 (Precision)</strong> = 「當我大喊<em>故障！</em>時，我有多常是對的？」（誤報的代價）。</li>
+        <li><strong>召回率 (Recall)</strong> = 「在所有真實故障裡，我抓到了幾個？」（漏報的代價）。</li>
+        <li>兩者互相權衡：降低你的決策閾值就會抓到更多故障（召回率 ↑），但也更常狼來了（精確率 ↓）。$F_1$ 在兩者之間取得平衡。</li>
+      </ul>
+
+      <p><strong>ROC 與 AUC。</strong>一個分類器輸出的是<em>分數</em>（機率）；你挑一個<strong>閾值</strong>把它變成是/否。<strong>ROC 曲線</strong>掃過每一個閾值，並把<strong>真陽率 (True Positive Rate)</strong>（= 召回率）對上<strong>偽陽率 (False Positive Rate)</strong> $= FP/(FP+TN)$ 作圖：</p>
+      <div class="math-box">$$
+\text{TPR} = \frac{TP}{TP+FN}, \qquad \text{FPR} = \frac{FP}{FP+TN}
+$$</div>
+      <p><strong>AUC（曲線下面積）</strong> = 那條曲線底下的面積 $\in [0,1]$。它等於「一個隨機的正樣本得分高於一個隨機的負樣本」的機率。$\text{AUC}=0.5$ 是擲銅板；$1.0$ 是完美。AUC 是<strong>與閾值無關的</strong>——它評斷的是排序，而不是單一個操作點。</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>程式碼</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>每一行都要讀</small></div>
+
+      <h3 id="under-overfit">3.1 用多項式迴歸看低度/過度擬合</h3>
+      <div class="codeblock">
+        <div class="code-head">polyfit_under_over.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.linear_model import LinearRegression
+from sklearn.pipeline import make_pipeline
+
+rng = np.random.default_rng(0)
+
+# 真實情況是一條平滑曲線；我們只看得到它的「帶雜訊」樣本。
+def true_f(x):
+    return np.sin(1.5 * np.pi * x)
+
+n = 30
+X = np.sort(rng.uniform(0, 1, n)).reshape(-1, 1)   # 形狀 (n, 1)，供 sklearn 使用
+y = true_f(X).ravel() + rng.normal(0, 0.25, n)     # 加入類似感測器的雜訊
+
+xs = np.linspace(0, 1, 300).reshape(-1, 1)         # 繪圖用的密集格點
+
+plt.figure(figsize=(12, 4))
+for i, deg in enumerate([1, 4, 15]):               # 低度擬合 / 良好 / 過度擬合
+    model = make_pipeline(PolynomialFeatures(deg), LinearRegression())
+    model.fit(X, y)
+    plt.subplot(1, 3, i + 1)
+    plt.scatter(X, y, s=18, color="k", label="noisy data")
+    plt.plot(xs, true_f(xs), "g--", label="truth")
+    plt.plot(xs, model.predict(xs), "r", label=f"deg {deg} fit")
+    plt.ylim(-2, 2)
+    plt.title(f"degree {deg}  (train R²={model.score(X, y):.2f})")
+    plt.legend(fontsize=7)
+plt.tight_layout(); plt.show()
+# -&gt; degree 1  train R²=0.35   （低度擬合）
+# -&gt; degree 4  train R²=0.92   （良好）
+# -&gt; degree 15 train R²=0.93   （過度擬合：在點與點之間劇烈擺盪）
+</code></pre>
+      </div>
+      <p>你應該看到：1 次的直線太平，跟不上正弦曲線（低度擬合）；4 次緊緊貼著綠色的真實曲線；15 次為了碰到雜訊而瘋狂蛇行——它的訓練 $R^2$ 只比 4 次的高一點點，但點與點之間的曲線根本是垃圾。<strong>高訓練分數會掩蓋過度擬合。</strong></p>
+
+      <h3 id="train-val-test-cv">3.2 訓練/驗證/測試，以及 k 折交叉驗證</h3>
+      <div class="codeblock">
+        <div class="code-head">cross_validation.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from sklearn.model_selection import train_test_split, cross_val_score, KFold
+
+# 測試集鎖在保險庫裡。你只在最後最後碰它「一次」。
+X_dev, X_test, y_dev, y_test = train_test_split(X, y, test_size=0.2, random_state=0)
+
+# 在 dev 集上做 k 折交叉驗證：輪流讓某一折當驗證切片。
+# 每個點剛好都當過一次驗證 -&gt; 用上全部資料，得到低變異數的估計。
+model = make_pipeline(PolynomialFeatures(4), LinearRegression())
+scores = cross_val_score(model, X_dev, y_dev, cv=KFold(5, shuffle=True, random_state=0),
+                         scoring="r2")
+print("per-fold R²:", np.round(scores, 2))
+print(f"CV R² = {scores.mean():.2f} ± {scores.std():.2f}")
+# -&gt; CV R² 在「完全不碰被鎖住的測試集」的情況下估計泛化能力。
+</code></pre>
+      </div>
+
+      <div class="mermaid">
+flowchart TB
+    D["全部資料"] --> TR["訓練+驗證 (dev)"] & TE["測試 (鎖在保險庫,<br/>只用一次)"]
+    TR --> F["5 折 CV：輪轉驗證折"]
+    F --> M["挑選模型 / α"]
+    M --> FINAL["在完整 dev 上重新擬合 → 在測試集上只評分一次"]
+</div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 唯一的規則</div>
+        <p><strong>任何用來做決策的東西（模型選擇、$\alpha$）都不能是測試集。</strong>交叉驗證讓你只靠 dev 資料就能做出那些決策。</p>
+      </div>
+
+      <h3 id="ridge-vs-lasso">3.3 Ridge vs Lasso——看著 L1 把權重歸零</h3>
+      <div class="codeblock">
+        <div class="code-head">ridge_vs_lasso.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import Ridge, Lasso
+
+# 20 個特徵，但只有「前 3 個」真正驅動 y。另外 17 個都是雜訊。
+nf = 20
+Xr = rng.normal(size=(80, nf))
+true_w = np.zeros(nf); true_w[:3] = [3.0, -2.0, 1.5]
+yr = Xr @ true_w + rng.normal(0, 0.5, 80)
+
+# 正則化前「務必」先縮放：懲罰項對所有權重一視同仁，
+# 所以特徵必須在相同尺度上，否則你會不公平地懲罰它們。
+ridge = make_pipeline(StandardScaler(), Ridge(alpha=10.0)).fit(Xr, yr)
+lasso = make_pipeline(StandardScaler(), Lasso(alpha=0.1)).fit(Xr, yr)
+
+print("ridge weights exactly 0:", np.sum(np.isclose(ridge[-1].coef_, 0)))  # -&gt; 0
+print("lasso weights exactly 0:", np.sum(np.isclose(lasso[-1].coef_, 0)))  # -&gt; 16
+
+plt.figure(figsize=(9, 3))
+plt.bar(np.arange(nf) - 0.2, ridge[-1].coef_, width=0.4, label="Ridge (L2)")
+plt.bar(np.arange(nf) + 0.2, lasso[-1].coef_, width=0.4, label="Lasso (L1)")
+plt.axhline(0, color="k", lw=0.8); plt.xlabel("feature index"); plt.ylabel("weight")
+plt.legend(); plt.title("L2 shrinks everything; L1 zeroes the junk features")
+plt.tight_layout(); plt.show()
+</code></pre>
+      </div>
+      <p>你應該看到：ridge 給出 20 根小小的非零長條（全都被縮小但仍然存在）；lasso 只留下約 3-4 根高長條（特徵 0、1、2），其餘全部壓平到零。<strong>Lasso 替你做了特徵選擇。</strong></p>
+
+      <h3 id="learning-curve">3.4 學習曲線——診斷低度擬合 vs 過度擬合</h3>
+      <div class="codeblock">
+        <div class="code-head">learning_curve.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from sklearn.model_selection import learning_curve
+
+est = make_pipeline(PolynomialFeatures(4), LinearRegression())
+sizes, train_sc, val_sc = learning_curve(
+    est, X, y, cv=5, scoring="neg_mean_squared_error",
+    train_sizes=np.linspace(0.3, 1.0, 6))
+
+train_err = -train_sc.mean(axis=1)   # 翻轉正負號：neg_MSE -&gt; MSE
+val_err   = -val_sc.mean(axis=1)
+
+plt.plot(sizes, train_err, "o-", label="train error")
+plt.plot(sizes, val_err,  "s-", label="validation error")
+plt.xlabel("training set size"); plt.ylabel("MSE"); plt.legend()
+plt.title("Learning curve"); plt.show()
+</code></pre>
+      </div>
+      <p>怎麼看懂它：</p>
+      <ul>
+        <li><strong>間隙很大、驗證 ≫ 訓練</strong>，而且不會收斂 → <strong>過度擬合</strong>（高變異數）。修法：更多資料、更強的正則化、更簡單的模型。</li>
+        <li><strong>兩條曲線都很高且黏在一起</strong> → <strong>低度擬合</strong>（高偏差）。修法：更複雜的模型／更好的特徵。增加資料沒有用。</li>
+      </ul>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>實際案例——故障罕見的 ROV 故障偵測器</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>準確率說謊之處</small></div>
+      <p>你記錄一台水下遙控潛水器 (ROV) 的遙測資料（推進器電流、IMU 振動、深度變化率、電壓驟降）。你想在載具失去定點保持之前就標記出<strong>推進器故障</strong>。難處在於：故障<strong>很罕見</strong>——在我們模擬的紀錄裡也許只占 12% 的時間窗，而在一支健康的船隊裡可能是 1% 甚至更低。這正是<strong>準確率會說謊</strong>的場景。</p>
+
+      <div class="codeblock">
+        <div class="code-head">rov_fault_detector.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (confusion_matrix, classification_report,
+                             precision_score, recall_score, f1_score,
+                             roc_curve, roc_auc_score,
+                             precision_recall_curve, average_precision_score)
+
+# --- 模擬一份類別不平衡的 ROV 遙測紀錄 -------------------------------
+N = 4000
+Xc = rng.normal(size=(N, 6))                       # 6 個遙測特徵（已標準化）
+logit = -3.2 + 1.4*Xc[:, 0] + 1.1*Xc[:, 1] - 0.9*Xc[:, 2]   # 只有 3 個特徵透露故障訊號
+p = 1 / (1 + np.exp(-logit))
+yc = (rng.uniform(size=N) &lt; p).astype(int)         # 1 = 推進器故障
+print("fault rate:", yc.mean().round(3))           # -&gt; ~0.118  （罕見的正樣本）
+
+X_tr, X_te, y_tr, y_te = train_test_split(Xc, yc, test_size=0.3,
+                                          stratify=yc, random_state=0)  # 兩邊切分都維持相同比例
+
+# class_weight='balanced' 告訴模型：漏判罕見類別的代價更高。
+clf = make_pipeline(StandardScaler(),
+                    LogisticRegression(class_weight="balanced", max_iter=1000)).fit(X_tr, y_tr)
+
+proba = clf.predict_proba(X_te)[:, 1]              # P(故障) 分數
+pred  = (proba &gt;= 0.5).astype(int)
+
+# --- 準確率的謊言 ----------------------------------------------------
+dumb_acc = (y_te == 0).mean()                      # 一個只會說「永遠沒故障」的分類器
+print(f"'always healthy' accuracy: {dumb_acc:.3f}")        # -&gt; 0.882
+print(f"our model accuracy:        {(pred == y_te).mean():.3f}")  # -&gt; 0.772
+</code></pre>
+      </div>
+      <div class="codeblock">
+        <div class="code-head">output <span class="lang">text</span></div>
+<pre><code class="language-text">'always healthy' accuracy: 0.882   &lt;-- a USELESS model "beats" ours on accuracy!
+our model accuracy:        0.772
+</code></pre>
+      </div>
+      <p>一個<strong>永遠預測沒故障</strong>的模型可以拿到 88% 的準確率，卻會讓你的 ROV 沉下去。準確率被多數類別主導了。看看那些對罕見正樣本才真正重要的指標：</p>
+
+      <div class="codeblock">
+        <div class="code-head">rov_fault_detector.py (cont.) <span class="lang">Python</span></div>
+<pre><code class="language-python"># 注意：sklearn 把標籤升冪排序成 [0, 1]，所以它的輸出是第 2 節
+# 課本表格的「轉置」：列/欄的順序是 [Neg, Pos]，排版為
+# [[TN FP], [FN TP]]（TN 在左上角），而不是 [[TP FN], [FP TN]]（TP 在左上角）。
+print(confusion_matrix(y_te, pred))
+# -&gt; [[812 246]      812 個 TN，246 個 FP（誤報）
+#     [ 28 114]]      28 個 FN（漏掉的故障！），114 個 TP
+
+print(f"precision {precision_score(y_te, pred):.3f}  "   # -&gt; 0.317 （誤報很多）
+      f"recall {recall_score(y_te, pred):.3f}  "         # -&gt; 0.803 （抓到 80% 的故障）
+      f"F1 {f1_score(y_te, pred):.3f}")                  # -&gt; 0.454
+print(f"ROC-AUC {roc_auc_score(y_te, proba):.3f}  "      # -&gt; 0.866 （排序良好）
+      f"PR-AUC  {average_precision_score(y_te, proba):.3f}")  # -&gt; 0.573
+</code></pre>
+      </div>
+      <p>現在看到真實的全貌：這個偵測器抓到了 <strong>80% 的故障（召回率）</strong>，但只有 <strong>32% 的警報是真的（精確率）</strong>——誤報一大堆。對一台 ROV 來說這也許正是對的選擇：一次誤報只是多檢查一下，一次漏判卻可能賠上整台載具。<strong>你要依據每種錯誤的代價來選閾值</strong>，而不是預設用 0.5。</p>
+
+      <div class="codeblock">
+        <div class="code-head">roc_plot.py <span class="lang">Python</span></div>
+<pre><code class="language-python">fpr, tpr, _ = roc_curve(y_te, proba)
+plt.plot(fpr, tpr, label=f"ROC (AUC={roc_auc_score(y_te, proba):.2f})")
+plt.plot([0, 1], [0, 1], "k--", label="random")
+plt.xlabel("False Positive Rate"); plt.ylabel("True Positive Rate (recall)")
+plt.title("ROV fault detector — ROC"); plt.legend(); plt.show()
+</code></pre>
+      </div>
+      <p>你應該看到：一條向左上角拱起的曲線（AUC ≈ 0.87），明顯高於對角的「random」線。越靠近那個角落，代表這個分數無論用什麼閾值都越能把故障<em>排</em>在健康時間窗之上。</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 重度不平衡的小技巧</div>
+        <p>比起 ROC，優先看<strong>精確率-召回率曲線 (Precision–Recall curve)</strong> 及其面積（<strong>平均精確度／PR-AUC</strong>）。當負樣本數量遠遠壓過正樣本時，ROC 可能會好看到失真，因為龐大的 TN 數量會讓 FPR 一直很小。PR-AUC 只聚焦在你真正在乎的正類別上。</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🚢</span> 這個模式在我們的領域裡無所不在</div>
+        <p>這個模式可以對應到我們領域裡任何稀有事件偵測器：聲納發出的路徑障礙物警報、USV 上的 GPS 欺騙偵測、ROV 上的漏水偵測。<strong>罕見正樣本 + 不對稱代價 ⇒ 永遠別信任準確率；改而回報召回率、精確率、F1 與 PR-AUC，並把閾值調到符合任務需求。</strong></p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>常見陷阱與技巧</h2>
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 這六個每個人都會踩</div>
+        <ul>
+          <li><strong>碰測試集超過一次。</strong>每次為了「調參」而偷看都會洩漏資訊並灌水你的分數。把它鎖起來；所有決策都在 dev 集上用交叉驗證來做。</li>
+          <li><strong>切分前就先縮放（資料洩漏）。</strong>你的 <code>StandardScaler</code> 只能在<em>訓練折</em>上擬合，再套用到驗證/測試。把縮放器放進 <code>Pipeline</code>（如上）能讓 <code>cross_val_score</code> 自動正確地這樣做。先在全部資料上擬合會把測試統計量洩漏進訓練。</li>
+          <li><strong>做 L1/L2 前忘記縮放。</strong>懲罰項 $\sum w_j^2$ 對所有權重一視同仁，所以以毫米為單位量測的特徵，其有效懲罰會和以公尺為單位的差非常多。永遠先標準化。</li>
+          <li><strong>在不平衡資料上回報準確率。</strong>如前所示，「永遠判負」可以贏過一個真正的模型。對稀有事件預設改用精確率/召回率/F1 和 PR-AUC。</li>
+          <li><strong>ridge/lasso 裡的 <code>alpha</code> 與 <code>LogisticRegression</code> 裡的 <code>C</code> 是<em>相反</em>的。</strong>對 <code>Ridge</code>/<code>Lasso</code>，<code>alpha</code> 越大 = 正則化<em>越強</em>。對 <code>LogisticRegression</code>/<code>SVC</code>，<code>C</code> 越大 = 正則化<em>越弱</em>（$C \approx 1/\alpha$）。這一點每個人都會被咬一次。</li>
+          <li><strong>要調的是決策閾值，不只是模型。</strong>模型給的是機率；0.5 很少是任務上的最佳切點。請從你的誤報 vs 漏判代價來選它。</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>自我檢測</h2>
+
+      <p><strong>Q1.</strong> 你的模型拿到訓練 $R^2 = 0.99$、驗證 $R^2 = 0.55$。哪裡出了問題？說出兩個修法。</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">訓練分數很高但訓練-驗證間隙很大 = <strong>過度擬合／高變異數</strong>。模型把雜訊背了起來。修法：加強正則化（提高 <code>alpha</code>）、改用更簡單的模型（降低多項式次數／減少特徵，例如透過 lasso），或蒐集更多訓練資料。降低模型複雜度是最直接的操作桿。</div></details>
+
+      <p><strong>Q2.</strong> 你有 50 個特徵，但相信只有約 5 個重要。選 ridge 還是 lasso，為什麼？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body"><strong>Lasso (L1)</strong>。它菱形的限制區域在座標軸上有角，所以最佳解會落在許多權重<em>恰好為零</em>的地方——自動特徵選擇，會留下那約 5 個有用的特徵。Ridge 則會把全部 50 個往零縮小，但全都保持非零。</div></details>
+
+      <p><strong>Q3.</strong> 在一份漏水只占 0.4% 樣本的紀錄上，某漏水偵測器回報 99.5% 的準確率。你被打動了嗎？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">不。一個<em>永遠預測「沒漏水」</em>的模型可以拿到 99.6%——比回報的那個模型還高——卻一個漏水都沒抓到。準確率在這裡毫無意義。要求看 <strong>召回率</strong>（抓到了多少比例的漏水）、<strong>精確率</strong>，以及 <strong>PR-AUC</strong>。</div></details>
+
+      <p><strong>Q4.</strong> 當偶發的大位置誤差對 USV 很危險時，為什麼 RMSE 優於 MAE？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">RMSE 在取平均前先把誤差平方，所以單一個大誤差的貢獻會遠超過好幾個小誤差。它對又大又危險的錯誤懲罰得更重。MAE 對每個誤差都是線性加權，所以可能會藏住一個罕見但災難性的漏判。（RMSE 維持在原始單位，這點和 MSE 不同。）</div></details>
+
+      <p><strong>Q5.</strong> 你的團隊把故障偵測器的閾值從 0.3 提高到 0.7。精確率與召回率會怎麼變？什麼時候這是對的做法？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">閾值更高代表你只標記那些你非常有把握的故障：<strong>精確率上升</strong>（誤報更少），<strong>召回率下降</strong>（你會漏掉更多模稜兩可的故障）。當誤報很昂貴而漏判可以容忍時，這就是對的做法。但對安全攸關的 ROV 推進器故障，通常剛好相反——你會偏向召回率。</div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>換你上場</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml05-why-overfit">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">在多項式示範裡，15 次擬合的<em>訓練</em> $R^2$（0.93）只比 4 次擬合的（0.92）高一點點，但 15 次明顯是更差的模型。為什麼訓練分數揭露不了這個問題？</div>
+        <ul class="ex-options">
+          <li data-correct="false">訓練 $R^2$ 的公式對高次多項式來說壞掉了。</li>
+          <li data-correct="true">訓練分數衡量的是對你已有資料的擬合程度；15 次曲線背下了雜訊，並在點與點<em>之間</em>劇烈擺盪，這只有保留資料集才能揭露。</li>
+          <li data-correct="false">15 次有更高的偏差，所以它對正弦波低度擬合。</li>
+          <li data-correct="false">兩個分數相等，所以這兩個模型一樣好。</li>
+        </ul>
+        <div class="ex-explain">過度擬合是高<em>變異數</em>：靈活的模型精準命中訓練點（所以訓練分數維持很高），同時在其他地方劇烈擺盪。你只能透過在模型從未見過的資料上評估來抓到它——驗證/測試集或交叉驗證——在那裡，15 次曲線點與點之間的垃圾會顯現為很大的訓練-驗證間隙。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml05-precision" data-answer="0.317" data-tol="0.005">
+        <div class="ex-head"><span class="badge">Q2</span> 動手算</div>
+        <div class="ex-q">從 ROV 的混淆矩陣——$TP = 114$、$FP = 246$、$FN = 28$、$TN = 812$——計算<strong>精確率</strong>。（提示：$\text{Precision} = TP/(TP+FP)$。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit"> </span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$\text{Precision} = \dfrac{TP}{TP+FP} = \dfrac{114}{114+246} = \dfrac{114}{360} = 0.317$。只有約 32% 的警報是真正的故障——誤報很多——這和印出來的數值相符。作為對照，召回率 $= 114/(114+28) = 0.803$，所以偵測器抓到了 80% 的真實故障。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml05-roc-flatters">
+        <div class="ex-head"><span class="badge">Q3</span> 推理——為什麼 ROC 在重度不平衡下會美化結果</div>
+        <div class="ex-q">在一份 99% 都是健康時間窗的紀錄上，某故障偵測器顯示漂亮的 ROC-AUC 0.95，但 PR-AUC 卻平平。請解釋為什麼 ROC 在這裡看起來這麼好，以及你應該向任務負責人回報哪一條曲線。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">把 $\text{FPR} = FP/(FP+TN)$ 寫出來，想想當 99% 的時間窗都是負樣本時 $TN$ 有多大。就算你累積了一大堆偽陽性，FPR 會怎麼樣？</div></details>
+        <details class="ex-acc"><summary>顯示一種解法</summary><div class="acc-body">
+          <p>ROC 把 TPR 對上 $\text{FPR} = FP/(FP+TN)$ 作圖。當負樣本數量遠遠壓過正樣本時，$TN$ 大得驚人，所以就算有數百個偽陽性也幾乎推不動 FPR——分母把它們淹沒了。因此 ROC 曲線會緊貼左上角，AUC 看起來很棒，即使就絕對數量而言你的警報大多是假的。精確率 $= TP/(TP+FP)$ <strong>沒有</strong> $TN$ 這一項，所以那些偽陽性會直接傷害它；<strong>精確率-召回率曲線</strong>及其面積（<strong>PR-AUC／平均精確度</strong>）才誠實反映一個警報有多常是真正的故障。對稀有事件偵測，請<strong>回報 PR 曲線與 PR-AUC</strong>（連同你所選閾值下的召回率與精確率）。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本課回顧</div>
+        <p><strong>目標是泛化，不是訓練分數。</strong>偏差-變異數權衡告訴你無法同時最小化兩者；正則化用一點偏差去大砍變異數。<strong>鎖住測試集；在 dev 集上做交叉驗證</strong>，用於每一個模型與超參數決策，並把縮放放在管線內以避免洩漏。<strong>Ridge (L2)</strong> 縮小所有權重；<strong>lasso (L1)</strong> 把某些權重歸零，給出稀疏、可解釋的模型。<strong>讓指標配合任務：</strong>迴歸用 MAE/RMSE/$R^2$；分類用精確率/召回率/F1/ROC-AUC/PR-AUC——而且在不平衡資料上永遠別信任準確率。<strong>學習曲線</strong>告訴你該加資料（過度擬合）還是加複雜度（低度擬合）；<strong>ROC/PR 曲線</strong>告訴你在各種閾值下把正樣本排序得有多好。接下來我們要把線性模型拋在腦後，認識那些畫出彎曲、非線性決策邊界的方法——距離、分割，與投票委員會：<a href="06-knn-trees-ensembles.html">06 — k-NN、決策樹與集成</a>。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+<script src="../../assets/ml-demos.js"></script>
+<script>EM.mlDemo.biasVariance("demo-biasvar");</script>
+</body>
+</html>

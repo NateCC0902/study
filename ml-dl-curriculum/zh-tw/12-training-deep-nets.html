@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>訓練真正能收斂的深度網路 — 機器學習與深度學習</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="12-training-deep-nets">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 12</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL 課程 · 12</div>
+        <h1>訓練真正能收斂的深度網路</h1>
+        <p>你可以建好一個網路，也知道反向傳播是正確的——然而你的第一次訓練很可能會<em>悄悄地</em>失敗：損失平坦、突然冒出 <code>NaN</code>，或是一個在訓練上拿滿分、面對現實卻不及格的模型。這是一門手藝，讓訓練收斂到能<em>泛化</em>之處，一次轉動一個旋鈕，並看著曲線移動。</p>
+        <div class="meta"><span>⏱ 約 60 分鐘</span><span>🧠 最佳化器 · 初始化 · 正規化</span><span>⚡ PyTorch 訓練迴圈</span><span>∑ 梯度消失</span></div>
+      </section>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 第 3 部分 · 第 12 課 · 程式技術棧：PyTorch</div>
+        <p><strong>先備知識：</strong> <a href="11-pytorch-fundamentals.html">11 — PyTorch 基礎</a> · 以及 <a href="10-backpropagation.html">10 — 從零實作反向傳播</a> 的梯度機制，再加上 <a href="05-overfitting-evaluation.html">05 — 過度擬合、正則化與評估</a> 的泛化觀念。</p>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 學完本課你能</div>
+        <ul>
+          <li>解釋<em>為什麼</em>純粹的 SGD 很脆弱，並且能夠有憑有據地在 <strong>momentum、RMSProp 與 Adam</strong> 之間做出選擇，而不是憑感覺。</li>
+          <li>診斷<strong>梯度消失/梯度爆炸</strong>，並用 <strong>ReLU + 良好初始化 (Xavier/He) + 正規化</strong>來修復它們。</li>
+          <li>精確說出<strong>批次正規化 (batch norm)</strong> 與<strong>層正規化 (layer norm)</strong> 各自正規化的是什麼，以及何時該用哪一個。</li>
+          <li>對網路施加正則化，讓它能<strong>泛化</strong>而不是死記硬背：<strong>丟棄法 (dropout)、權重衰減、提早停止 (early stopping)、資料擴增 (data augmentation)</strong>。</li>
+          <li>跑一個真正的 PyTorch 訓練迴圈，讀懂<strong>損失/驗證曲線</strong>，使用 <strong>學習率排程 (LR schedule)</strong> + <strong>LR-finder</strong>，並能對<strong>批次大小</strong>進行推理。</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>直覺理解</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺理解 <small>先建立整體圖像</small></div>
+      <p>第 9 課建好了一個網路，第 10 課推導了反向傳播 (backpropagation)，第 11 課把自動微分 (autograd) 和 <code>optimizer.step()</code> 交到你手上。所以你<em>能夠</em>訓練一個網路。但骯髒的祕密是：<strong>多數時候，你的第一次訓練會悄悄地失敗。</strong>損失停在原地不動，或是爆成 <code>NaN</code>，又或者訓練得漂漂亮亮，但在新資料上的表現卻像擲硬幣。這些情況都不會丟出任何錯誤。模型就是靜悄悄地不管用。</p>
+
+      <p>本課講的是讓訓練收斂到能<em>泛化</em>之處的<strong>手藝</strong>。這就是「梯度在數學上是正確的」（第 10 課）和「這玩意兒真的學會了你需要的聲納分類器」之間的差別。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 在黑暗中、在霧裡下山</div>
+        <p>我們是在最小化第 3 課的損失曲面，但現在它是高維度而且極度非凸的。四個旋鈕各自攻擊你從山上摔下來的一種方式：</p>
+        <ul>
+          <li><strong>最佳化器</strong>是<em>你怎麼跨出每一步</em>。純粹的 SGD 直直地往下坡走，所以它在狹窄的山谷裡來回震盪，在平坦的高原上爬行。<strong>Momentum</strong> 給你一顆沿著下坡累積速度、能滾過小坑洞的重球。<strong>Adam</strong> 還額外給每個座標<em>各自</em>的步幅，所以陡峭方向走謹慎的小步，平坦方向走大膽的大步。</li>
+          <li><strong>權重初始化</strong>是<em>你從哪裡出發</em>。從壞地方出發——所有權重都太大或太小——最一開始的梯度不是零（你動彈不得）就是無限大（你飛出地圖外）。良好的初始化讓你落在斜率有用的地方。</li>
+          <li><strong>正規化</strong>讓你下山時<em>腳下立足點穩固</em>：它阻止地面在你腳下隨著前面各層的變化而劇烈傾斜。</li>
+          <li><strong>正則化</strong>阻止你<em>死記下山的那一條精確路徑</em>，而不是學會這座山的<em>形狀</em>——這樣當你被丟到一座新山上（測試資料）時，你仍然知道哪邊是往下。</li>
+        </ul>
+      </div>
+
+      <div class="mermaid">
+graph TD
+    A[原始網路 + 純 SGD] -->|常常| B[損失平坦 / NaN / 無法泛化]
+    A --> C{施展手藝}
+    C --> D[良好初始化：He/Xavier]
+    C --> E[ReLU + 正規化]
+    C --> F[Adam / momentum + LR 排程]
+    C --> G[Dropout / 權重衰減 / 提早停止 / 資料擴增]
+    D & E & F --> H[快速且穩定地收斂]
+    G --> I[能泛化到新資料]
+    H & I --> J[一個真正管用的模型]
+</div>
+
+      <p>這五個旋鈕並不是各自獨立的儀式——它們是從不同角度攻擊同一種失敗。我們先看數學，再在 PyTorch 裡逐一轉動每個旋鈕，並<em>親眼看著</em>曲線改變。</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>數學原理</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>推導每一個旋鈕</small></div>
+
+      <h3 id="optimizers">2.1 &nbsp;最佳化器：從純粹的 SGD 到 Adam</h3>
+      <p>回想一下參數 $\theta$ 上的損失 $L(\theta)$，以及第 $t$ 步的梯度 $g_t = \nabla_\theta L(\theta_t)$。純粹的<strong>隨機梯度下降 (SGD)</strong> 是：</p>
+      <div class="math-box">$$ \theta_{t+1} = \theta_t - \eta\, g_t $$</div>
+      <p>其中 $\eta$ 是<strong>學習率</strong>（步幅）。問題在於：$g_t$ 是在一個<em>小批次</em>上計算的，所以它有雜訊，而且損失曲面在某些方向比其他方向陡峭得多。單一個純量 $\eta$ 無法既小到不會在陡峭方向衝過頭，又大到能在平坦方向上有進展。</p>
+
+      <p><strong>Momentum</strong> 透過累積過去梯度的指數衰減移動平均（一個「速度」）來修正這種來回震盪：</p>
+      <div class="math-box">$$ v_{t} = \beta\, v_{t-1} + g_t, \qquad \theta_{t+1} = \theta_t - \eta\, v_t $$</div>
+      <ul>
+        <li>$v_t$ —— <strong>速度</strong>，是對近期梯度方向的記憶。一致的方向會累加（速度建立起來）；震盪的方向會相互抵消。</li>
+        <li>$\beta \in [0,1)$ —— <strong>動量係數</strong>，通常是 $0.9$。<em>它從哪來：</em>它是幾何級數的衰減——有效的平均窗口大約是 $\frac{1}{1-\beta}$ 步，所以 $\beta=0.9$ 平均了最近約 10 個梯度。</li>
+      </ul>
+
+      <p><strong>RMSProp</strong> 攻擊的是<em>逐方向縮放</em>的問題。它保存一個平方梯度的移動平均，並把每一步除以它的平方根——所以一個始終有巨大梯度的座標會得到<em>較小</em>的步，而一個梯度很小的座標會得到<em>較大</em>的步：</p>
+      <div class="math-box">$$ s_t = \rho\, s_{t-1} + (1-\rho)\, g_t^2, \qquad \theta_{t+1} = \theta_t - \frac{\eta}{\sqrt{s_t}+\epsilon}\, g_t $$</div>
+      <p>這裡 $g_t^2$ 是<strong>逐元素</strong>運算，$s_t$ 是逐參數的二階矩估計，$\rho \approx 0.9$，而 $\epsilon \approx 10^{-8}$ 用來防止除以零。這個除法<strong>讓學習率逐參數自適應</strong>——這正是每一個「自適應」最佳化器背後的關鍵概念。</p>
+
+      <p><strong>Adam</strong> = momentum <strong>加上</strong> RMSProp 一起（名稱是 <em>ADAptive Moment estimation</em>，自適應矩估計）。它同時追蹤一階矩（平均，像 momentum）與二階矩（未置中的變異數，像 RMSProp）：</p>
+      <div class="math-box">$$ m_t = \beta_1 m_{t-1} + (1-\beta_1) g_t, \qquad v_t = \beta_2 v_{t-1} + (1-\beta_2) g_t^2 $$</div>
+      <p>兩個平均都從 $0$ 開始，因此早期會<strong>偏向零</strong>，所以 Adam 對它們做偏差校正：</p>
+      <div class="math-box">$$ \hat m_t = \frac{m_t}{1-\beta_1^{\,t}}, \qquad \hat v_t = \frac{v_t}{1-\beta_2^{\,t}}, \qquad \theta_{t+1} = \theta_t - \eta\,\frac{\hat m_t}{\sqrt{\hat v_t}+\epsilon} $$</div>
+      <p>預設值 $\beta_1=0.9$、$\beta_2=0.999$、$\epsilon=10^{-8}$ 在出乎意料多的情況下都能用——這正是為什麼 Adam 是預設的「總之先讓它訓練起來」的最佳化器。<em>要記住的直覺：</em><strong>momentum 平滑了方向，$\sqrt{\hat v}$ 分母則逐座標自動調整步幅。</strong></p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 經驗法則</div>
+        <p>用 <strong>Adam</strong> 來快速又寬容地把訓練跑起來；在大型視覺網路上，<strong>SGD + momentum</strong>（搭配排程）往往能達到<em>略佳</em>的最終測試準確率，但代價是更多的調參。先從 Adam 開始。</p>
+      </div>
+
+      <h3 id="bad-init">2.2 &nbsp;為什麼壞的初始化會殺死訓練</h3>
+      <p>考慮活化值往前流經一層 $z = \sum_{i=1}^{n_{\text{in}}} w_i x_i$ 時的變異數。如果權重 $w_i$ 是獨立同分布、變異數為 $\mathrm{Var}(w)$，輸入的變異數為 $\mathrm{Var}(x)$，那麼（在獨立、零平均的條件下）：</p>
+      <div class="math-box">$$ \mathrm{Var}(z) = n_{\text{in}}\,\mathrm{Var}(w)\,\mathrm{Var}(x) $$</div>
+      <ul>
+        <li>$n_{\text{in}}$ —— <strong>fan-in</strong>（扇入），神經元的輸入數量。</li>
+      </ul>
+      <p>為了讓 $\mathrm{Var}(z) \approx \mathrm{Var}(x)$——也就是讓訊號通過 $L$ 層時既不爆炸也不縮小——我們需要 $\mathrm{Var}(w) = \tfrac{1}{n_{\text{in}}}$。這就是 <strong>Xavier/Glorot 初始化</strong>（對 tanh/sigmoid，它取 fan-in 與 fan-out 的平均）。ReLU 會把它一半的輸入歸零，使變異數減半，所以我們把目標加倍：$\mathrm{Var}(w) = \tfrac{2}{n_{\text{in}}}$——這就是 <strong>He 初始化</strong>。</p>
+      <div class="math-box">$$ \text{Xavier: } \mathrm{Var}(w) = \frac{2}{n_{\text{in}}+n_{\text{out}}}, \qquad \text{He: } \mathrm{Var}(w) = \frac{2}{n_{\text{in}}} $$</div>
+      <p>反過來說，如果你初始化得太大，$\mathrm{Var}(z)$ 會逐層相乘放大 → 活化值飽和（sigmoid/tanh 變平）或爆炸 → <strong>梯度爆炸</strong>。太小 → 訊號朝零幾何衰減 → <strong>梯度消失</strong>。無論哪種，早期各層拿到的梯度都 $\approx 0$，永遠學不起來。初始化不是裝飾品；它是「一個你能往下走的斜坡」與「一道懸崖或一片平地」之間的差別。</p>
+
+      <h3 id="vanishing-exploding">2.3 &nbsp;梯度消失/梯度爆炸問題</h3>
+      <p>反向傳播逐層相乘梯度（連鎖律，第 10 課）。對一個 $L$ 層的網路，相對於某個早期權重的梯度包含 $L$ 個類似 Jacobian 因子的乘積。如果每個因子的大小 $\approx r$，那麼早期層的梯度便以 $r^{L}$ 的方式縮放：</p>
+      <div class="math-box">$$ \left\|\frac{\partial L}{\partial \theta^{(1)}}\right\| \sim \prod_{\ell} \|J^{(\ell)}\| \approx r^{L} $$</div>
+      <ul>
+        <li>$r &lt; 1$ → $r^L \to 0$：<strong>梯度消失</strong>，早期各層凍結不動。經典元兇：sigmoid/tanh，它們的導數最大值為 $0.25$（sigmoid）——把一堆這種值相乘，你就完蛋了。</li>
+        <li>$r &gt; 1$ → $r^L \to \infty$：<strong>梯度爆炸</strong>，損失變成 <code>NaN</code>。</li>
+      </ul>
+      <p>三個協同作用的修法：<strong>ReLU</strong>（活化單元的導數恰好是 $1$ → $r\approx1$，不衰減）、<strong>良好初始化</strong>（在開始時設定 $r\approx1$），以及<strong>正規化</strong>（每一步都重新置中各層的預活化值，讓 $r$ 在訓練過程中<em>保持</em>接近 $1$）。專門針對梯度爆炸，<strong>梯度裁剪 (gradient clipping)</strong> 會把 $\|g\|$ 限制在一個閾值——這對 RNN 至關重要（第 14 課）。</p>
+
+      <h3 id="normalization-layers">2.4 &nbsp;正規化層</h3>
+      <p><strong>批次正規化</strong>把每個特徵<em>跨小批次</em>標準化。對一個 $m$ 個樣本的批次中的特徵 $j$：</p>
+      <div class="math-box">$$ \mu_j = \frac{1}{m}\sum_{i=1}^{m} x_{ij}, \quad \sigma_j^2 = \frac{1}{m}\sum_{i=1}^{m} (x_{ij}-\mu_j)^2, \quad \hat x_{ij} = \frac{x_{ij}-\mu_j}{\sqrt{\sigma_j^2+\epsilon}}, \quad y_{ij} = \gamma_j \hat x_{ij} + \beta_j $$</div>
+      <ul>
+        <li>$\mu_j, \sigma_j^2$ —— 特徵 $j$ 的<strong>批次平均/變異數</strong>。</li>
+        <li>$\gamma_j, \beta_j$ —— <strong>可學習的</strong>縮放與平移，這樣若有幫助，網路可以把正規化的效果還原回去。<em>它從哪來：</em>標準化到零平均/單位變異數，可以在底下各層變化時保持每一層輸入分布的穩定（「內部共變量偏移」），而 $\gamma,\beta$ 則恢復了表達自由度。</li>
+      </ul>
+      <p>批次正規化在訓練時使用<em>批次</em>統計量，在評估時使用<em>移動平均</em>（記得設 <code>model.eval()</code>！）。它討厭小批次（$\mu,\sigma$ 有雜訊），也不太適合序列模型。</p>
+
+      <p><strong>層正規化</strong>改成跨<em>單一樣本的各個特徵</em>來正規化，而不是跨批次：</p>
+      <div class="math-box">$$ \mu_i = \frac{1}{d}\sum_{j=1}^{d} x_{ij}, \quad \sigma_i^2 = \frac{1}{d}\sum_{j=1}^{d}(x_{ij}-\mu_i)^2 $$</div>
+      <p>（接著套用同樣的 $\hat x$、$\gamma$、$\beta$）。因為它是逐樣本的，所以<strong>與批次大小無關</strong>，而且在訓練與評估時行為完全相同——這就是為什麼 <strong>transformer 和 RNN 使用層正規化</strong>（第 14–15 課）。</p>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 快速法則</div>
+        <p><strong>大批次的 CNN 用批次正規化，序列/極小批次用層正規化。</strong></p>
+      </div>
+
+      <h3 id="regularization">2.5 &nbsp;網路的正則化</h3>
+      <ul>
+        <li><strong>權重衰減</strong>：在損失中加上 $\frac{\lambda}{2}\|\theta\|^2$ → 梯度多出一個 $\lambda\theta$ 項，把權重往 0 拉。這就是第 5 課的 L2 懲罰；較小的權重 = 較平滑的函數 = 較少的過度擬合。（$\lambda$ ≈ $10^{-4}$ 到 $10^{-2}$。）</li>
+        <li><strong>Dropout</strong>：訓練期間，以機率 $p$ 獨立地把每個活化值歸零，然後把存活下來的值乘上 $\frac{1}{1-p}$，使期望值維持不變。它強迫網路不去依賴任何單一神經元——就像訓練一群共享權重的子網路所組成的集成。評估時關閉。</li>
+        <li><strong>提早停止</strong>：盯著驗證損失；當它開始上升、而訓練損失仍持續下降時就停止（並保留最佳檢查點）。那個差距<em>就是</em>過度擬合。</li>
+        <li><strong>資料擴增</strong>：用保留標籤的轉換來人工擴大訓練集（影像翻轉/旋轉/加雜訊；感測器軌跡抖動/時間平移）。更多有效的「資料」= 更好的泛化，而且這是你手上最便宜的正則化器。</li>
+      </ul>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>程式碼</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>逐行讀懂</small></div>
+      <p>我們會用兩種方式在一個有雜訊的分類問題上訓練同一個小網路，並<strong>親眼看著損失/驗證曲線分岔</strong>——先是天真版本，再是「施展手藝」的版本。用 PyTorch。</p>
+
+      <div class="codeblock">
+        <div class="code-head">setup.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import TensorDataset, DataLoader
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
+
+torch.manual_seed(0)
+
+# --- 一個刻意設計得困難、有雜訊的資料集（樣本少、特徵多） -------------
+# 樣本少 + 特徵多 + 標籤雜訊 = 若不加以節制，網路一定會過度擬合。
+X, y = make_classification(
+    n_samples=600, n_features=20, n_informative=8, n_redundant=4,
+    flip_y=0.10,        # 10% 標籤雜訊 -&gt; 懲罰死記硬背
+    class_sep=0.8, random_state=0,
+)
+X_tr, X_val, y_tr, y_val = train_test_split(X, y, test_size=0.4, random_state=0)
+
+# 在送進網路前永遠要標準化輸入（第 9 課的陷阱）：零平均/單位變異數，
+# 只在 TRAIN 上 fit，以避免把驗證集的統計量洩漏進模型。
+scaler = StandardScaler().fit(X_tr)
+X_tr, X_val = scaler.transform(X_tr), scaler.transform(X_val)
+
+def loader(X, y, train):
+    ds = TensorDataset(torch.tensor(X, dtype=torch.float32),
+                       torch.tensor(y, dtype=torch.long))
+    return DataLoader(ds, batch_size=64, shuffle=train)
+
+tr_loader, val_loader = loader(X_tr, y_tr, True), loader(X_val, y_val, False)
+</code></pre>
+      </div>
+
+      <h3 id="naive-vs-regularized">3.1 &nbsp;天真網路（沒有手藝）vs. 正則化網路</h3>
+      <div class="codeblock">
+        <div class="code-head">net.py <span class="lang">Python</span></div>
+<pre><code class="language-python">class Net(nn.Module):
+    """一個架構，用一個旗標來切換「手藝」。"""
+    def __init__(self, in_dim=20, hidden=256, n_classes=2, regularized=False):
+        super().__init__()
+        self.regularized = regularized
+        self.fc1 = nn.Linear(in_dim, hidden)
+        self.fc2 = nn.Linear(hidden, hidden)
+        self.fc3 = nn.Linear(hidden, n_classes)
+        # 正規化 + dropout 只存在於正則化版本中
+        self.bn1 = nn.BatchNorm1d(hidden)
+        self.bn2 = nn.BatchNorm1d(hidden)
+        self.drop = nn.Dropout(p=0.5)
+        if regularized:
+            self._he_init()          # 為 ReLU 層做 He 初始化（2.2 節）
+
+    def _he_init(self):
+        for m in [self.fc1, self.fc2, self.fc3]:
+            nn.init.kaiming_normal_(m.weight, nonlinearity="relu")  # He
+            nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        if self.regularized:
+            # Linear -&gt; BatchNorm -&gt; ReLU -&gt; Dropout（標準順序）
+            x = self.drop(F.relu(self.bn1(self.fc1(x))))
+            x = self.drop(F.relu(self.bn2(self.fc2(x))))
+        else:
+            # 無正規化、無 dropout、PyTorch 預設初始化 -&gt; 容易過度擬合
+            x = F.relu(self.fc1(x))
+            x = F.relu(self.fc2(x))
+        return self.fc3(x)            # 原始 logits（CrossEntropyLoss 會加上 softmax）
+
+
+def run(regularized, epochs=120, weight_decay=0.0, lr=1e-3):
+    model = Net(regularized=regularized)
+    # Adam：momentum + 逐參數 LR（2.1 節）。weight_decay = L2 懲罰。
+    opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+    crit = nn.CrossEntropyLoss()
+    hist = {"train": [], "val": [], "val_acc": []}
+
+    for ep in range(epochs):
+        model.train()                          # dropout 開啟，BN 使用批次統計量
+        tr_loss = 0.0
+        for xb, yb in tr_loader:
+            opt.zero_grad()                    # 清除上一步的梯度
+            loss = crit(model(xb), yb)
+            loss.backward()                    # 反向傳播（第 10 課，現在自動化了）
+            opt.step()                         # 套用最佳化器的更新規則
+            tr_loss += loss.item() * len(xb)
+        hist["train"].append(tr_loss / len(tr_loader.dataset))
+
+        model.eval()                           # dropout 關閉，BN 使用移動統計量
+        v_loss, correct = 0.0, 0
+        with torch.no_grad():                  # 評估時不建立 autograd 圖 = 更快
+            for xb, yb in val_loader:
+                out = model(xb)
+                v_loss += crit(out, yb).item() * len(xb)
+                correct += (out.argmax(1) == yb).sum().item()
+        hist["val"].append(v_loss / len(val_loader.dataset))
+        hist["val_acc"].append(correct / len(val_loader.dataset))
+    return hist
+
+naive = run(regularized=False, weight_decay=0.0)
+craft = run(regularized=True,  weight_decay=1e-3)   # He 初始化 + BN + dropout + L2
+
+print(f"naive  best val acc: {max(naive['val_acc']):.3f}")
+print(f"craft  best val acc: {max(craft['val_acc']):.3f}")
+# -&gt; naive  best val acc: 0.858
+# -&gt; craft  best val acc: 0.867
+# （一切都設了亂數種子，所以這是確定性的精確輸出。注意兩個驗證準確率
+# 幾乎相同——差距並*不*顯現在驗證準確率上。
+# 過度擬合藏在損失曲線裡：天真版的訓練損失崩落到約 0.0003，
+# 而它的驗證損失觸底於約 0.34 後攀升到約 1.19；手藝版網路的訓練
+# 損失停在約 0.16，驗證損失則平穩地停在約 0.45。那道訓練/驗證的損失
+# 差距——而非準確率——才是重點。接下來把它畫出來。）
+</code></pre>
+      </div>
+
+      <h3 id="plot-curves">3.2 &nbsp;畫出曲線——看見過度擬合</h3>
+      <div class="codeblock">
+        <div class="code-head">plot_curves.py <span class="lang">Python</span></div>
+<pre><code class="language-python">fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+for name, h, c in [("naive", naive, "tab:red"), ("craft", craft, "tab:blue")]:
+    ax[0].plot(h["train"], c=c, ls="--", label=f"{name} train")
+    ax[0].plot(h["val"],   c=c, ls="-",  label=f"{name} val")
+    ax[1].plot(h["val_acc"], c=c, label=f"{name} val acc")
+ax[0].set_title("Loss"); ax[0].set_xlabel("epoch"); ax[0].set_ylabel("loss"); ax[0].legend()
+ax[1].set_title("Validation accuracy"); ax[1].set_xlabel("epoch"); ax[1].legend()
+plt.tight_layout(); plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 你應該看到什麼</div>
+        <p><em>天真</em>版的訓練損失（紅色虛線）朝零俯衝（約 0.0003），而它的驗證損失（紅色實線）觸底後<strong>再爬回來</strong>（約 0.34 → 約 1.19）——這是教科書級的過度擬合 U 形曲線，也是你會施加<strong>提早停止</strong>的位置（在驗證損失最低點停下）。<em>手藝</em>版的曲線（藍色）則貼得比較近：訓練損失沒有歸零（約 0.16，dropout + 衰減防止了死記硬背），而它的驗證損失保持低且平穩（約 0.45）。盯著<strong>損失</strong>看，而不是準確率——兩個網路都落在約 0.86 的<em>驗證準確率</em>，所以準確率隱藏了真相；那道被撐開的訓練/驗證<strong>損失</strong>差距，才是天真網路過度擬合顯露之處。虛線與實線之間<em>差距</em>的縮小，就是泛化在改善。</p>
+      </div>
+
+      <h3 id="lr-finder">3.3 &nbsp;LR-finder 的構想</h3>
+      <p>你不必去猜學習率。<strong>LR-finder</strong>（由 fast.ai 推廣）：從一個極小的 LR 開始，每個批次都把它乘大；畫出損失對 LR 的圖。損失先是平坦（LR 太小推不動），然後陡降（好區段），接著爆炸（LR 太大）。挑一個比爆炸點<em>低</em>約一個數量級的 LR——大致就是最陡下降點。</p>
+      <div class="codeblock">
+        <div class="code-head">lr_finder.py <span class="lang">Python</span></div>
+<pre><code class="language-python">def lr_finder(make_model, lr_min=1e-6, lr_max=1.0, n=120):
+    model = make_model()
+    opt = torch.optim.Adam(model.parameters(), lr=lr_min)
+    crit = nn.CrossEntropyLoss()
+    mult = (lr_max / lr_min) ** (1 / n)       # 每一步以幾何方式遞增 LR
+    lrs, losses = [], []
+    it = iter(tr_loader)
+    for i in range(n):
+        try:
+            xb, yb = next(it)
+        except StopIteration:                  # loader 耗盡時重新開始
+            it = iter(tr_loader); xb, yb = next(it)
+        lr = lr_min * (mult ** i)
+        for g in opt.param_groups:
+            g["lr"] = lr                       # 每一步手動調高 LR
+        opt.zero_grad()
+        loss = crit(model(xb), yb)
+        loss.backward(); opt.step()
+        lrs.append(lr); losses.append(loss.item())
+        if loss.item() &gt; 4 * min(losses):      # 已發散 -&gt; 提早停止
+            break
+    plt.plot(lrs, losses); plt.xscale("log")
+    plt.xlabel("learning rate (log)"); plt.ylabel("loss")
+    plt.title("LR finder"); plt.show()
+    return lrs, losses
+
+lr_finder(lambda: Net(regularized=True))
+# 你應該看到：一條「先平坦-再陡降-再爆掉」的曲線。挑一個比爆掉處
+# 低約 10 倍的 LR（這裡通常落在約 1e-3 到 3e-3 -&gt; 與我們的 lr 相符）。
+</code></pre>
+      </div>
+
+      <h3 id="lr-schedules">3.4 &nbsp;學習率排程</h3>
+      <p>固定的 LR 是一種折衷：要夠大才能在早期快速移動，但這樣到了最小值附近又會衝過頭。<strong>排程</strong>會把它慢慢退火降下來。餘弦退火 (cosine annealing) 是一個很強的預設選擇。</p>
+      <div class="codeblock">
+        <div class="code-head">lr_schedule.py <span class="lang">Python</span></div>
+<pre><code class="language-python">model = Net(regularized=True)
+opt   = torch.optim.Adam(model.parameters(), lr=3e-3, weight_decay=1e-3)
+# Cosine：LR 在 T_max 個訓練週期內，從 3e-3 平滑地衰減趨近 ~0。
+sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=120)
+
+for ep in range(120):
+    model.train()
+    for xb, yb in tr_loader:
+        opt.zero_grad()
+        nn.CrossEntropyLoss()(model(xb), yb).backward()
+        opt.step()
+    sched.step()           # 每個訓練週期推進排程一次（不是每個批次）
+# 效果：早期快速推進，後期精細微調 -&gt; 通常比固定 LR 得到更低的最終損失
+# 與更平穩的驗證曲線。
+</code></pre>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>實際案例 —— 一個會<em>泛化</em>而非死記硬背的聲納感測器分類器</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>為什麼這很重要</small></div>
+      <p>你正在一艘<strong>遙控潛水器 (ROV)</strong> 上做海床測勘。前向聲納 (sonar) 回傳一個回波；你想把每個回波分類成<strong>岩石</strong>還是<strong>類水雷的金屬圓柱</strong>——這就是經典的 <strong>Sonar (Connectionist Bench)</strong> 資料集（Gorman &amp; Sejnowski, 1988）：208 個回波，每個都是一個各頻帶能量的 <strong>60 維</strong>向量，二元標籤 <code>R</code>/<code>M</code>。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 本課要講的陷阱</div>
+        <p><strong>60 個特徵，卻只有 208 個樣本。</strong>一個有數千個參數的網路可以輕而易舉地把 208 個範例死記下來——訓練準確率 100%，然後在下一段測勘航程上就毫無用處，因為它學的是<em>那些特定的回波</em>，而不是「金屬聽起來像什麼」。泛化才是整件工作的核心。</p>
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">sonar_classifier.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np, torch, torch.nn as nn, torch.nn.functional as F
+from torch.utils.data import TensorDataset, DataLoader
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+
+# UCI Sonar 資料集（60 個特徵，R/M 標籤）。一行抓取：
+url = "https://archive.ics.uci.edu/ml/machine-learning-databases/undocumented/connectionist-bench/sonar/sonar.all-data"
+df = pd.read_csv(url, header=None)
+X = df.iloc[:, :60].values.astype("float32")
+y = (df.iloc[:, 60] == "M").astype("int64").values            # M(水雷)=1, R(岩石)=0
+
+Xtr, Xval, ytr, yval = train_test_split(X, y, test_size=0.3, stratify=y, random_state=1)
+sc = StandardScaler().fit(Xtr)                                 # 只在 train 上 fit
+Xtr, Xval = sc.transform(Xtr).astype("float32"), sc.transform(Xval).astype("float32")
+
+def dl(X, y, train, bs=16):                                    # 資料集很小 -&gt; 小批次
+    ds = TensorDataset(torch.tensor(X), torch.tensor(y))
+    # drop_last=train：在 145 個訓練樣本下，最後一個批次只有單一樣本，
+    # 而 train() 模式下的 BatchNorm1d 無法正規化大小為 1 的批次（它會丟出
+    # "Expected more than 1 value per channel"）。在訓練 loader 上把它丟掉；
+    # 評估時保留每個樣本（BN 在那裡用移動統計量，所以大小為 1 也沒問題）。
+    return DataLoader(ds, batch_size=bs, shuffle=train, drop_last=train)
+tr, va = dl(Xtr, ytr, True), dl(Xval, yval, False)
+
+class SonarNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(60, 128); self.fc2 = nn.Linear(128, 64); self.fc3 = nn.Linear(64, 2)
+        self.bn1, self.bn2 = nn.BatchNorm1d(128), nn.BatchNorm1d(64)
+        self.drop = nn.Dropout(0.4)
+        for m in (self.fc1, self.fc2, self.fc3):
+            nn.init.kaiming_normal_(m.weight, nonlinearity="relu"); nn.init.zeros_(m.bias)
+    def forward(self, x):
+        x = self.drop(F.relu(self.bn1(self.fc1(x))))
+        x = self.drop(F.relu(self.bn2(self.fc2(x))))
+        return self.fc3(x)
+
+def augment(xb):
+    """感測器資料擴增：加入小幅高斯雜訊以模擬真實的
+    回波變異。保留標籤 -&gt; 一個「免費」的正則化器（2.5 節）。"""
+    return xb + 0.05 * torch.randn_like(xb)
+
+model = SonarNet()
+opt = torch.optim.Adam(model.parameters(), lr=2e-3, weight_decay=1e-3)
+crit = nn.CrossEntropyLoss()
+best_acc, best_state, patience, bad = 0.0, None, 25, 0      # 提早停止的狀態
+
+for ep in range(300):
+    model.train()
+    for xb, yb in tr:
+        opt.zero_grad()
+        crit(model(augment(xb)), yb).backward()            # 只在訓練時擴增
+        opt.step()
+    model.eval()
+    with torch.no_grad():
+        acc = np.mean([ (model(xb).argmax(1) == yb).float().mean().item() for xb, yb in va ])
+    if acc &gt; best_acc:                                     # 提早停止：保留最佳
+        best_acc, best_state, bad = acc, {k: v.clone() for k, v in model.state_dict().items()}, 0
+    else:
+        bad += 1
+        if bad &gt;= patience:                                # 驗證在 25 個訓練週期內未改善
+            print(f"early stop at epoch {ep}"); break
+
+model.load_state_dict(best_state)
+print(f"best val acc: {best_acc:.3f}")
+# -&gt; best val acc: ~0.85-0.90  （相對於天真的過度擬合網路約 0.75-0.80）
+</code></pre>
+      </div>
+
+      <p>這套手藝如何對應到 ROV 問題上：</p>
+      <ul>
+        <li><strong>標準化特徵</strong>——聲納的能量頻帶橫跨非常不同的數量級；未經縮放的輸入會使第一層飽和（第 9 課的陷阱），並破壞 BatchNorm 的假設。</li>
+        <li><strong>He 初始化 + BatchNorm</strong> 讓一個 3 層網路裡的梯度保持活躍，使所有層都能真的從 208 個樣本中學習。</li>
+        <li><strong>Dropout + 權重衰減</strong>阻止網路死記那精確的 208 個回波——這正是「在海上會失敗的 100% 訓練準確率」與「一個能標記出真正水雷的模型」之間的差別。</li>
+        <li><strong>資料擴增（注入雜訊）</strong>模擬真實聲納一次又一次的變異性——模型學的是金屬回波的<em>形狀</em>，而不是一張被凍結的快照。同樣的技巧也能推廣到 IMU/光達串流：抖動、時間平移、隨機丟棄通道。</li>
+        <li><strong>提早停止</strong>挑出過度擬合開始<em>之前</em>的檢查點——當你的資料少到無法撥出一大塊驗證集時，這一點至關重要。</li>
+        <li><strong>小批次大小（16）</strong>是被這個極小資料集逼出來的；注意我們仍然選了 BatchNorm，而在完整的 16 樣本批次下它是穩定的。但要當心<em>最後一個</em>批次：145 個訓練樣本 ÷ 16 會剩下餘數 1，而 <code>train()</code> 模式下的 BatchNorm1d 會直接拒絕大小為 1 的批次（它無法計算變異數）——因此上面的訓練 loader 設了 <code>drop_last=True</code>。如果整體批次都是 1–4 個，你就該改用 <strong>LayerNorm</strong>。</li>
+      </ul>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>常見陷阱與技巧</h2>
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 那些悄無聲息的殺手</div>
+        <ul>
+          <li><strong>忘了 <code>model.train()</code> / <code>model.eval()</code>。</strong>Dropout 和 BatchNorm 在這兩種模式下的行為<em>不同</em>。評估時把模型留在 <code>train()</code>，會得到隨機、被 dropout 破壞過的預測，以及使用批次（而非移動）統計量的 BN——這是一個悄無聲息的 5–15% 準確率損失。每個迴圈都要切換。</li>
+          <li><strong>沒有標準化輸入，或是讓 scaler 洩漏資訊。</strong>只在<strong>訓練集</strong>上 fit <code>StandardScaler</code>（或 BatchNorm 的移動統計量）。在整個資料集上 fit 會洩漏驗證/測試資訊並灌水你的分數——你會在部署時大失所望。</li>
+          <li><strong><code>loss</code> 變成 <code>NaN</code>。</strong>幾乎總是梯度爆炸或 LR 太高。降低 LR、加上梯度裁剪（<code>torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)</code>）、檢查你的初始化，並確認你沒有在自訂損失裡取 <code>log(0)</code>。</li>
+          <li><strong>Adam + 手動 L2 ≠ 真正的權重衰減。</strong>Adam 的 <code>weight_decay</code> 參數在多數情況下沒問題，但<em>正確</em>的解耦版本是 <strong>AdamW</strong>（<code>torch.optim.AdamW</code>）——當權重衰減很重要時（transformer，第 15 課）優先用它。</li>
+          <li><strong>大批次 → 較少、較平滑的步；小批次 → 較有雜訊、帶正則化效果的步。</strong>較大的批次需要<em>較大</em>的 LR（大致呈線性縮放），有時還需要暖身 (warmup)。不要為了速度把批次大小調大卻沿用舊的 LR——訓練會停滯。</li>
+          <li><strong>同時堆疊 BatchNorm <em>與</em>高 dropout</strong> 可能會互相打架（在重度 dropout 下，BN 的批次統計量會變得有雜訊）。若兩者都用，把 dropout 維持在中等程度（≤0.5），並把 dropout 放在活化<em>之後</em>。</li>
+          <li><strong>一次調十個旋鈕。</strong>改一樣東西，看曲線，再改下一樣。如果你同時翻轉初始化、最佳化器、LR 與 dropout，然後它成功了，你對<em>為什麼</em>成功一無所知。</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>自我檢測</h2>
+
+      <p><strong>Q1.</strong> 你那個 8 層的 tanh 網路從第 1 個訓練週期起，損失就死死地停在原地不動，而第一層的權重幾乎不動。說出最可能的原因，以及兩個修法。</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p><strong>梯度消失。</strong>tanh 的導數是 $\tanh'(x) = 1 - \tanh^2(x)$，最大值為 $1$（在 $x=0$ 處），並隨著單元飽和而朝 $0$ 縮小（$x=2$ 時約 $0.07$，$x=3$ 時約 $0.01$）；跨 8 層相乘後，早期層的梯度便朝零縮小，所以前面幾層學不起來。修法：把隱藏層的活化換成 <strong>ReLU</strong>（$r\approx1$，不衰減）、使用 <strong>He 初始化</strong>，並／或加上 <strong>BatchNorm</strong> 把逐層的變異數維持在接近 1。任選其中兩個。</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> RMSProp 與 Adam 之間唯一的概念差異是什麼？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>RMSProp 用平方梯度的移動平均（$\sqrt{s_t}$ 分母）來自適應逐參數的學習率。<strong>Adam = RMSProp + momentum</strong>：它加上了梯度本身的移動平均（$m_t$，一階矩）以及偏差校正。所以 Adam 平滑了<em>方向</em>，又逐座標自動縮放<em>步幅</em>；RMSProp 只做後者。</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> 批次正規化 vs 層正規化：你正在訓練一個 batch size 為 8 的 transformer（在生成時有時是 1）。你選哪一個，為什麼？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p><strong>層正規化。</strong>它跨<em>單一</em>樣本的各個特徵來正規化，所以與批次大小無關，而且在訓練與推論時行為完全相同——當批次很小或大小為 1 時，這一點至關重要。批次正規化仰賴批次統計量，在 batch size 為 1 時這些統計量有雜訊／無法良好定義，而且它在評估時必須切換到移動統計量。序列/transformer → 層正規化。</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> 你的訓練準確率是 99%，但驗證準確率是 76% 且還在下降。第 12 課的哪些工具直接攻擊這個問題，而<em>那道差距本身</em>又告訴了你什麼？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>那道差距<strong>就是</strong>過度擬合——網路正在死記訓練資料的細節。直接用 <strong>dropout</strong>、<strong>權重衰減</strong>（L2）、<strong>資料擴增</strong>，以及<strong>提早停止</strong>（在驗證損失最低點停下）來攻擊它。這些並不會讓網路更強大；它們約束網路去學習可泛化的結構，而非訓練集的怪癖。更多／更乾淨的資料才是終極的修法。</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> 你跑了 LR finder，損失對 LR 的曲線在 $10^{-3}$ 附近陡降，並在 $10^{-1}$ 附近爆炸。你會選哪個 LR，又為什麼不直接挑損失最低的爆炸點？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>大致挑 $10^{-2}$ ——比爆炸點<em>低</em>約一個數量級（在最陡下降區附近），而不是損失最低點。畫出來最低的那個損失正好坐落在發散的邊緣；用那個 LR 會讓真正的訓練變得不穩定（它會變成 NaN）。你要的是仍能<em>可靠</em>下降的最大 LR，也就是曲線陡峭的中段，而不是它的最末端。</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>換你試試</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml12-norm-choice">
+        <div class="ex-head"><span class="badge">Q1</span> 概念檢測</div>
+        <div class="ex-q">你正在訓練一個序列模型，批次大小有時是 1（自迴歸生成）。哪一種正規化適合用在這裡，為什麼？</div>
+        <ul class="ex-options">
+          <li data-correct="false">批次正規化——它無論批次大小都能穩定訓練。</li>
+          <li data-correct="true">層正規化——它跨單一樣本的各個特徵來正規化，所以與批次大小無關，而且在訓練/評估時完全相同。</li>
+          <li data-correct="false">不用正規化——序列模型不會受內部共變量偏移之苦。</li>
+          <li data-correct="false">批次正規化，但只有在你設了 <code>drop_last=True</code> 時。</li>
+        </ul>
+        <div class="ex-explain">層正規化是在<em>一個</em>樣本的 $d$ 個特徵上計算 $\mu_i,\sigma_i^2$，所以批次為 1 完全不是問題，也沒有訓練 vs 評估的統計量切換。批次正規化仰賴的批次統計量在批次大小為 1 時有雜訊或無法定義（BatchNorm1d 在 <code>train()</code> 模式下根本就拒絕大小為 1 的批次），這正是為什麼 transformer 和 RNN 使用層正規化。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml12-he-variance" data-answer="0.04" data-tol="0.002">
+        <div class="ex-head"><span class="badge">Q2</span> 動手算算看</div>
+        <div class="ex-q">一個 ReLU 層的 fan-in 是 $n_{\text{in}} = 50$。用 <strong>He 初始化</strong>，你應該給每個權重多少變異數？（提示：$\mathrm{Var}(w) = \tfrac{2}{n_{\text{in}}}$。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">變異數</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">He 初始化的目標是 $\mathrm{Var}(w) = \tfrac{2}{n_{\text{in}}} = \tfrac{2}{50} = 0.04$（所以標準差為 $\sqrt{0.04} = 0.2$）。那個 2 倍因子補償了 ReLU 把大約一半的輸入歸零（否則會使前向變異數減半）；這讓 $\mathrm{Var}(z)\approx\mathrm{Var}(x)$ 逐層維持，並阻止梯度隨深度消失或爆炸。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml12-adam-from-pieces">
+        <div class="ex-head"><span class="badge">Q3</span> 推導——從兩種材料建構出 Adam</div>
+        <div class="ex-q">Adam 被描述成「momentum + RMSProp」。用一階矩 $m_t$ 與二階矩 $v_t$ 寫出更新式，解釋為什麼每一個都要做偏差校正，並說明哪一種材料提供了哪一種行為。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">Momentum 貢獻的是梯度的移動平均（方向）；RMSProp 貢獻的是平方梯度的移動平均（逐座標的縮放）。兩個平均都從 $0$ 開始，所以早期的估計值都太小。</div></details>
+        <details class="ex-acc"><summary>顯示一種解答</summary><div class="acc-body">
+          <p>同時追蹤兩個矩：$m_t = \beta_1 m_{t-1} + (1-\beta_1) g_t$（一階矩，<strong>momentum</strong> 那部分——平滑<em>方向</em>）以及 $v_t = \beta_2 v_{t-1} + (1-\beta_2) g_t^2$（二階矩，<strong>RMSProp</strong> 那部分——逐座標的縮放）。兩者都是初始化在 $0$ 的指數移動平均 (EMA)，所以對小的 $t$ 來說它們都<em>偏向零</em>；除以 $1-\beta^{\,t}$ 即可去除這個啟動偏差：$\hat m_t = \frac{m_t}{1-\beta_1^{\,t}}$、$\hat v_t = \frac{v_t}{1-\beta_2^{\,t}}$。接著更新式為 $\theta_{t+1} = \theta_t - \eta\,\dfrac{\hat m_t}{\sqrt{\hat v_t}+\epsilon}$。Momentum 設定<em>往哪個方向</em>跨步；$\sqrt{\hat v_t}$ 分母則逐座標自動調整<em>跨多大</em>的步——陡峭方向（$\hat v$ 大）走小步，平坦方向（$\hat v$ 小）走大步。預設值：$\beta_1=0.9$、$\beta_2=0.999$、$\epsilon=10^{-8}$。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本課回顧</div>
+        <ul>
+          <li><strong>最佳化器</strong>：純粹的 SGD 來回震盪；<strong>momentum</strong> 平滑了方向，<strong>RMSProp</strong> 自適應逐參數的步幅，<strong>Adam</strong> 兩者都做（你的預設選擇）。搭配一個 <strong>LR 排程</strong>（餘弦），並用 <strong>LR-finder</strong> 找出 LR，而不是用猜的。</li>
+          <li><strong>初始化很重要</strong>：讓活化值的變異數逐層維持 $\approx1$ —— tanh/sigmoid 用 <strong>Xavier</strong>，ReLU 用 <strong>He</strong> ——否則在訓練都還沒開始前你就先得到梯度消失/梯度爆炸。</li>
+          <li><strong>梯度消失/梯度爆炸</strong>來自反向傳播中 $L$ 個因子的相乘；<strong>ReLU + 良好初始化 + 正規化</strong>讓那個乘積維持在接近 1。裁剪梯度來馴服爆炸。</li>
+          <li><strong>正規化</strong>：BatchNorm 跨批次正規化一個特徵（很適合 CNN、大批次）；LayerNorm 跨一個樣本的各特徵正規化（很適合序列、極小批次）。記得 <code>train()</code>/<code>eval()</code>。</li>
+          <li><strong>正則化</strong>——dropout、權重衰減、提早停止、擴增——縮小訓練/驗證差距，讓模型能泛化。我們看到天真網路過度擬合，而施展手藝的網路守住了它的驗證準確率，我們也訓練了一個能學會<em>金屬</em>、而非<em>這 208 個回波</em>的聲納分類器。</li>
+        </ul>
+        <p>現在我們已經能可靠地訓練一個深度網路，接著我們會為空間資料賦予它正確的<em>架構</em>——跨整張影像共享權重，讓網路學會局部模式（邊緣、紋理、形狀），而不是死記像素。➡️ <strong>下一課：</strong> <a href="13-cnns.html">13 — 卷積神經網路</a></p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂部">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

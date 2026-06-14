@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>穩健韌體：狀態機、非阻塞設計與電源管理 — Embedded Mastery</title>
+<link rel="stylesheet" href="../../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../../assets/styles.css">
+</head>
+<body class="track-arduino" data-course="embedded" data-track="arduino" data-chapter="08-architecture-power">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">Arduino · 第 08 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Arduino 學習路徑 · 第 08 章 · 進階→精通</div>
+        <h1>穩健韌體：狀態機、非阻塞設計與電源管理</h1>
+        <p>一段閃爍範例程式在展示時跑十分鐘沒問題。但一件產品要在牆裡、在田野中、在病患身上運行<em>好幾年</em>。這道鴻溝靠的不是運氣，而是架構。我們把雜亂無章的 <code>loop()</code> 換成刻意設計的狀態機、一個協作式排程器、防溢位的計時、記憶體紀律，以及一份能把 2000&nbsp;mAh 化為數年運轉時間的電源預算。</p>
+        <div class="meta">
+          <span>⏱ 約 55 分鐘</span><span>🧠 架構</span><span>⚡ 低功耗</span><span>🛡️ 看門狗</span><span>🔋 電池計算</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="from-spaghetti-to-architecture"><span class="sec-no">1</span>從義大利麵式 <code>loop()</code> 到架構</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先建立全貌</small></div>
+      <p>早期的範例程式靠堆積成長：這裡一個 <code>delay()</code>、那裡一個 <code>if</code>、一個旗標、又一個旗標、一個「就一直輪詢到按鈕放開」的巢狀 <code>while</code>。在工作台上它能跑。然後你加上一段感測器讀取，突然間按鈕變得遲鈍、LED 抖動，而一個你根本不知道存在的看門狗把板子重開機了。程式並沒有變難——它變得<em>糾纏不清</em>。每一個阻塞呼叫都會凍結其他所有東西，每一個散落的旗標都是一個隱含、未紀錄的狀態。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話模型</div>
+        <p>穩健的韌體是<strong>一組明確的狀態，由微小的非阻塞步驟在一個你信得過的時鐘上推進</strong>。沒有任何東西在等待。沒有任何東西被隱藏。裝置可能處於的每一種「模式」都有名字。</p>
+      </div>
+
+      <p>三項紀律帶我們走完剩下的路，而本章會逐一探討：</p>
+      <ul>
+        <li><strong>有限狀態機</strong>——為每一個模式命名，於是 <code>loop()</code> 就變成單一的 <code>switch</code>。</li>
+        <li><strong>協作式排程</strong>——用一個 <code>millis()</code> 時鐘、零個 <code>delay()</code>，讓眾多「任務」以不同的間隔執行。</li>
+        <li><strong>資源紀律</strong>——記憶體與電源都是<em>預算</em>。要刻意地花用，並衡量還剩多少。</li>
+      </ul>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——<code>delay()</code> 是昏迷，不是暫停</div>
+        <p><code>delay(1000)</code> 並不會「等待」——它讓 <em>CPU 空轉在一個忙等迴圈裡</em>，跑十億次左右的週期，無視按鈕、序列埠位元組，以及其他每一個任務。<code>loop()</code> 裡任何一處的阻塞呼叫，都會決定<em>整個</em>程式的反應速度下限。某種意義上，整章就是一場刪除 <code>delay()</code> 的行動。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="finite-state-machines"><span class="sec-no">2</span>有限狀態機：為每一個模式命名</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>裝置永遠恰好處於一個模式</small></div>
+      <p>一個紅綠燈不是<em>綠</em>、就是<em>黃</em>、或是<em>紅</em>——絕不會同時是兩種，也絕不會是別的什麼。這就是<strong>有限狀態機（finite state machine, FSM）</strong>：一組有限的狀態，加上當事件發生時在狀態之間移動的規則（轉移）。按鈕、選單、充電序列、通訊協定——幾乎每一種「它先做這個、再做那個，除非……」的行為<em>本身</em>就是一個 FSM，無論你有沒有把它建模出來。明確地將它建模，正是「你能推理的程式碼」與「你只能祈禱別出事的程式碼」之間的差別。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>剛好足夠的形式化</small></div>
+      <p>形式上，一個 FSM 是這個元組 <span>$M = (S,\, \Sigma,\, \delta,\, s_0)$</span>：一組有限的狀態 <span>$S$</span>、一個輸入字母表（事件）<span>$\Sigma$</span>、一個轉移函數 <span>$\delta : S \times \Sigma \to S$</span>，以及一個起始狀態 <span>$s_0 \in S$</span>。你永遠不會把 <span>$\delta$</span> 寫成一條方程式——你會把它寫成一個 <code>switch</code>。但這套形式化替你買到一項保證：</p>
+
+      <div class="math-box">
+        $$ |S| < \infty \;\Longrightarrow\; \text{每一個 (狀態, 事件) 配對都可窮舉、可測試。} $$
+      </div>
+
+      <p>如果你的裝置有 4 個狀態與 3 個不同的事件，最多就有 <span>$|S|\times|\Sigma| = 12$</span> 個轉移要定義。那是一份有限的檢查清單——正是能避免「但如果按鈕是在校正<em>進行中</em>被按下會怎樣？」這類臭蟲的東西。</p>
+
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> 閒置
+    閒置 --> 待命: 按下按鈕
+    待命 --> 運行中: 按下按鈕
+    運行中 --> 閒置: 長按 2 秒
+    運行中 --> 故障: 感測器錯誤
+    故障 --> 閒置: 按下按鈕
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>逐行細讀</small></div>
+      <p>標準的實作：為狀態建一個具名的 <code>enum</code>、一個單一的狀態變數，以及一個每次迴圈迭代執行一次的 <code>switch</code>。每個 <code>case</code> 做兩件事——對當前狀態採取行動，並決定是否要轉移。</p>
+
+      <div class="codeblock">
+        <div class="code-head">fsm.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">// 1) 為裝置可能處於的每一個模式命名。編譯器現在會
+//    禁止任何不在這份清單上的狀態。
+enum class State : uint8_t { Idle, Armed, Running, Fault };
+
+State state = State::Idle;          // 當前狀態 — 唯一的模式變數
+const uint8_t BTN = 2;              // 按鈕接到 GND，使用 INPUT_PULLUP
+
+void setup() {
+  pinMode(BTN, INPUT_PULLUP);       // 按下 == LOW
+  pinMode(LED_BUILTIN, OUTPUT);
+  Serial.begin(115200);
+}
+
+// 一個極小的邊緣偵測器：在按下的那一刻恰好回傳 true 一次。
+bool buttonPressed() {
+  static bool prev = HIGH;          // 'static' 讓值在多次呼叫間保留
+  bool now = digitalRead(BTN);
+  bool edge = (prev == HIGH &amp;&amp; now == LOW);  // HIGH→LOW == 按下
+  prev = now;
+  return edge;
+}
+
+void loop() {
+  bool press = buttonPressed();     // 每次迭代只取樣事件一次
+
+  switch (state) {                  // 這個 switch 就是轉移函數 δ
+    case State::Idle:
+      digitalWrite(LED_BUILTIN, LOW);
+      if (press) state = State::Armed;
+      break;
+
+    case State::Armed:
+      digitalWrite(LED_BUILTIN, HIGH);          // 恆亮 = 待命
+      if (press) state = State::Running;
+      break;
+
+    case State::Running:
+      // ... 在這裡做真正的工作，非阻塞 ...
+      if (sensorFaulted()) state = State::Fault; // 有條件的轉移
+      break;
+
+    case State::Fault:
+      if (press) state = State::Idle;            // 操作員清除故障
+      break;
+  }
+}
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 為什麼這牢不可破</div>
+        <p>只有<strong>一個</strong>狀態變數，而且它只在<strong>一個</strong>地方改變（<code>switch</code> 內部）。要回答「當 X 發生時裝置會做什麼？」你只要讀恰好一個 <code>case</code>。使用 <code>enum class</code> 意味著打錯字或超出範圍的狀態會是<em>編譯錯誤</em>，而不是凌晨三點的現場故障。整個迴圈是非阻塞的：它在微秒內就跑完離開，所以其他任務仍然能執行。</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——去彈跳<em>本身</em>就是一個 FSM</div>
+        <p>那行單行的邊緣偵測器建立在一顆會雜訊的機械按鈕上：接點會彈跳 1–20&nbsp;ms，觸發數十個假邊緣。產品級的去彈跳是它自己的小 FSM——狀態有<em>穩定</em>、<em>彈跳中</em>、<em>已穩定</em>——由一個 <code>millis()</code> 計時器把關，要求電位穩定維持，比方說 25&nbsp;ms，才接受它。你會在練習裡建出正是這樣的東西。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="cooperative-scheduler"><span class="sec-no">3</span>不需要 RTOS 的協作式排程器</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>多個時鐘，一個迴圈</small></div>
+      <p>真實裝置以不同的節奏並行多項工作：以 1&nbsp;Hz 閃爍一個心跳、以 10&nbsp;Hz 取樣一個感測器、每 60&nbsp;s 推送一個無線封包。你不需要為此用上即時作業系統。你需要的是一張工作<strong>表格</strong>，每項工作記住它上次執行的時刻，由單一的非阻塞迴圈逐一推進。每項工作檢查一個便宜的問題——「我的間隔到了嗎？」——如果到了，就執行並重設它的計時器。這就是<em>協作式</em>多工：任務必須短、必須回傳；沒有人會被搶佔。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>30 行內的排程器</small></div>
+      <p>一項任務就是 <code>{interval, lastRun, fn}</code>。派工器每次迴圈走過這張表，呼叫任何間隔已到的任務。</p>
+
+      <div class="codeblock">
+        <div class="code-head">scheduler.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">struct Task {
+  uint32_t interval;     // 每隔 'interval' 毫秒執行一次
+  uint32_t lastRun;      // 上次執行時的 millis()
+  void (*fn)();          // 指向任務函數的指標
+};
+
+// ---- 實際的工作（每項都必須短且非阻塞）----
+void heartbeat()  { digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN)); }
+void sampleADC()  { /* 讀取一個感測器，存下數值 */ }
+void sendPacket() { /* 組裝並傳送一個訊框        */ }
+
+// ---- 排程：interval、lastRun=0、函數 ----
+Task tasks[] = {
+  { 500,   0, heartbeat  },   // 2 Hz LED 切換
+  { 100,   0, sampleADC  },   // 10 Hz 感測器
+  { 60000, 0, sendPacket },   // 每分鐘一次
+};
+const uint8_t NTASKS = sizeof(tasks) / sizeof(tasks[0]);
+
+void setup() { pinMode(LED_BUILTIN, OUTPUT); }
+
+void loop() {
+  uint32_t now = millis();                  // 每一輪只取一個時間戳
+  for (uint8_t i = 0; i &lt; NTASKS; i++) {
+    // 無號減法 — 為何能防溢位請見 §4
+    if (now - tasks[i].lastRun &gt;= tasks[i].interval) {
+      tasks[i].lastRun = now;               // 在執行「之前」重設
+      tasks[i].fn();                        // 執行任務
+    }
+  }
+  // loop() 在微秒內回傳 → 沒有任何東西阻塞其他東西
+}
+</code></pre>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    T(["now = millis()"]) --> L{對每一項任務}
+    L --> C{"now - lastRun<br/>≥ interval？"}
+    C -- 是 --> R["lastRun = now<br/>fn()"]
+    R --> L
+    C -- 否 --> L
+    L -- 完成 --> T
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 在呼叫 <code>fn()</code> <em>之前</em>就重設 <code>lastRun</code></div>
+        <p>在叫用任務之前就設定 <code>lastRun = now</code>，這樣間隔是從<em>排定的</em>那一刻起算，而不是從任務碰巧結束的時刻起算。這讓節奏即使在某個任務跑得稍久時仍然穩定，並且能防止漂移在數百萬次迭代中一點一滴累積進來。</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——協作式意味著<em>你</em>必須讓出控制權</div>
+        <p>沒有任何任務會被搶佔。如果 <code>sampleADC()</code> 裡藏了一個 <code>delay(200)</code>，其他每一個任務——包括心跳——都會停滯 200&nbsp;ms。排程器的反應速度只跟你最慢的任務一樣快。讓每一個都保持簡短；如果某項工作本質上很長，就把它切成它自己的 FSM，每次呼叫只推進一步。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="millis-rollover"><span class="sec-no">4</span><code>millis()</code> 溢位回繞：證明那個無號技巧</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>推導它，別只是相信它</small></div>
+      <p><code>millis()</code> 回傳一個 <code>uint32_t</code>——一個自開機以來計數毫秒的 32 位元無號計數器。它一直數到 <span>$2^{32}-1$</span>，然後<strong>回繞到 0</strong>。那何時會發生？</p>
+
+      <div class="math-box">
+        $$ t_{\text{wrap}} = \frac{2^{32}\ \text{ms}}{1000 \cdot 60 \cdot 60 \cdot 24} \approx \frac{4.295\times10^{9}}{86\,400\,000} \approx 49.7\ \text{天} $$
+      </div>
+
+      <p>每一個基於 <code>millis()</code> 的裝置只要持續通電約 50 天，就會碰上這次回繞。天真的防護寫法 <code>if (now &gt; lastRun + interval)</code> 在跨越回繞時會<strong>失效</strong>：<code>lastRun + interval</code> 溢位，或 <code>now</code> 重設成一個很小的數，比較就出錯了——任務變成永遠觸發或永遠不觸發。修正之道是<em>先做減法</em>，在無號算術之下：</p>
+
+      <div class="math-box math">
+        $$ \texttt{if } (\,\underbrace{\texttt{now} - \texttt{lastRun}}_{\text{無號}}\, \geq \texttt{interval}\,) $$
+      </div>
+
+      <p>以下是這在<em>即使跨越回繞時</em>也正確的證明。無號 32 位元減法的定義就是以 <span>$2^{32}$</span> 為<strong>模</strong>來進行：</p>
+
+      <div class="math-box">
+        $$ (\texttt{now} - \texttt{lastRun}) \bmod 2^{32} \;=\; \text{真正經過的毫秒數},\quad \text{對任何經過時間} < 2^{32}\ \text{成立。} $$
+      </div>
+
+      <p>具體地說，假設 <code>lastRun</code> = <span>$2^{32}-10$</span>（就在回繞之前），而 25&nbsp;ms 之後 <code>now</code> 已經回繞到 <span>$15$</span>。字面上的差值 <span>$15 - (2^{32}-10)$</span> 是負的——但以 <span>$2^{32}$</span> 為模計算後，它變成</p>
+
+      <div class="math-box">
+        $$ \big(15 - (2^{32}-10)\big) \bmod 2^{32} \;=\; (25 - 2^{32}) \bmod 2^{32} \;=\; 25\ \text{ms.} $$
+      </div>
+
+      <p>恰好就是真正經過的時間。回繞在模算術中<em>自我抵消</em>了，所以無號減法不需要任何特例處理就能回傳正確答案。這就是為什麼 §3 的排程器使用 <code>now - tasks[i].lastRun &gt;= interval</code> 而從不做加法。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 烙印進腦海的規則</div>
+        <p>對於計時，<strong>永遠用兩個無號 <code>millis()</code> 值相減，並把差值與你的間隔比較</strong>。絕不比較絕對時間戳、絕不把間隔加到某個時間戳上，並讓兩個運算元保持同一個 <code>uint32_t</code> 型別。做到這些，回繞就是個非事件——你的程式碼會毫無察覺地平順度過那條 49.7 天的界線。</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——一個亂入的 <code>int</code> 就毀了整個證明</div>
+        <p>這個魔法依賴於<em>無號</em>運算。如果你把 <code>lastRun</code> 存成一個有號的 <code>long</code> 或 <code>int</code>，或混入一個 <code>int</code> 字面值，C++ 的整數提升（integer promotion）就可能把這個減法拖進有號算術，而在那裡溢位是<em>未定義行為</em>。從頭到尾都用 <code>uint32_t</code>（或 <code>unsigned long</code>）。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="memory-discipline"><span class="sec-no">5</span>記憶體紀律：Flash、堆疊、堆積與 <code>F()</code></h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>2&nbsp;KB 的 SRAM 是個吃緊的預算</small></div>
+      <p>ATmega328P 只有 <strong>2&nbsp;KB 的 SRAM</strong>。那一小片要容納<em>三</em>位互相往彼此方向成長的房客：<strong>全域變數/靜態變數</strong>（固定的，從底部開始）、<strong>堆積</strong>（heap，隨著你 <code>malloc</code>／使用 <code>String</code> 向上長），以及<strong>堆疊</strong>（stack，隨著每次函數呼叫與區域變數向下長）。當堆積與堆疊撞在一起時，晶片不會報錯——它會默默地破壞資料，表現得像鬧鬼一樣。</p>
+
+      <div class="mermaid">
+flowchart TB
+    A["0x0100 — 底部<br/>全域變數與靜態變數"] --> B["堆積 →<br/>（向上成長）"]
+    B --> C["… 空閒 RAM …"]
+    C --> D["← 堆疊<br/>（向下成長）"]
+    D --> E["0x08FF — 2 KB SRAM 的頂端"]
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 字串字面值偷偷吃掉 SRAM</div>
+        <p>因為 AVR 是<strong>哈佛架構（Harvard architecture）</strong>，像 <code>Serial.println("Booting...")</code> 這樣的常數活在 Flash 裡，但在啟動時會被<em>複製進 SRAM</em>，好讓 CPU 能把它當資料來讀。十幾個除錯字串就能在 <code>setup()</code> 都還沒跑之前，悄悄燒掉你那 2048 位元組裡的數百個。</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>把字串留在 Flash；絕不讓堆積碎片化</small></div>
+      <p>兩個工具能修正這點。<code>F()</code> 巨集告訴編譯器把字串字面值留在 Flash 裡，並從那裡逐位串流出來。<code>PROGMEM</code> 對較大的常數表格做同樣的事。而 <code>String</code> <em>類別</em>——也就是會在堆積上配置記憶體的那個——在長時間運行的韌體中是被禁止的。</p>
+
+      <div class="codeblock">
+        <div class="code-head">memory.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;avr/pgmspace.h&gt;
+
+// 不好：這個字面值會在開機時被複製進寶貴的 SRAM。
+// Serial.println("System initialized and ready");
+
+// 好：F() 把它留在 Flash 裡；逐位元組串流出來。
+void banner() {
+  Serial.println(F("System initialized and ready"));  // 0 位元組 SRAM
+}
+
+// 一張完全停在 Flash 裡的常數查找表：
+const uint8_t gamma8[] PROGMEM = { 0, 1, 2, 4, 6, 10, 14, 20 };
+
+uint8_t gammaLookup(uint8_t i) {
+  return pgm_read_byte(&amp;gamma8[i]);   // 明確地從 Flash 讀取
+}
+
+// 在執行期測量空閒 SRAM：堆積頂端與當前堆疊指標之間的間隙。
+// 又小、又經典、又可靠。
+extern char *__brkval;                 // 堆積頂端（由 malloc 設定）
+extern char  __heap_start;             // 堆積區域的起點
+
+int freeRAM() {
+  char top;                            // 'top' 的位址 ≈ 堆疊指標
+  return (int)&amp;top - (__brkval ? (int)__brkval : (int)&amp;__heap_start);
+}
+
+void setup() {
+  Serial.begin(115200);
+  banner();
+  Serial.print(F("Free RAM: "));
+  Serial.println(freeRAM());           // 觀察這個數字是否保持「穩定」
+}
+
+void loop() { /* freeRAM() 不可隨時間呈現下降趨勢 */ }
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——<code>String</code> 把堆積碎片化到死</div>
+        <p>Arduino 的 <code>String</code> 類別每次成長或串接時，都會在堆積上配置與釋放。在一個建立 <code>String</code> 的迴圈裡，堆積會被大小不一的洞填滿——<strong>碎片化（fragmentation）</strong>——直到一個<em>理應</em>放得下的配置卻找不到一塊連續的空隙。裝置運行好幾個小時都正常，然後當機。改用搭配 <code>snprintf()</code> 的固定 <code>char</code> 緩衝區，並看著 <code>freeRAM()</code> 保持水平。一個數小時內穩定不變的空閒 RAM 數字，正是無洩漏韌體的標誌。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="power-and-sleep"><span class="sec-no">6</span>電源與睡眠模式：電池壽命方程式</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>反正 CPU 幾乎一直都閒著</small></div>
+      <p>一個每分鐘取樣一次的感測器節點，99.9% 的時間都無事可做。讓 CPU 全速跑完那段閒置時間，毫無益處地燒掉約 15&nbsp;mA。睡眠模式讓晶片關掉它沒在用的區塊——先 CPU，再計時器，然後振盪器——把電流降低<em>三到四個數量級</em>。AVR 提供一道階梯，從淺到深：</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>模式（<code>SLEEP_MODE_*</code>）</th><th>關掉了什麼</th><th>喚醒來源</th><th>典型電流 I（ATmega328P）</th></tr></thead>
+        <tbody>
+          <tr><td><code>IDLE</code></td><td>CPU 時脈</td><td>任何中斷</td><td>約 6&nbsp;mA</td></tr>
+          <tr><td><code>ADC</code></td><td>CPU + I/O 時脈</td><td>ADC 完成等</td><td>約 1&nbsp;mA</td></tr>
+          <tr><td><code>PWR_SAVE</code></td><td>大多數時脈；Timer2 仍存活</td><td>Timer2、WDT、INT</td><td>約 1.8&nbsp;µA + Timer2</td></tr>
+          <tr><td><code>PWR_DOWN</code></td><td>除 WDT 與外部 INT 外的一切</td><td>WDT、INT0/1、接腳變化</td><td>約 6&nbsp;µA（WDT 開啟）</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>平均電流與電池壽命</small></div>
+      <p>裝置交替運作：一段短暫的<em>活躍</em>電流爆發，以 <span>$I_{\text{active}}$</span> 持續 <span>$t_{\text{active}}$</span>，然後是一段漫長的<em>睡眠</em>，以 <span>$I_{\text{sleep}}$</span> 持續 <span>$t_{\text{sleep}}$</span>，週期為 <span>$T = t_{\text{active}} + t_{\text{sleep}}$</span>。<strong>平均電流</strong>是依時間加權的平均值——一個工作週期（duty-cycle）平均：</p>
+
+      <div class="math-box">
+        $$ I_{\text{avg}} = \frac{I_{\text{active}}\,t_{\text{active}} + I_{\text{sleep}}\,t_{\text{sleep}}}{T} $$
+      </div>
+
+      <p>而電池壽命由容量（以 mAh 計）除以那個平均消耗（以 mA 計）得出，單位為小時：</p>
+
+      <div class="math-box">
+        $$ t_{\text{life}}\,[\text{h}] = \frac{C\,[\text{mAh}]}{I_{\text{avg}}\,[\text{mA}]} $$
+      </div>
+
+      <p><strong>實例演算。</strong>取一個節點，醒來 <span>$t_{\text{active}}=0.1\,\text{s}$</span> 並以 <span>$I_{\text{active}}=20\,\text{mA}$</span>（無線電 + ADC），然後在 <code>PWR_DOWN</code> 下以 <span>$I_{\text{sleep}}=6\,\mu\text{A}=0.006\,\text{mA}$</span> 睡完一個 <span>$T=60\,\text{s}$</span> 週期的其餘時間，所以 <span>$t_{\text{sleep}}=59.9\,\text{s}$</span>：</p>
+
+      <div class="math-box">
+        $$ I_{\text{avg}} = \frac{(20)(0.1) + (0.006)(59.9)}{60} = \frac{2.0 + 0.359}{60} \approx 0.0393\ \text{mA} $$
+      </div>
+
+      <p>以一顆 <span>$C = 2000\,\text{mAh}$</span> 的電池組：</p>
+
+      <div class="math-box">
+        $$ t_{\text{life}} = \frac{2000}{0.0393} \approx 50\,900\ \text{h} \approx 2120\ \text{天} \approx \mathbf{5.8\ 年.} $$
+      </div>
+
+      <p>注意這個槓桿：活躍爆發在每週期 2.36&nbsp;mA·s 中貢獻了 2.0，然而因為它如此短暫，平均值塌縮到約 39&nbsp;µA。<strong>睡眠時間才是全局關鍵。</strong>同一個節點若讓 CPU 以 15&nbsp;mA 全速運行，大約只能撐 5.5 天——僅僅一個架構選擇就造成約 380 倍的差距。</p>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-power-wrap">
+        <div class="sim-title">🔬 互動：平均電流與電池壽命探索器</div>
+        <canvas id="sim-power"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">拖曳滑桿：縮短 <em>t<sub>active</sub></em> 或拉長週期，看著 <em>I<sub>avg</sub></em> 塌縮，而預估電池壽命從幾天攀升到幾年。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>睡眠、由看門狗喚醒、重複</small></div>
+      <p>這個模式：設定看門狗每約 8&nbsp;s 觸發一次中斷，落入 <code>PWR_DOWN</code>，並讓那個 WDT 中斷喚醒 CPU。在兩次喚醒之間，晶片只消耗微安培。</p>
+
+      <div class="codeblock">
+        <div class="code-head">sleep_node.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;avr/sleep.h&gt;
+#include &lt;avr/wdt.h&gt;
+#include &lt;avr/interrupt.h&gt;
+
+volatile bool wokeFromWDT = false;
+
+// 把看門狗當作週期性的喚醒來源（中斷，「不是」重置）。
+void setupWDT_8s() {
+  cli();                              // 在動暫存器時關閉中斷
+  wdt_reset();
+  // 定時序列：設定 WDCE+WDE，然後在 4 個週期內設定預除器
+  WDTCSR = (1 &lt;&lt; WDCE) | (1 &lt;&lt; WDE);
+  WDTCSR = (1 &lt;&lt; WDIE)               // 中斷模式（喚醒，不要重置）
+         | (1 &lt;&lt; WDP3) | (1 &lt;&lt; WDP0); // 預除器 1001b → 約 8 秒逾時
+  sei();
+}
+
+ISR(WDT_vect) { wokeFromWDT = true; } // 每約 8 秒觸發一次，回到 loop
+
+void powerDownUntilWDT() {
+  set_sleep_mode(SLEEP_MODE_PWR_DOWN); // 最深的實用模式
+  cli();
+  sleep_enable();
+  sleep_bod_disable();               // 關掉低電壓偵測器 → 省約 µA
+  sei();
+  sleep_cpu();                       // ←── CPU 在此停住，約 6 µA
+  sleep_disable();                   // WDT 後，執行從這裡恢復
+}
+
+void setup() { setupWDT_8s(); pinMode(LED_BUILTIN, OUTPUT); }
+
+void loop() {
+  // --- 活躍爆發：簡短，做真正的工作 ---
+  digitalWrite(LED_BUILTIN, HIGH);
+  readSensorAndMaybeTransmit();      // 約 100 ms 的 20 mA 工作
+  digitalWrite(LED_BUILTIN, LOW);
+
+  // --- 睡眠：塌縮到微安培，直到看門狗喚醒我們 ---
+  powerDownUntilWDT();
+}
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 榨出最後一點微安培</div>
+        <p>在 <code>PWR_DOWN</code> 中，主要的耗電是低電壓偵測器（brown-out detector，約 20&nbsp;µA）與看門狗（約 4&nbsp;µA）。<code>sleep_bod_disable()</code> 在睡眠這段視窗內關掉前者。也要關閉 ADC（<code>ADCSRA &amp;= ~(1 &lt;&lt; ADEN)</code>），並讓未使用的接腳浮接，免得漏電路徑悄悄把電池榨乾。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="watchdog-timer"><span class="sec-no">7</span>看門狗：從卡死中自動復原</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>韌體的緊急停止裝置</small></div>
+      <p>就算是謹慎的韌體也可能卡住：某個感測器函式庫永遠等待一個永遠不會來的 I²C 應答（ack）而原地打轉，或者一次宇宙射線造成的位元翻轉破壞了程式計數器（program counter）。身旁沒有人時，這個裝置就只是<em>死了</em>。<strong>看門狗計時器（watchdog timer, WDT）</strong>是一個硬體倒數計時，只要它曾數到零，就<em>重置整顆晶片</em>。你的工作是「餵狗」——呼叫 <code>wdt_reset()</code>——比它到期還要快。健康的迴圈會持續餵狗；卡死的迴圈會停止餵狗，WDT 逾時，晶片就重開機進入一個已知良好的狀態。</p>
+
+      <div class="mermaid">
+flowchart LR
+    A["loop() 執行"] --> B["wdt_reset()<br/>餵狗"]
+    B --> A
+    A -. 卡住 .-> C["沒有餵狗"]
+    C --> D["WDT 數到 0"]
+    D --> E(["硬體 RESET<br/>→ 乾淨地重開機"])
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>重置模式，不是中斷模式</small></div>
+      <p>這裡 WDT 被設成<em>重置</em>模式（<code>WDE</code>，而非 <code>WDIE</code>），逾時為 8&nbsp;s。注意這跟 §6 是同一個周邊，只是設定成不同的工作——復原而非喚醒。</p>
+
+      <div class="codeblock">
+        <div class="code-head">watchdog.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;avr/wdt.h&gt;
+
+void setup() {
+  // 我們是經由看門狗重置才走到這裡的嗎？記錄它，然後清除。
+  if (MCUSR &amp; (1 &lt;&lt; WDRF)) { /* 記錄「WDT 從一次卡死中復原」 */ }
+  MCUSR = 0;
+
+  wdt_enable(WDTO_8S);     // 若 8 秒內沒餵狗就重置晶片
+}
+
+void loop() {
+  wdt_reset();            // 餵狗 — 證明這個迴圈還活著
+
+  doScheduledWork();      // 來自 §2–§3 的你的 FSM + 排程器
+
+  // 若 doScheduledWork() 卡住 &gt; 8 秒，wdt_reset() 永遠不會
+  // 被執行到，WDT 觸發，MCU 重開機進入一個乾淨的狀態。
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——在卡死處餵狗</div>
+        <p>絕不要在很長的內層迴圈裡到處撒 <code>wdt_reset()</code>，只為了「讓它開心」。那等於徹底破壞了整個重點：看門狗必須能<em>抓到</em>卡死。只在恰好一個地方餵牠——<code>loop()</code> 的頂端——這樣任何比逾時更久的停滯都保證會觸發它。</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——撐一整年的鈕扣電池感測器節點</div>
+        <p>把它們串起來：一個跑在 CR2032（約 225&nbsp;mAh）或一對 AA 電池（約 2000&nbsp;mAh）上的土壤濕度節點。它大約每分鐘由看門狗喚醒一次，花約 100&nbsp;ms 讀感測器並以約 20&nbsp;mA 發射一個 LoRa 封包，然後落入 <code>PWR_DOWN</code>，降到個位數的微安培。套用 §6 的數學，AA 電池組可撐數年，連鈕扣電池也能超過 12 個月以上——因為這個裝置<em>有 99.9% 的時間在睡覺</em>。那個把它從睡眠中喚醒的同一個 WDT，也會在無線電驅動程式卡住時把它重開機。用狀態機掌管行為、用排程器掌管節奏、用睡眠掌管電源、用看門狗掌管韌性：那就是一件產品，而不是一場展示。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>⑤ 換你了</h2>
+      <div class="layer"><span class="step">⑤</span> 練習 <small>由你撰寫與決定</small></div>
+      <p>三道檢核。點一個答案、輸入一個數字，或展開一道程式挑戰。你的進度會儲存在這台裝置上，並顯示在首頁。</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="ard08-timing-memory">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢核</div>
+        <div class="ex-q">兩個設計選擇能讓長時間運行的韌體保持健康。哪一項敘述是<strong>正確</strong>的？</div>
+        <ul class="ex-options">
+          <li data-correct="false">用 <code>if (now &gt; lastRun + interval)</code> 比較絕對時間戳——把間隔加上去是跨越 <code>millis()</code> 回繞時的安全寫法。</li>
+          <li data-correct="true">相減無號的 <code>millis()</code> 值（<code>now - lastRun &gt;= interval</code>），讓模 $2^{32}$ 的算術處理那約 49.7 天的回繞，並避免會使堆積碎片化的 <code>String</code> 類別。</li>
+          <li data-correct="false">優先選用 <code>String</code> 類別而非 <code>char</code> 緩衝區，因為它會自動管理記憶體且永遠不會讓堆積碎片化。</li>
+          <li data-correct="false">回繞不可能發生，因為 <code>millis()</code> 回傳一個有號 <code>long</code>，會單純地在它的最大值飽和。</li>
+        </ul>
+        <div class="ex-explain">無號減法是以 $2^{32}$ 為模計算的，所以即使 <code>now</code> 已經回繞越過 0，<code>now - lastRun</code> 仍回傳真正經過的時間——回繞自我抵消（§4）。把間隔加到時間戳上會溢位並在界線處失效。而 <code>String</code> 會在堆積上配置／釋放，使其碎片化，直到一個本該放得下的配置在數小時後失敗（§5）；搭配 <code>snprintf()</code> 的固定 <code>char</code> 緩衝區能讓空閒 RAM 保持水平。</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="ard08-battery-life" data-answer="166" data-tol="5">
+        <div class="ex-head"><span class="badge">Q2</span> 算算看</div>
+        <div class="ex-q">一個節點從 $C = 2000\,\text{mAh}$ 的電池抽取 $I_{\text{avg}} = 0.5\,\text{mA}$ 的平均電流。使用 $t_{\text{life}} = C / I_{\text{avg}}$，電池壽命是幾<strong>天</strong>？（先算出小時，再除以 24。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="天"><span class="ex-unit">天</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$t_{\text{life}} = \dfrac{2000\ \text{mAh}}{0.5\ \text{mA}} = 4000\ \text{h}$，而 $\dfrac{4000}{24} \approx 166$ 天（約 5.5 個月）。透過深度睡眠（§6）把 $I_{\text{avg}}$ 降到 0.04&nbsp;mA，同一顆電池組就能撐好幾年——平均電流是電池壽命唯一重要的旋鈕。</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="ard08-debounce-fsm">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰——一個非阻塞的去彈跳 FSM</div>
+        <div class="ex-q">寫一個去彈跳常式，在<strong>不使用 <code>delay()</code></strong>的情況下回報一次<em>乾淨的</em>按鈕按下。把它建模成一個小 FSM：追蹤最後一次的原始讀值，以及它上次變化的 <code>millis()</code> 時間；只有在某個<em>穩定的</em>電位已持續穩定 <code>DEBOUNCE_MS</code>（比方說 25&nbsp;ms）之後才接受它。在一個確認的 HIGH→LOW 邊緣上恰好回傳一次 <code>true</code>。它必須使用無號 <code>millis()</code> 減法（§4），且不可阻塞排程器。</div>
+        <details class="ex-acc">
+          <summary>提示</summary>
+          <div class="acc-body">保留三個 <code>static</code> 變數：<code>lastRaw</code>（上次的接腳讀值）、<code>lastChange</code>（一個 <code>uint32_t</code> 時間戳），以及 <code>stable</code>（已接受的、去彈跳後的電位）。每次呼叫：讀取接腳；如果它與 <code>lastRaw</code> 不同，就重啟計時器（<code>lastChange = millis()</code>）。如果 <code>millis() - lastChange &gt;= DEBOUNCE_MS</code> 且原始電位與 <code>stable</code> 不同，就把它確認進 <code>stable</code>，並且只有當新的穩定電位是 <code>LOW</code> 時（一次按下，因為按鈕是 <code>INPUT_PULLUP</code>）才回傳 <code>true</code>。</div>
+        </details>
+        <details class="ex-acc">
+          <summary>顯示一個解答</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">debounce_fsm.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t  BTN = 2;          // 接到 GND，INPUT_PULLUP
+const uint32_t DEBOUNCE_MS = 25; // 必須穩定維持這麼久
+
+void setup() {
+  pinMode(BTN, INPUT_PULLUP);    // 閒置 HIGH，按下 LOW
+  pinMode(LED_BUILTIN, OUTPUT);
+}
+
+// 在一次乾淨（去彈跳後）的按下時回傳 true 一次。無 delay()。
+bool debouncedPress() {
+  static bool     lastRaw    = HIGH;   // 上次的原始讀值
+  static bool     stable     = HIGH;   // 已接受的、去彈跳後的電位
+  static uint32_t lastChange = 0;      // 原始值上次變化的時刻
+
+  bool raw = digitalRead(BTN);
+  if (raw != lastRaw) {                // 彈跳中 → 重啟計時器
+    lastRaw    = raw;
+    lastChange = millis();
+  }
+
+  // 無號減法 → 防溢位（見 §4）
+  if ((uint32_t)(millis() - lastChange) &gt;= DEBOUNCE_MS) {
+    if (raw != stable) {               // 電位維持夠久：確認
+      stable = raw;
+      if (stable == LOW) return true;  // HIGH→LOW == 一次真正的按下
+    }
+  }
+  return false;
+}
+
+void loop() {
+  if (debouncedPress()) {
+    // 每次乾淨的按下就切換 LED — 任何地方都不阻塞
+    digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+  }
+  // ... 你的排程器與其他任務每一輪都持續執行 ...
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">這就是 FSM 思維的縮影：<code>stable</code> 是狀態、原始接腳是事件，而 <code>millis()</code> 計時器是轉移的把關條件。因為它從不阻塞且使用無號減法，它能直接嵌入 §3 的排程器，並毫髮無傷地度過那 49.7 天的回繞。把 <code>digitalRead</code> 換成一個會雜訊的感測器，同樣的模式就能對<em>任何</em>抖動的輸入做去彈跳。</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> 本章回顧</div>
+        <p>你現在能夠架構出在現場存活的韌體：把行為建模成一個明確的<strong>有限狀態機</strong>（一個 <code>enum</code>、一個 <code>switch</code>、每個模式都有名字）；以一張 <code>{interval, lastRun, fn}</code> 的<strong>協作式排程器</strong>表格、零個 <code>delay()</code> 來執行眾多工作；<em>證明</em>無號 <code>millis()</code> 減法能平順度過那約 49.7 天的溢位回繞；以 <code>F()</code>、<code>PROGMEM</code> 與一個無 <code>String</code> 的堆積來捍衛你那 2&nbsp;KB 的 SRAM，同時用 <code>freeRAM()</code> 衡量；以 $I_{\text{avg}} = (I_a t_a + I_s t_s)/T$ 與 $t_{\text{life}} = C/I_{\text{avg}}$ 來編列電源預算，把 2000&nbsp;mAh 化為數年；並裝上一個<strong>看門狗</strong>，讓卡死的迴圈自己重開機。用狀態機掌管行為、用排程器掌管節奏、用睡眠掌管電源、用看門狗掌管韌性——那就是能運行多年的韌體之解剖構造。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="回到頂端">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../../../assets/vendor/highlight.min.js"></script>
+<script src="../../../assets/katex/katex.min.js"></script>
+<script src="../../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../../assets/vendor/mermaid.min.js"></script>
+<script src="../../../assets/app.js"></script>
+
+<!-- chapter-specific simulator: average-current / battery-life explorer -->
+<script>
+EM.sim("sim-power", {
+  height: 240,
+  params: [
+    { key: "Ia", label: "I_active", min: 1,   max: 50,   step: 1,   value: 20,  unit: "mA" },
+    { key: "ta", label: "t_active", min: 10,  max: 2000, step: 10,  value: 100, unit: "ms" },
+    { key: "Is", label: "I_sleep",  min: 1,   max: 1000, step: 1,   value: 6,   unit: "uA" },
+    { key: "T",  label: "period",   min: 1,   max: 300,  step: 1,   value: 60,  unit: "s" },
+    { key: "C",  label: "capacity", min: 100, max: 3000, step: 50,  value: 2000,unit: "mAh" }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h, pad = 44 * dpr;
+    var ta = v.ta / 1000;                 // ms → s
+    var Ts = v.T;                         // period in s
+    if (ta > Ts) ta = Ts;
+    var tsleep = Ts - ta;
+    var Is = v.Is / 1000;                 // µA → mA
+    var Iavg = (v.Ia * ta + Is * tsleep) / Ts;   // mA
+    var lifeH = v.C / Iavg;                       // hours
+    var lifeD = lifeH / 24;
+
+    // axes
+    var hi = pad, lo = H - pad;
+    ctx.lineWidth = 1 * dpr; ctx.strokeStyle = "#262d3a";
+    ctx.fillStyle = "#6e7681"; ctx.font = (12 * dpr) + "px monospace";
+    ctx.beginPath(); ctx.moveTo(pad, hi); ctx.lineTo(W - 10 * dpr, hi);
+    ctx.moveTo(pad, lo); ctx.lineTo(W - 10 * dpr, lo); ctx.stroke();
+    ctx.fillText("I", 8 * dpr, hi + 4 * dpr);
+    ctx.fillText("0", 10 * dpr, lo + 4 * dpr);
+
+    // current-vs-time profile: tall active spike, long low sleep
+    var pxPerS = (W - pad - 14 * dpr) / (Ts * 2.2);  // ~2.2 periods
+    var span = lo - hi;
+    var yActive = lo - span * 0.92;
+    var ySleep  = lo - span * (Is / v.Ia) * 0.92;
+    if (ySleep > lo - 2 * dpr) ySleep = lo - 2 * dpr;
+
+    ctx.strokeStyle = "#2ec4b6"; ctx.lineWidth = 2.5 * dpr;
+    ctx.beginPath();
+    var x = pad; ctx.moveTo(x, ySleep);
+    for (var k = 0; k < 3 && x < W - 14 * dpr; k++) {
+      ctx.lineTo(x, yActive);                 // rise
+      x += ta * pxPerS;
+      ctx.lineTo(x, yActive);                 // active plateau
+      ctx.lineTo(x, ySleep);                  // fall
+      x += tsleep * pxPerS;
+      ctx.lineTo(x, ySleep);                  // sleep floor
+    }
+    ctx.stroke();
+
+    return "I<sub>avg</sub> = <b>" + (Math.round(Iavg * 1000) / 1000) +
+           "</b> mA &nbsp;·&nbsp; 壽命 = <b>" + Math.round(lifeH) +
+           "</b> 小時 ≈ <b>" + Math.round(lifeD) + "</b> 天 ≈ <b>" +
+           (Math.round(lifeD / 365 * 10) / 10) + "</b> 年";
+  }
+});
+</script>
+</body>
+</html>

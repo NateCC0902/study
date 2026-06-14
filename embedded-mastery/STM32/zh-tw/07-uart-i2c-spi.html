@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>串列匯流排：USART、I²C、SPI 與鮑率數學 — Embedded Mastery</title>
+<link rel="stylesheet" href="../../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../../assets/styles.css">
+</head>
+<body class="track-stm32" data-course="embedded" data-track="stm32" data-chapter="07-uart-i2c-spi">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">STM32 · 第 07 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">STM32 學習軌 · 第 07 章 · 進階</div>
+        <h1>串列匯流排：USART、I²C、SPI 與鮑率數學</h1>
+        <p>在 Arduino 上你只有<em>一個</em>硬體 UART、一個 I²C、一個 SPI——而且它們都會阻塞 CPU。STM32 則交給你一整支匯流排控制器艦隊，每一個都能在核心進行真正工作的同時觸發中斷或透過 <strong>DMA</strong> 泵送位元組。我們將從暫存器層往上重建這三條經典匯流排，精確推導鮑率與分頻器的數學，並在同一塊板子上接上主控台、一顆 EEPROM 與一顆 IMU。</p>
+        <div class="meta">
+          <span>⏱ 約 50 分鐘</span><span>🧠 匯流排協定</span><span>⚡ DMA 與中斷</span><span>🔢 鮑率數學</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="three-buses-recap"><span class="sec-no">1</span>三條匯流排，一塊板——快速回顧</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先把畫面建立起來</small></div>
+      <p>你在 <a href="../Arduino/06-serial-i2c-spi.html">Arduino 第 06 章</a>已經見過這三條匯流排。它們的協定在 STM32 上完全相同——同樣的線、同樣的訊框、同樣的概念——所以我們快速回顧，然後前往 8 位元 AVR 無法跟隨之處：多個實例、中斷驅動的傳輸，以及 DMA。</p>
+
+      <p>每一條串列匯流排都在解決同一個問題：用盡可能少的線在晶片之間搬移位元組。它們的差別在於<strong>需要幾條線</strong>、<strong>由誰驅動時脈</strong>，以及<strong>接收端如何知道一個位元組從哪裡開始</strong>。</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>匯流排</th><th>線</th><th>時脈</th><th>拓撲</th><th>典型角色</th></tr></thead>
+        <tbody>
+          <tr><td><strong>USART/UART</strong></td><td>TX、RX（+GND）</td><td>無——約定好的<em>鮑率</em></td><td>點對點</td><td>主控台、GPS、無線數據機</td></tr>
+          <tr><td><strong>I²C</strong></td><td>SDA、SCL</td><td>共用，由控制器驅動</td><td>多點掛載、定址</td><td>EEPROM、RTC、慢速感測器</td></tr>
+          <tr><td><strong>SPI</strong></td><td>SCK、MOSI、MISO、CS</td><td>由控制器驅動</td><td>星形（每個裝置一條 CS）</td><td>Flash、顯示器、高速 IMU</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話區分</div>
+        <p><strong>UART</strong> 是<em>非同步</em>的——沒有時脈線，所以兩端必須事先就位元速率達成共識。<strong>I²C 與 SPI</strong> 是<em>同步</em>的——時脈線與資料同行，因此時序是自我描述的。非同步用一條線換取「把鮑率調到精準」的負擔；正是這個取捨，使得 §2 存在。</p>
+      </div>
+
+      <p>名稱上的縮寫跳躍也很重要：AVR 有的是 <strong>UART</strong>。大多數 STM32 周邊則是 <strong>USART</strong>——多出來的那個「S」是 <em>Synchronous（同步）</em>，意思是它們也能輸出時脈，並以類似 SPI 或智慧卡的模式運作。你幾乎總是以單純的非同步 UART 模式使用它們，但暫存器仍冠上 U<em>S</em>ART 之名。</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="usart-baud-math"><span class="sec-no">2</span>USART 鮑率：真正能上線的數學</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>在黑暗中取樣</small></div>
+      <p>沒有時脈線，接收端就必須猜每個位元落在哪裡。訣竅是：跑一個比預期位元速率<strong>快 16 倍</strong>的內部時脈（<em>16 倍過取樣</em>），等待起始位元的下降邊緣，然後在每個資料位元的<em>中央</em>附近取樣——大約是 16 個時脈刻度中的第 8 個。把除數算得稍微偏一點，取樣點就會漂移；在一個訊框內漂移得夠遠，你讀到的就是亂碼。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>推導 USARTDIV</small></div>
+      <p>周邊時脈 <span>$f_{CK}$</span>（餵給 USART 的匯流排時脈——<code>PCLK1</code> 或 <code>PCLK2</code>）會被除以 16，再除以一個小數分頻器 <span>$\text{USARTDIV}$</span>，以產生鮑率。在 16 倍過取樣下：</p>
+
+      <div class="math-box">
+        $$ \text{baud} = \frac{f_{CK}}{16 \cdot \text{USARTDIV}} \quad\Longrightarrow\quad \text{USARTDIV} = \frac{f_{CK}}{16 \cdot \text{baud}} $$
+      </div>
+
+      <p><span>$\text{USARTDIV}$</span> 是一個<em>定點</em>數：一個整數<strong>尾數（mantissa）</strong>加上一個以十六分之一為單位的 4 位元<strong>小數（fraction）</strong>，以 <code>[尾數 : 小數]</code> 的形式打包進鮑率暫存器 <code>BRR</code>。我們來實際程式化一段。取一顆 STM32F4，USART 掛在 <code>PCLK2 = 84&nbsp;MHz</code> 上，目標為 <strong>115200 鮑</strong>：</p>
+
+      <div class="math-box">
+        $$ \text{USARTDIV} = \frac{84\times10^{6}}{16 \cdot 115200} = \frac{84\times10^{6}}{1\,843\,200} \approx 45.5729 $$
+      </div>
+
+      <p>把它拆開：尾數是 <span>$45$</span>；小數是 <span>$0.5729 \times 16 \approx 9.17 \to 9$</span>（四捨五入到最接近的十六分之一）。於是我們程式化</p>
+
+      <div class="math-box">
+        $$ \text{BRR} = (45 \ll 4) \,|\, 9 = 0x2D9, \qquad \text{USARTDIV}_{\text{prog}} = 45 + \tfrac{9}{16} = 45.5625 $$
+      </div>
+
+      <p>現在來檢查它<em>實際</em>產生的鮑率，以及由此產生的誤差：</p>
+
+      <div class="math-box">
+        $$ \text{baud}_{\text{actual}} = \frac{84\times10^{6}}{16 \cdot 45.5625} = 115226\ \text{baud}, \qquad \varepsilon = \frac{115226 - 115200}{115200} \approx +0.02\% $$
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 2% 法則</div>
+        <p>兩端會在一個 10 位元訊框（起始 + 8 資料 + 停止）內累積誤差。傳送端與接收端合計的誤差預算大約是 <strong>±2–3%</strong>，超過取樣點就會漂出位元之外。我們的 +0.02% 安全得奢侈。這正是為什麼<strong>整數友善的時脈</strong>很重要：在某個尷尬的 <span>$f_{CK}$</span> 下，有些鮑率根本無法被準確命中——這也是一再出現的理由，提醒我們要在 <a href="../STM32/02-clocks.html">第 02 章</a>就刻意挑選晶振與 PLL 數值。</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>逐行細讀</small></div>
+      <p>HAL 把 <code>BRR</code> 藏在 <code>Init.BaudRate</code> 之後，會根據即時的時脈樹替你計算 USARTDIV。但懂得這套數學，能讓你對它做合理性檢查，並在主控台冒出亂碼時除錯。</p>
+
+      <div class="codeblock">
+        <div class="code-head">usart_init.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">// STM32F4 上的 USART2，由 PCLK1 供時脈；此處示範 APB2/USART1，PCLK2 = 84 MHz。
+UART_HandleTypeDef huart1;
+
+void uart1_init(void) {
+  __HAL_RCC_USART1_CLK_ENABLE();          // 開啟 USART 時脈閘
+  huart1.Instance        = USART1;        // 這顆零件上 PCLK2 = 84 MHz
+  huart1.Init.BaudRate   = 115200;        // HAL 解出 USARTDIV -&gt; BRR = 0x2D9
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits   = UART_STOPBITS_1;
+  huart1.Init.Parity     = UART_PARITY_NONE;     // 8N1——萬用預設值
+  huart1.Init.Mode       = UART_MODE_TX_RX;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16; // baud = f_CK / (16 * USARTDIV)
+  HAL_UART_Init(&amp;huart1);                 // 寫入 BRR、CR1、CR2、CR3
+}
+
+// 阻塞式傳送——CPU 會空轉，直到每個位元組都離開移位暫存器。
+void uart1_puts(const char *s) {
+  HAL_UART_Transmit(&amp;huart1, (uint8_t*)s, strlen(s), HAL_MAX_DELAY);
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——PCLK 錯了，鮑率就錯了</div>
+        <p>如果你變更了時脈樹（新的 PLL 設定、不同的 APB 分頻器），但 USART 仍<em>以為</em>自己跑在舊的 <span>$f_{CK}$</span> 上，那麼每一個鮑率都會偏移，主控台就會塞滿亂碼。HAL 是在 <code>HAL_UART_Init</code> 當下讀取時脈的，所以任何時脈變更後都要重新初始化。<code>HAL_RCC_GetPCLK2Freq()</code> 會告訴你它實際採用的真實數值。</p>
+      </div>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-baud-wrap">
+        <div class="sim-title">🔬 即時：USARTDIV 與鮑率誤差探索器</div>
+        <canvas id="sim-baud"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">拖曳 <em>f<sub>CK</sub></em> 與目標鮑率：觀察精確的 USARTDIV、實際程式化進 BRR 的四捨五入後尾數／小數，以及由此產生、對照 ±2% 預算的鮑率誤差。</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="uart-interrupt-dma"><span class="sec-no">3</span>超越阻塞：以中斷與 DMA 驅動 UART</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>別再保母式照看位元組</small></div>
+      <p><code>HAL_UART_Transmit(..., HAL_MAX_DELAY)</code> 雖然誠實，卻浪費——在 115200 鮑下，每個位元組約需 <span>$\frac{10\ \text{bits}}{115200} \approx 87\,\mu s$</span>，而 CPU 全程空轉。送出一行 1&nbsp;KB 的日誌會阻塞約 89&nbsp;ms。在即時系統上這是一場災難。STM32 給了你兩條逃生路。</p>
+
+      <p><strong>中斷模式</strong>——每當 USART 的傳送暫存器清空時，它就會引發一次中斷；一個 ISR 餵入下一個位元組。CPU 每個位元組只造訪一次。<strong>DMA 模式</strong>——一個專屬的<em>直接記憶體存取（Direct Memory Access）</em>引擎，在<strong>零</strong> CPU 介入的情況下，把整個緩衝區串流到 USART 資料暫存器；核心只在傳輸完成時被中斷恰好一次。</p>
+
+      <div class="mermaid">
+flowchart LR
+    BUF["SRAM 中的<br/>TX 緩衝區"] -->|DMA 串流| DMA["DMA 控制器"]
+    DMA -->|逐位元組| DR["USART-&gt;DR"]
+    DR -->|移出| TX([TX 腳位])
+    DMA -.->|結束時一次 IRQ| CPU["CPU<br/>（同時間閒置）"]
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>非阻塞傳送</small></div>
+      <div class="codeblock">
+        <div class="code-head">uart_dma.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">// 假設 CubeMX 已接好 DMA2_Stream7（USART1_TX）以及 DMA IRQ 處理常式。
+uint8_t log_buf[256];
+
+void log_line_dma(const char *msg) {
+  int n = snprintf((char*)log_buf, sizeof log_buf, "%lu: %s\r\n",
+                   HAL_GetTick(), msg);
+  // 立即回傳；DMA 在 loop() 繼續運行的同時推送這些位元組。
+  HAL_UART_Transmit_DMA(&amp;huart1, log_buf, n);
+}
+
+// 緩衝區被抽乾時，HAL 會從 DMA 傳輸完成的 ISR 呼叫此函式。
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
+  if (huart->Instance == USART1) {
+    tx_busy = 0;                 // 現在可以安全地排入下一行
+  }
+}
+
+// 接收：一次性把 DMA 武裝指向環形緩衝區，讓它在背景中填滿。
+uint8_t rx_buf[64];
+void rx_start(void) {
+  HAL_UART_Receive_DMA(&amp;huart1, rx_buf, sizeof rx_buf);  // 非阻塞 RX
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——DMA 進行中觸碰緩衝區</div>
+        <p>DMA 引擎直接從 SRAM 讀取 <code>log_buf</code>。如果你在 <code>TxCpltCallback</code> 觸發之前就覆寫它，就會破壞傳輸中的資料——你會看到撕裂或交錯的輸出。用一個 <code>tx_busy</code> 旗標（如上）或一個真正的佇列來把關。RX 也是同一條規則：不要以比 DMA 填充更快的速度去解析 <code>rx_buf</code>。</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 選對模式</div>
+        <p><strong>阻塞</strong>：一次性的設定列印，簡單為上。<strong>中斷</strong>：短促、突發的流量，且你的 DMA 串流已用完。<strong>DMA</strong>：高吞吐量的日誌、音訊，或任何必須讓 CPU 保持空閒的場合。一行 1&nbsp;KB 的日誌若用阻塞會佔住 89&nbsp;ms，改用 DMA 對 CPU 來說實際成本約為 <em>0&nbsp;ms</em>。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="i2c-stm32"><span class="sec-no">4</span>STM32 上的 I²C：定址、時序與暫存器映射裝置</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>兩線式的共用線路</small></div>
+      <p>I²C 把每個裝置都接到同樣的兩條開汲極線上——<strong>SDA</strong>（資料）與 <strong>SCL</strong>（時脈）——各由一顆電阻上拉至高電位。控制器透過送出一個 7 位元<strong>位址</strong>加上一個讀／寫位元來開始一次交易；只有位址相符的裝置會回應。這就是一顆 EEPROM、一顆 RTC 與三顆感測器如何在兩個腳位上共存的方式。</p>
+
+      <div class="mermaid">
+flowchart LR
+    MCU["STM32<br/>I²C 控制器"] -->|SDA / SCL| BUS{{共用匯流排}}
+    BUS --> A["EEPROM<br/>0x50"]
+    BUS --> B["RTC<br/>0x68"]
+    BUS --> C["感測器<br/>0x76"]
+</div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>位址空間與時脈階層</small></div>
+      <p>一個 7 位元位址給出 <span>$2^{7} = 128$</span> 個槽位，但保留範圍把它修剪到一條匯流排上 <strong>112</strong> 個可用的裝置位址。實際送上線的移位後位元組，是位址置於高 7 位元、R/W̄ 位元置於最低位：</p>
+
+      <div class="math-box">
+        $$ \text{byte} = (\text{addr}_{7} \ll 1)\,|\,\overline{\text{R/W}}, \qquad 0x50 \to 0xA0\ \text{（寫入）},\ 0xA1\ \text{（讀取）} $$
+      </div>
+
+      <p>I²C 跑在固定的時脈階層：<strong>100&nbsp;kHz</strong>（Standard 標準模式）、<strong>400&nbsp;kHz</strong>（Fast 快速模式）與 <strong>1&nbsp;MHz</strong>（Fast-mode Plus）。在現代 STM32（F0/F3/F7/L4/G4…）上你不是設一個簡單的除數——而是載入一個計算好的 <code>TIMINGR</code> 暫存器，它以 I²C 核心時脈的週期數編碼了 SCL 高／低期間以及資料的建立／保持時間。CubeMX（或 ST 的時序工具）會為你的時脈產生這個常數；把它當成推導出來的、而非魔法。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>殺手級便利：Mem_Read/Write</small></div>
+      <p>大多數 I²C 晶片都是<em>暫存器映射</em>的：要讀一個值，你得先寫入暫存器位址，送出一個重複起始（repeated-start），然後才讀取。HAL 把這整套舞步打包進 <code>HAL_I2C_Mem_Read/Write</code>——你給它裝置位址與內部暫存器，它就替你處理重複起始。</p>
+
+      <div class="codeblock">
+        <div class="code-head">eeprom_i2c.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">#define EE_ADDR  (0x50 &lt;&lt; 1)   // 7 位元 0x50，HAL 要的是左移後的值
+#define EE_MEMSZ I2C_MEMADD_SIZE_16BIT  // 24LC256 使用 16 位元字組位址
+
+// 將一頁（&lt;=64 B）寫入 24LC256 EEPROM 的內部位址 `at`。
+HAL_StatusTypeDef ee_write(uint16_t at, uint8_t *data, uint16_t len) {
+  return HAL_I2C_Mem_Write(&amp;hi2c1, EE_ADDR, at, EE_MEMSZ,
+                           data, len, HAL_MAX_DELAY);
+}
+
+// 讀回 `len` 個位元組。Mem_Read 會做：寫位址 + 重複起始 + 讀取。
+HAL_StatusTypeDef ee_read(uint16_t at, uint8_t *data, uint16_t len) {
+  return HAL_I2C_Mem_Read(&amp;hi2c1, EE_ADDR, at, EE_MEMSZ,
+                          data, len, HAL_MAX_DELAY);
+}
+
+// EEPROM 需要幾毫秒來提交一頁——輪詢直到它再次 ACK。
+void ee_wait_ready(void) {
+  while (HAL_I2C_IsDeviceReady(&amp;hi2c1, EE_ADDR, 3, 10) != HAL_OK) { /* 空轉 */ }
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——移位陷阱與缺少上拉電阻</div>
+        <p>HAL 的 I²C API 預期位址是<strong>已經左移過的</strong>（R/W̄ 位元由內部設定）。傳入原始的 <code>0x50</code>，你就會定址到錯的裝置或拿到 <code>HAL_ERROR</code>。第二個經典問題：I²C 線是開汲極的——沒有外部上拉電阻（通常 4.7&nbsp;kΩ）時匯流排永遠到不了邏輯高電位，每一次傳輸都會逾時。匯流排看起來像死了，而不是壞了。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="spi-stm32"><span class="sec-no">5</span>STM32 上的 SPI：分頻器、模式與全雙工</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>四條線，純粹的速度</small></div>
+      <p>SPI 以 I²C 的省線換取速度。四條訊號——<strong>SCK</strong>（時脈）、<strong>MOSI</strong>（控制器→周邊）、<strong>MISO</strong>（周邊→控制器）、<strong>CS</strong>（晶片選擇，每個裝置一條）——而且沒有定址的額外開銷。在同樣的時脈邊緣上，資料於 MOSI 移出<em>且</em>於 MISO 移入：<strong>全雙工</strong>，每個時脈各向承載一個位元。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>鮑率分頻器</small></div>
+      <p>SPI 沒有小數分頻器——只有 <code>CR1</code> 裡一個 3 位元的分頻器 <code>BR</code>，它把匯流排時脈除以 2 的冪：</p>
+
+      <div class="math-box">
+        $$ f_{SPI} = \frac{f_{PCLK}}{2^{\,(\text{BR}+1)}}, \qquad \text{BR} \in \{0,1,\dots,7\} $$
+      </div>
+
+      <p>所以 <code>BR</code> 選出 /2、/4、/8、… /256 的分頻。在一顆 STM32F4 上，SPI 掛在 <code>PCLK2 = 84&nbsp;MHz</code>，選 <code>BR = 2</code> 得到</p>
+
+      <div class="math-box">
+        $$ f_{SPI} = \frac{84\times10^{6}}{2^{(2+1)}} = \frac{84\times10^{6}}{8} = 10.5\ \text{MHz} $$
+      </div>
+
+      <p>想要更快？<code>BR = 1</code> → /4 → 21&nbsp;MHz；<code>BR = 0</code> → /2 → 42&nbsp;MHz。上限是<em>線上最慢的那個裝置</em>所能承受的速率——查它資料手冊上的最大 SCK。</p>
+
+      <p>SPI 的後半段是<strong>模式</strong>：兩個位元，<strong>CPOL</strong>（時脈閒置極性）與 <strong>CPHA</strong>（在第一個還是第二個邊緣取樣），挑出你要使用的四種時序慣例之一。兩端必須完全一致，否則你讀到的就是位移、扭曲的位元。</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>模式</th><th>CPOL</th><th>CPHA</th><th>SCK 閒置</th><th>資料取樣於</th></tr></thead>
+        <tbody>
+          <tr><td><strong>0</strong></td><td>0</td><td>0</td><td>低</td><td>上升（第 1 個）邊緣</td></tr>
+          <tr><td><strong>1</strong></td><td>0</td><td>1</td><td>低</td><td>下降（第 2 個）邊緣</td></tr>
+          <tr><td><strong>2</strong></td><td>1</td><td>0</td><td>高</td><td>下降（第 1 個）邊緣</td></tr>
+          <tr><td><strong>3</strong></td><td>1</td><td>1</td><td>高</td><td>上升（第 2 個）邊緣</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>全雙工傳輸</small></div>
+      <div class="codeblock">
+        <div class="code-head">spi_imu.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">// SPI1 掛在 PCLK2 = 84 MHz。分頻 /8 -&gt; 10.5 MHz；ICM-20948 用 Mode 3。
+SPI_HandleTypeDef hspi1;
+
+void spi1_init(void) {
+  __HAL_RCC_SPI1_CLK_ENABLE();
+  hspi1.Instance               = SPI1;
+  hspi1.Init.Mode              = SPI_MODE_MASTER;
+  hspi1.Init.Direction         = SPI_DIRECTION_2LINES;     // 全雙工
+  hspi1.Init.DataSize          = SPI_DATASIZE_8BIT;
+  hspi1.Init.CLKPolarity       = SPI_POLARITY_HIGH;        // CPOL = 1
+  hspi1.Init.CLKPhase          = SPI_PHASE_2EDGE;          // CPHA = 1  -&gt; Mode 3
+  hspi1.Init.NSS               = SPI_NSS_SOFT;             // 以軟體驅動 CS
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;  // BR=2 -&gt; /8 -&gt; 10.5 MHz
+  hspi1.Init.FirstBit          = SPI_FIRSTBIT_MSB;
+  HAL_SPI_Init(&amp;hspi1);
+}
+
+// 讀取一個 IMU 暫存器：送出 (reg | 0x80) 以請求讀取，再時脈出一個
+// 虛擬位元組以把答案移回來。CS 為低有效，由手動驅動。
+uint8_t imu_read(uint8_t reg) {
+  uint8_t tx[2] = { (uint8_t)(reg | 0x80), 0x00 };
+  uint8_t rx[2] = { 0 };
+  HAL_GPIO_WritePin(CS_PORT, CS_PIN, GPIO_PIN_RESET);     // CS 拉低：選取
+  HAL_SPI_TransmitReceive(&amp;hspi1, tx, rx, 2, HAL_MAX_DELAY); // 全雙工
+  HAL_GPIO_WritePin(CS_PORT, CS_PIN, GPIO_PIN_SET);       // CS 拉高：取消選取
+  return rx[1];                                            // byte 0 是命令回音
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——錯的模式會讀出看似合理的亂碼</div>
+        <p>如果 CPOL/CPHA 與裝置不相符，你不會拿到錯誤——你會拿到<em>數字</em>，只是位移了一個時脈邊緣，所以一個本該讀到 <code>0xEA</code> 的 WHO_AM_I 會回來變成 <code>0xD5</code> 之類。永遠先驗證晶片的身分暫存器；一個正確的 WHO_AM_I 證明你的模式、分頻器與接線在你信任任何資料之前都已正確無誤。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="bus-comparison"><span class="sec-no">6</span>選擇一條匯流排：工程上的取捨</h2>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>產品是怎麼決定的</small></div>
+      <p>沒有「最好」的匯流排——每一條都贏在設計空間的不同角落。把這張表內化，匯流排的選擇就會變成反射動作。</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>屬性</th><th>USART/UART</th><th>I²C</th><th>SPI</th></tr></thead>
+        <tbody>
+          <tr><td>典型速度</td><td>最高約 10 Mbit/s（通常 ≤1）</td><td>100k / 400k / 1M Hz</td><td>數十 MHz（此處 10.5–42 MHz）</td></tr>
+          <tr><td>訊號線</td><td>2（TX、RX）</td><td>2（SDA、SCL）</td><td>3 條 + 每裝置 1 條 CS</td></tr>
+          <tr><td>每條匯流排裝置數</td><td>2（點對點）</td><td>約 112（7 位元位址）</td><td>受 CS 腳位數限制</td></tr>
+          <tr><td>雙工</td><td>全雙工（TX/RX 分開）</td><td>半雙工（共用 SDA）</td><td>全雙工（MOSI + MISO）</td></tr>
+          <tr><td>時脈來源</td><td>無（非同步，鮑率）</td><td>控制器，共用</td><td>控制器，專屬</td></tr>
+          <tr><td>DMA 友善度</td><td>是</td><td>是</td><td>是（最適合大量傳輸）</td></tr>
+          <tr><td>實用距離</td><td>長（尤其透過 RS-232/485）</td><td>短（板上，&lt;約 1 m）</td><td>非常短（板上）</td></tr>
+          <tr><td>腳位成本／定址</td><td>便宜，無定址</td><td>便宜，內建定址</td><td>昂貴（CS 蔓延），無定址</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 決策法則</div>
+        <p>要與<strong>人／PC／數據機跨距離</strong>溝通？UART。要在<strong>兩個腳位上接很多慢速晶片</strong>？I²C。需要從 flash、顯示器或 IMU 取得<strong>純粹的吞吐量</strong>？SPI。而且，只要傳輸量大或是週期性的，無論用哪條匯流排都伸手去拿 <strong>DMA</strong>——那正是 STM32 對 AVR 的超能力。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="real-case-board"><span class="sec-no">7</span>真實案例：一塊板，三條匯流排，同時全開</h2>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>這會出貨到產品裡</small></div>
+      <p>想像一個飛控板或一塊機器人的感測器板。STM32 不是在<em>挑一條</em>匯流排——而是同時跑全部三條，每一條都對應到它的工作：</p>
+
+      <ul>
+        <li><strong>IMU 接 SPI</strong>，10.5&nbsp;MHz（BR=2，/8）。姿態資料必須又快又頻繁地到達——SPI 的全雙工吞吐量讓一個 1&nbsp;kHz 的控制迴圈持續有料可吃。</li>
+        <li><strong>EEPROM 接 I²C</strong>，400&nbsp;kHz。校正常數與設定都很小、也很少讀取；用兩條線與一顆 RTC 和一顆氣壓計共用，是節儉之選。</li>
+        <li><strong>除錯主控台接 USART</strong>，115200 鮑，<strong>透過 DMA 記錄日誌</strong>。遙測資料持續串流出去，卻從不從控制迴圈偷走一個時脈週期。</li>
+      </ul>
+
+      <div class="mermaid">
+flowchart TB
+    MCU["STM32F4<br/>（3 個匯流排控制器 + DMA）"]
+    MCU -->|SPI1 @ 10.5 MHz| IMU["IMU<br/>ICM-20948"]
+    MCU -->|I²C1 @ 400 kHz| EE["EEPROM 0x50"]
+    MCU -->|I²C1 @ 400 kHz| BARO["氣壓計 0x76"]
+    MCU -->|USART1 @ 115200<br/>透過 DMA| PC([除錯主控台 / PC])
+    IMU -.->|1 kHz 姿態| MCU
+</div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——為什麼主控台跑在 DMA 上</div>
+        <p>在飛控板上，控制迴圈是神聖的：抖動是敵人。透過 UART 的阻塞式 <code>printf</code> 會在位元組排空時讓那個迴圈停滯數毫秒。把主控台繞經 <strong>UART&nbsp;TX DMA</strong>，意味著 CPU 寫一個緩衝區指標就走人——DMA 引擎時脈出數 KB 的遙測資料，而 1&nbsp;kHz 的迴圈不受打擾地滴答前進。這個單一的設計選擇，就是一個穩定的自動駕駛儀，與一個每次你記錄一行就抽動的自動駕駛儀之間的差別。</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 軟體中的匯流排仲裁</div>
+        <p>每個周邊實例都是獨立的，但它們可能會搶奪 DMA 串流與中斷優先序。給時間關鍵的匯流排（此處是 IMU 的 SPI 與其 DMA）一個比主控台 UART <strong>更高的 NVIC 優先序</strong>。匯流排在平行的硬體中運行；你的工作只是排定當兩個中斷同時觸發時誰勝出。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>⑤ 換你上場</h2>
+      <div class="layer"><span class="step">⑤</span> 練習 <small>你來寫、你來決定</small></div>
+      <p>三道檢查。點選一個答案、輸入一個數字，或揭開一道程式挑戰。你的進度會儲存在這台裝置上並顯示於首頁。</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="stm07-buses">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">一個以標準非同步模式運行的 USART 使用 <em>16 倍過取樣</em>。接收端在每個位元的那 16 個內部時脈刻度裡在做什麼？而三條匯流排中，哪一條本質上是<strong>全雙工</strong>的？</div>
+        <ul class="ex-options">
+          <li data-correct="false">它把每個位元送 16 次以增加冗餘；<strong>I²C</strong> 是全雙工。</li>
+          <li data-correct="true">它在每個位元的<em>中央</em>附近（≈ 16 個刻度中的第 8 個）取樣以容忍鮑率誤差；<strong>SPI</strong> 是全雙工。</li>
+          <li data-correct="false">它把資料以快 16 倍的速度時脈到線上；<strong>UART</strong> 是全雙工，但 I²C 不是。</li>
+          <li data-correct="false">過取樣設定奇偶校驗位元；三條匯流排同等全雙工。</li>
+        </ul>
+        <div class="ex-explain">16 倍過取樣讓接收端鎖定起始位元的邊緣，然後在每個位元的<strong>中點</strong>附近（約 16 個刻度中的第 8 個）取樣，對 ±2% 的鮑率失配留出餘裕。<strong>SPI</strong> 是全雙工——MOSI 與 MISO 在每個時脈各向承載一個位元。I²C 是半雙工（單一共用的 SDA 線），而雖然 UART 有分開的 TX/RX 線，本題鎖定的是同步匯流排：在 I²C/SPI 之中，SPI 才是全雙工的那一個。</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="stm07-usartdiv" data-answer="45.57" data-tol="0.3">
+        <div class="ex-head"><span class="badge">Q2</span> 算給我看</div>
+        <div class="ex-q">一個 USART 由 <strong>$f_{CK} = 84\,\text{MHz}$</strong> 供時脈，你想要 <strong>115200 鮑</strong>且使用 16 倍過取樣。計算精確的 <strong>USARTDIV</strong>（四捨五入前的小數分頻器）。回想 $\text{USARTDIV} = \dfrac{f_{CK}}{16\cdot\text{baud}}$。</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">USARTDIV</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$\text{USARTDIV} = \dfrac{84\times10^{6}}{16 \cdot 115200} = \dfrac{84\times10^{6}}{1\,843\,200} \approx 45.57$。你程式化尾數 $45$ 與小數 $\lfloor 0.5729\times16 \rceil = 9$，得到 $\text{BRR}=0x2D9$ 與實際鮑率 $115226$——約 $+0.02\%$ 誤差，遠在 ±2% 預算之內。（順便檢查 SPI 那一側：在 $f_{PCLK}=84\,\text{MHz}$ 且 $\text{BR}=2$ 時，$f_{SPI}=84/2^{3}=10.5\,\text{MHz}$。）</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="stm07-uart-dma">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰——非阻塞遙測</div>
+        <div class="ex-q">寫一個函式 <code>send_telemetry()</code>，把一行像 <code>"t=12345 roll=1.20\r\n"</code> 的內容格式化進一個緩衝區，並透過 <strong>USART1 經 DMA</strong> 送出，且立即回傳。當前一次 DMA 傳送仍在進行中時，它必須拒絕開始一次新傳輸（不可有緩衝區毀損）。使用 HAL。</div>
+        <details class="ex-acc">
+          <summary>提示</summary>
+          <div class="acc-body">保留一個 <code>volatile uint8_t tx_busy</code> 旗標。在呼叫 <code>HAL_UART_Transmit_DMA</code> 之前設定它；在 <code>HAL_UART_TxCpltCallback</code> 中清除它。如果 <code>send_telemetry()</code> 被呼叫時 <code>tx_busy</code> 已被設定，就直接丟棄這一行（或回傳一個「忙碌」狀態），而不要覆寫 DMA 仍在讀取的緩衝區。</div>
+        </details>
+        <details class="ex-acc">
+          <summary>顯示一個解答</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">telemetry.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">static uint8_t tx_buf[64];
+static volatile uint8_t tx_busy = 0;
+
+// 若該行已排入佇列回傳 1，若 DMA 傳送仍在進行中回傳 0。
+int send_telemetry(uint32_t t_ms, float roll) {
+  if (tx_busy) return 0;                 // 前一次 DMA 仍在讀取 tx_buf
+  int n = snprintf((char*)tx_buf, sizeof tx_buf,
+                   "t=%lu roll=%.2f\r\n", (unsigned long)t_ms, roll);
+  if (n &lt;= 0) return 0;
+  tx_busy = 1;                           // 在武裝 DMA「之前」先佔住緩衝區
+  if (HAL_UART_Transmit_DMA(&amp;huart1, tx_buf, (uint16_t)n) != HAL_OK) {
+    tx_busy = 0;                         // 武裝失敗 -&gt; 釋放緩衝區
+    return 0;
+  }
+  return 1;                              // DMA 串流它；CPU 現在自由了
+}
+
+// HAL 從 DMA 傳輸完成的 ISR 觸發此函式。
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
+  if (huart->Instance == USART1) tx_busy = 0;  // 緩衝區可重新使用
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;"><code>tx_busy</code> 旗標就是整堂課的精華：DMA 非同步地從 SRAM 讀取 <code>tx_buf</code>，所以你必須在整段傳輸期間<em>擁有</em>這個緩衝區。在武裝之前佔住它、並且只在完成回呼中釋放它，使這個交接無競爭。一個正式上線的系統會用一個環形緩衝區取代「丟棄該行」的策略，這樣就不會丟失任何資料。</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> 本章回顧</div>
+        <p>你現在能從 $f_{CK}$ 與目標鮑率推導 USARTDIV、程式化 <code>BRR</code>，並對 ±2% 的誤差預算進行推理；用中斷或 DMA 把 UART 流量移離 CPU；用 <code>HAL_I2C_Mem_Read/Write</code> 與暫存器映射的 I²C 裝置溝通，並遵守位址移位與上拉電阻的規則；用 $f_{SPI}=f_{PCLK}/2^{(\text{BR}+1)}$ 設定 SPI 的大小並匹配 CPOL/CPHA；以及依速度、線數、定址與距離在三條匯流排之間做選擇。接下來我們會在期限壓力下，讓這些匯流排去驅動真正的感測器與致動器。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="回到頂部">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../../../assets/vendor/highlight.min.js"></script>
+<script src="../../../assets/katex/katex.min.js"></script>
+<script src="../../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../../assets/vendor/mermaid.min.js"></script>
+<script src="../../../assets/app.js"></script>
+
+<!-- chapter-specific simulator -->
+<script>
+EM.sim("sim-baud", {
+  height: 250,
+  params: [
+    { key: "fck",  label: "f_CK (MHz)", min: 8,  max: 100, step: 1,    value: 84,     unit: "MHz" },
+    { key: "baud", label: "目標鮑率", min: 9600, max: 921600, step: 9600, value: 115200, unit: "bps" }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h, pad = 22 * dpr;
+    var fck = v.fck * 1e6, baud = v.baud;
+    var div = fck / (16 * baud);            // 精確 USARTDIV
+    var mant = Math.floor(div);
+    var frac = Math.round((div - mant) * 16); // 最接近的十六分之一
+    var carry = 0;
+    if (frac === 16) { frac = 0; carry = 1; } // 小數溢位進位到尾數
+    var divProg = (mant + carry) + frac / 16;
+    var baudAct = fck / (16 * divProg);
+    var err = (baudAct - baud) / baud * 100;
+    var brr = (((mant + carry) << 4) | frac) >>> 0;
+
+    // 對照 +/-2% 預算的誤差條
+    var midY = H * 0.62, barW = W - 2 * pad, x0 = pad;
+    ctx.strokeStyle = "#262d3a"; ctx.lineWidth = 1 * dpr;
+    ctx.beginPath(); ctx.moveTo(x0, midY); ctx.lineTo(x0 + barW, midY); ctx.stroke();
+    // 預算帶 +/-2%
+    var clamp = function (e) { return Math.max(-2.6, Math.min(2.6, e)); };
+    var toX = function (e) { return x0 + barW * (clamp(e) + 2.6) / 5.2; };
+    ctx.fillStyle = "rgba(46,196,182,0.12)";
+    ctx.fillRect(toX(-2), midY - 14 * dpr, toX(2) - toX(-2), 28 * dpr);
+    ctx.strokeStyle = "#6e7681"; ctx.lineWidth = 1 * dpr;
+    [-2, 0, 2].forEach(function (e) {
+      ctx.beginPath(); ctx.moveTo(toX(e), midY - 16 * dpr); ctx.lineTo(toX(e), midY + 16 * dpr); ctx.stroke();
+    });
+    // 誤差標記
+    var ex = toX(err), inBudget = Math.abs(err) <= 2;
+    ctx.fillStyle = inBudget ? "#2ec4b6" : "#e5534b";
+    ctx.beginPath(); ctx.arc(ex, midY, 6 * dpr, 0, 7); ctx.fill();
+    ctx.fillStyle = "#6e7681"; ctx.font = (11 * dpr) + "px monospace";
+    ctx.fillText("-2%", toX(-2) - 12 * dpr, midY + 32 * dpr);
+    ctx.fillText("+2%", toX(2) - 12 * dpr, midY + 32 * dpr);
+
+    return "USARTDIV = <b>" + (Math.round(div * 1e4) / 1e4) +
+           "</b> &rarr; 尾數 <b>" + (mant + carry) + "</b>, 小數 <b>" + frac +
+           "/16</b> &nbsp;·&nbsp; BRR = <b>0x" + brr.toString(16).toUpperCase() +
+           "</b><br>實際鮑率 = <b>" + Math.round(baudAct) +
+           "</b> &nbsp;·&nbsp; 誤差 = <b style='color:" + (inBudget ? "#2ec4b6" : "#e5534b") +
+           "'>" + (Math.round(err * 1000) / 1000) + "%</b> " +
+           (inBudget ? "（在預算內）" : "（超出預算！）");
+  }
+});
+</script>
+</body>
+</html>

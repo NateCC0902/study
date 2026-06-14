@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>非監督式學習：k-平均與主成分分析 — 機器學習與深度學習</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="08-kmeans-pca">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 08</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL 課程 · 08 · 非監督式學習</div>
+        <h1>非監督式學習：k-平均與主成分分析</h1>
+        <p>把標籤拿掉。手上只有 $X$ 時，兩個問題就能帶你走很遠：<em>哪些點屬於同一群？</em>（k-平均把列分組）以及<em>哪些方向真正承載了資訊？</em>（主成分分析重新描述欄）。我們會從第一原理推導這兩者，並把它們實際用在遙控潛水器 (ROV) 的下潛紀錄與聲納特徵上。</p>
+        <div class="meta"><span>⏱ 約 40 分鐘</span><span>🧩 Lloyd 迴圈</span><span>📐 共變異數特徵向量</span><span>🤖 ROV 行為模式</span></div>
+      </section>
+
+      <p><strong>第 2 部分 · 第 08 課 · 程式技術棧：</strong>scikit-learn (+ tiny numpy PCA)</p>
+      <p><strong>先備知識：</strong><a href="07-svm-kernels.html">07 — 支持向量機與核</a></p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎯</span> 學完本課你能</div>
+        <ul>
+          <li>解釋 <strong>k-平均 (k-means)</strong> 如何透過 <strong>Lloyd（指派/更新）迴圈</strong> 找出分群，以及它最小化的是什麼目標函數。</li>
+          <li>用 <strong>手肘法 (elbow method)</strong> 與 <strong>輪廓分數 (silhouette score)</strong> 挑選合理的分群數 $k$，並說出 k-平均在什麼情況下會失效。</li>
+          <li>把 <strong>主成分分析 (PCA)</strong> 推導為最大變異數的方向，並把它和 <strong>共變異數矩陣 (covariance matrix) 的特徵向量</strong> 連結起來。</li>
+          <li>用 <strong>解釋變異數比例 (explained-variance ratio)</strong> 決定要保留幾個成分，並知道何時該改用 t-SNE/UMAP。</li>
+          <li>把兩者都應用到機器人資料上：把遙控潛水器 (ROV) 的下潛紀錄分群成行為模式，並在丟進分類器前先壓縮高維度的感測器特徵。</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>直覺理解</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺理解 <small>先建立畫面</small></div>
+      <p>到目前為止的每個方法都需要 <strong>標籤 (label)</strong>：你把 $(x, y)$ 配對交給模型，它學會這個映射。<strong>非監督式學習 (unsupervised learning)</strong> 拿掉了 $y$。你手上只有 $X$，而你希望演算法自己浮現出<em>結構</em>。</p>
+
+      <p>有兩種結構不斷地重要：</p>
+      <ul>
+        <li><strong>分群 (clustering)</strong> ——「哪些點屬於同一群？」把列 (rows) 分組。（k-平均）</li>
+        <li><strong>降維 (dimensionality reduction)</strong> ——「哪些方向真正承載了資訊？」把欄 (columns) 壓縮。（主成分分析）</li>
+      </ul>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 類比</div>
+        <p>想像你的遙控潛水器的飛行紀錄器傾倒出數千筆帶時間戳的快照——深度、俯仰、推進器電流、距海床高度、航向變化率。沒有人標記它們。<strong>k-平均</strong> 就像一位碼頭主管把這些快照分類進幾個桶子——「巡航」、「定點保持」、「下潛」、「海底測量」——純粹依據數字有多相似。<strong>主成分分析</strong> 則像是發現，在 12 個感測器當中，其實只有 3 個<em>組合</em>訊號（一個「下潛積極度」軸、一個「橫向漂移」軸、一個「耗電量」軸）就解釋了幾乎所有東西；其餘的都是冗餘與雜訊。一個把列分組，另一個重新描述欄。</p>
+      </div>
+
+      <div class="mermaid">
+flowchart TD
+    A["原始資料 X&lt;br/&gt;（沒有標籤 y）"] --> B{我們想要&lt;br/&gt;什麼結構？}
+    B -->|把相似的列分組| C["分群&lt;br/&gt;k-平均"]
+    B -->|更少、更豐富的欄| D["降維&lt;br/&gt;PCA"]
+    C --> E["分群 ID&lt;br/&gt;（行為模式）"]
+    D --> F["壓縮後的特徵&lt;br/&gt;（餵給分類器，&lt;br/&gt;或畫成 2D 圖）"]
+</div>
+
+      <p>這兩者天生就是一對：先用主成分分析去雜訊/壓縮，再對壓縮後的空間做 k-平均——這是你會一再使用的主力管線。</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>數學原理</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>推導它</small></div>
+
+      <h3 id="kmeans-objective">k-平均：目標函數</h3>
+      <p>我們有 $n$ 個點 $x_i \in \mathbb{R}^d$，想要 $k$ 個分群。k-平均挑選 $k$ 個 <strong>質心 (centroid)</strong> $\mu_1, \dots, \mu_k \in \mathbb{R}^d$，並把每個點指派給最近的質心。它最小化 <strong>群內平方和（WCSS, within-cluster sum of squares）</strong>，也稱為<em>慣量 (inertia)</em>：</p>
+
+      <div class="math-box">$$
+J = \sum_{i=1}^{n} \min_{j \in \{1,\dots,k\}} \; \lVert x_i - \mu_j \rVert^2
+$$</div>
+
+      <ul>
+        <li>$x_i$ —— 第 $i$ 個資料點（一個 $d$ 維向量）。</li>
+        <li>$\mu_j$ —— 第 $j$ 群的質心。</li>
+        <li>$\lVert \cdot \rVert^2$ —— 平方歐氏距離；我們想讓它變小的「離散程度」。</li>
+        <li>$J$ —— 每個點到<em>它自己</em>質心的總平方距離。$J$ 越小 = 分群越緊密。</li>
+      </ul>
+
+      <p>它從何而來：如果每個分群都用一個原型點來概括，$J$ 就是把每個 $x_i$ 換成其原型所造成的總平方重建誤差。最小化它正是「讓原型具代表性」。</p>
+
+      <h3 id="lloyd-loop">Lloyd 迴圈（為什麼它有效）</h3>
+      <p>同時對指派<strong>與</strong>質心去最小化 $J$ 是 NP-hard 的，所以我們交替進行——固定一邊，最佳化另一邊：</p>
+
+      <p><strong>1. 指派步驟。</strong> 固定質心。把每個點放進最近的分群：</p>
+      <div class="math-box">$$
+c_i = \arg\min_{j} \; \lVert x_i - \mu_j \rVert^2
+$$</div>
+      <p>給定質心後，這對 $J$ 而言是最佳的——每個點都挑選成本最低的那一項。</p>
+
+      <p><strong>2. 更新步驟。</strong> 固定指派。把每個質心設為其成員的 <strong>平均 (mean)</strong>：</p>
+      <div class="math-box">$$
+\mu_j = \frac{1}{|C_j|} \sum_{i \in C_j} x_i
+$$</div>
+      <p>為什麼是平均？對於固定的分群 $C_j$，$\sum_{i \in C_j}\lVert x_i - \mu_j\rVert^2$ 會在令 $\nabla_{\mu_j} = 0$ 時最小化，也就是 $\sum_{i\in C_j}(x_i - \mu_j)=0 \Rightarrow \mu_j = \text{mean}$。平均<em>就是</em>最小平方意義下的中心。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 收斂性</div>
+        <p>每一步都只會降低（或維持）$J$，且 $J \ge 0$，所以這個迴圈會 <strong>收斂</strong>——但只收斂到<em>局部</em>最小值。因此我們會跑數次隨機重啟（<code>n_init</code>）並保留最好的結果。<strong>k-means++</strong> 會把初始質心散開來播種，這能大幅減少糟糕的局部最佳解。</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    I["初始化質心&lt;br/&gt;(k-means++)"] --> A["指派：&lt;br/&gt;點 → 最近的 μ"]
+    A --> U["更新：&lt;br/&gt;μ = 成員的平均"]
+    U --> Q{質心&lt;br/&gt;有移動嗎？}
+    Q -->|有| A
+    Q -->|沒有| Done["完成&lt;br/&gt;(J 的局部最小值)"]
+</div>
+
+      <div class="sim"><div class="sim-title"><span>🧪</span> k-平均的迭代過程</div><canvas id="demo-kmeans"></canvas></div>
+      <p>挑選 k 並逐步執行迭代；觀察點被重新指派、質心逐漸安定（慣量下降）。</p>
+
+      <h3 id="choosing-k">選擇 $k$</h3>
+      <ul>
+        <li><strong>手肘法。</strong> 畫出 $J(k)$ 對 $k$ 的圖。它總是遞減（質心越多 → 越緊密），但<em>下降速率</em>會在「對的」$k$ 處急遽變緩——也就是手肘。挑曲線從陡轉平的轉折處。</li>
+        <li><strong>輪廓分數。</strong> 對於點 $i$，令 $a_i$ = 到它自己群的平均距離，$b_i$ = 到<em>最近的其他</em>群的平均距離。則
+        <div class="math-box">$$
+s_i = \frac{b_i - a_i}{\max(a_i, b_i)} \in [-1, 1]
+$$</div>
+        接近 $+1$ = 緊貼在自己群裡且遠離其他群；接近 $0$ = 位於邊界上；負值 = 大概被指派錯了。把所有點的 $s_i$ 取平均，挑選讓它最大化的 $k$。輪廓分數比肉眼看手肘更有原則。</li>
+      </ul>
+
+      <h3 id="pca-variance">主成分分析：最大變異數的方向</h3>
+      <p>把資料置中：$\tilde{X} = X - \bar{x}$（減去各欄的平均；主成分分析<em>要求</em>置中）。<strong>共變異數矩陣</strong> 為</p>
+
+      <div class="math-box">$$
+\Sigma = \frac{1}{n-1}\, \tilde{X}^\top \tilde{X} \in \mathbb{R}^{d \times d}
+$$</div>
+
+      <ul>
+        <li>$\Sigma_{ab}$ —— 特徵 $a$ 與特徵 $b$ 如何共同變動。對角線 = 每個特徵的變異數。</li>
+      </ul>
+
+      <p>我們想找出單位方向 $w$（$\lVert w \rVert = 1$），使得投影後的資料 $\tilde{X} w$ 具有 <strong>最大變異數</strong>。投影的變異數是</p>
+
+      <div class="math-box">$$
+\operatorname{Var}(\tilde{X} w) = w^\top \Sigma\, w
+$$</div>
+
+      <p>在 $\lVert w\rVert = 1$ 的限制下最大化 $w^\top \Sigma w$ 是一個帶約束的問題。拉格朗日函數 $w^\top\Sigma w - \lambda(w^\top w - 1)$ 在以下情況時梯度為零</p>
+
+      <div class="math-box">$$
+\Sigma\, w = \lambda\, w
+$$</div>
+
+      <p>這就是 <strong>特徵向量方程式</strong>。所以最佳方向就是 <strong>$\Sigma$ 的特徵向量</strong>，而沿著每個方向所擷取的變異數就是它的 <strong>特徵值</strong> $\lambda$（因為 $w^\top\Sigma w = \lambda$）。把特徵值由大到小排序：最頂端的特徵向量是 <strong>PC1</strong>（變異數最多），下一個是 <strong>PC2</strong>（在與 PC1 正交的前提下擷取最多<em>剩餘</em>變異數），依此類推。</p>
+
+      <div class="sim"><div class="sim-title"><span>🧪</span> 主成分分析的主軸</div><canvas id="demo-pca"></canvas></div>
+      <p>提高相關性；PC1（橘色）會擷取更多的變異數。</p>
+
+      <p>要降到 $p < d$ 維，就投影到前 $p$ 個特徵向量 $W_p = [w_1, \dots, w_p]$ 上：</p>
+
+      <div class="math-box">$$
+Z = \tilde{X}\, W_p \in \mathbb{R}^{n \times p}
+$$</div>
+
+      <p>第 $j$ 個成分的 <strong>解釋變異數比例</strong> 為</p>
+
+      <div class="math-box">$$
+\text{EVR}_j = \frac{\lambda_j}{\sum_{m=1}^{d} \lambda_m}
+$$</div>
+
+      <p>保留足夠多的成分，使累積 EVR 超過某個門檻（比方說 0.95 = 「保留 95% 的變異數」）。</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 實務提醒</div>
+        <p>在生產環境中，你會用 $\tilde{X}$ 的 <strong>SVD（奇異值分解）</strong> 而不是顯式地構造 $\Sigma$（數值上更穩定）——這正是 scikit-learn 所做的。共變異數特徵分解的觀點最容易<em>理解</em>；兩者給出相同的答案。</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 主成分分析是線性的</div>
+        <p>若要<em>視覺化</em>糾結的非線性結構（例如 MNIST 數字流形），請改用 <strong>t-SNE</strong> 或 <strong>UMAP</strong>——它們會保留局部鄰域，畫出漂亮的 2D 圖。但它們會扭曲全域距離且不可逆，所以拿它們來<em>觀看</em>，而不是當作下游模型的特徵。壓縮的預設選擇仍然是主成分分析。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>程式碼</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>逐行閱讀</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">kmeans_fit.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import make_blobs
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+
+# --- 合成分群：2D 中的 4 個高斯團塊 ---------------------------
+X, y_true = make_blobs(
+    n_samples=600, centers=4, cluster_std=0.90,
+    random_state=42,
+)
+
+# --- 擬合 k-平均 -----------------------------------------------------------
+km = KMeans(
+    n_clusters=4,
+    init="k-means++",   # 聰明的播種 -&gt; 較少糟糕的局部最小值
+    n_init=10,          # 10 次隨機重啟，保留慣量最低的那一個
+    random_state=42,
+)
+labels = km.fit_predict(X)
+
+print(f"inertia (WCSS J): {km.inertia_:.1f}")
+print(f"iterations to converge: {km.n_iter_}")
+# -&gt; inertia (WCSS J): 941.9
+# -&gt; iterations to converge: 2
+</code></pre>
+      </div>
+
+      <p>注意我們用了真實的團塊數（4）。在真實世界中你並不知道它——所以讓我們來<em>找出</em>它。</p>
+
+      <div class="codeblock">
+        <div class="code-head">choose_k.py <span class="lang">Python</span></div>
+<pre><code class="language-python"># --- 選擇 k：手肘（慣量）+ 輪廓 ------------------------------
+ks = range(2, 9)
+inertias, sils = [], []
+for k in ks:
+    m = KMeans(n_clusters=k, n_init=10, random_state=42).fit(X)
+    inertias.append(m.inertia_)
+    sils.append(silhouette_score(X, m.labels_))
+
+best_k = ks[int(np.argmax(sils))]
+print(f"best k by silhouette: {best_k}")
+# -&gt; best k by silhouette: 4
+
+fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+ax[0].plot(list(ks), inertias, "o-")
+ax[0].set(xlabel="k", ylabel="inertia (WCSS J)", title="Elbow method")
+ax[1].plot(list(ks), sils, "o-", color="tab:green")
+ax[1].set(xlabel="k", ylabel="mean silhouette", title="Silhouette")
+plt.tight_layout()
+plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 你應該看到</div>
+        <p>手肘圖在 $k=4$ 處急遽彎折（先陡後平），而輪廓圖在 $k=4$ 處達到峰值。兩個獨立的訊號一致地指向真相。</p>
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">visualize_clusters.py <span class="lang">Python</span></div>
+<pre><code class="language-python"># --- 視覺化分群 + 質心 ---------------------------------------
+plt.figure(figsize=(6, 5))
+plt.scatter(X[:, 0], X[:, 1], c=labels, cmap="tab10", s=18, alpha=0.7)
+plt.scatter(
+    km.cluster_centers_[:, 0], km.cluster_centers_[:, 1],
+    marker="X", s=260, c="black", edgecolor="white", linewidths=1.5,
+    label="centroids",
+)
+plt.legend(); plt.title("k-Means clusters"); plt.tight_layout(); plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 你應該看到</div>
+        <p>四團彩色的點雲，每團的質量中心都坐著一個黑色的 <strong>X</strong>——質心正好落在每個團塊的正中央。</p>
+      </div>
+
+      <h3 id="pca-scratch-vs-sklearn">從零實作主成分分析（numpy eig）對比 scikit-learn</h3>
+
+      <div class="codeblock">
+        <div class="code-head">pca_scratch_vs_sklearn.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from sklearn.decomposition import PCA
+from sklearn.datasets import load_iris
+
+iris = load_iris()
+A = iris.data            # (150, 4)：花萼/花瓣的長與寬
+y = iris.target
+
+# ---- 從零實作：共變異數矩陣的特徵分解 ----------
+A_centered = A - A.mean(axis=0)                 # 主成分分析需要置中
+cov = np.cov(A_centered, rowvar=False)          # (4, 4) 共變異數 Σ
+eigvals, eigvecs = np.linalg.eigh(cov)          # eigh：對稱矩陣 -&gt; 實數、由小到大排序
+
+order = np.argsort(eigvals)[::-1]               # 依變異數由大到小排序
+eigvals, eigvecs = eigvals[order], eigvecs[:, order]
+
+evr = eigvals / eigvals.sum()                   # 解釋變異數比例
+print("EVR (from scratch):", np.round(evr, 4))
+# -&gt; EVR (from scratch): [0.9246 0.0531 0.0171 0.0052]
+
+Z_scratch = A_centered @ eigvecs[:, :2]         # 投影到前 2 個主成分
+
+# ---- scikit-learn（內部使用 SVD）----------------------------------
+pca = PCA(n_components=2)
+Z_sklearn = pca.fit_transform(A)                # sklearn 會幫你置中
+print("EVR (sklearn):     ", np.round(pca.explained_variance_ratio_, 4))
+# -&gt; EVR (sklearn):      [0.9246 0.0531]
+
+# 相同的子空間——特徵向量的正負號可能翻轉，所以比較 |座標|。
+print("match:", np.allclose(np.abs(Z_scratch), np.abs(Z_sklearn), atol=1e-6))
+# -&gt; match: True
+</code></pre>
+      </div>
+
+      <p>四個成分當中的前兩個就已經握有 <strong>約 98%</strong> 的變異數——鳶尾花資料其實偽裝成 4D，骨子裡幾乎是 2D。</p>
+
+      <div class="codeblock">
+        <div class="code-head">pca_scatter.py <span class="lang">Python</span></div>
+<pre><code class="language-python"># --- 散點繪製 2D 投影 --------------------------------------------
+plt.figure(figsize=(6, 5))
+for c, name in zip(range(3), iris.target_names):
+    plt.scatter(Z_sklearn[y == c, 0], Z_sklearn[y == c, 1], s=22, label=name)
+plt.xlabel("PC1 (92.5% var)"); plt.ylabel("PC2 (5.3% var)")
+plt.legend(); plt.title("Iris projected to 2D via PCA"); plt.tight_layout(); plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 你應該看到</div>
+        <p>從 4D 壓縮到 2D 後，<em>setosa</em> 以一個乾淨分離的團塊坐在左側，而 <em>versicolor</em> 與 <em>virginica</em> 形成兩個相鄰（略微重疊）的群——這個結構撐過了壓縮。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>實際案例</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>為什麼這很重要</small></div>
+
+      <h3 id="rov-clustering">(a) 把遙控潛水器下潛紀錄分群成行為模式</h3>
+      <p>你的遙控潛水器以 5 Hz 串流遙測資料。每個時間步你都計算出一個特徵向量——深度變化率、俯仰、橫滾率、推進器總電流、距海床高度、航向變化率大小。你想<em>自動分段</em>數小時的影像為各種行為模式，而不需要手動標記。</p>
+
+      <div class="codeblock">
+        <div class="code-head">cluster_dive_logs.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from sklearn.pipeline import make_pipeline
+
+rng = np.random.default_rng(0)
+
+def mode(n, depth_rate, thruster, altitude, hdg_rate):
+    """偽造一種行為模式：[depth_rate, pitch, thruster_A, altitude_m, hdg_rate]。"""
+    return np.column_stack([
+        rng.normal(depth_rate, 0.05, n),
+        rng.normal(0.0,        0.5,  n),
+        rng.normal(thruster,   0.3,  n),
+        rng.normal(altitude,   0.4,  n),
+        rng.normal(hdg_rate,   0.3,  n),
+    ])
+
+# transit：快速前進、中等高度 | descent：下沉 | station-keep：懸停 | survey：低且穩定
+X = np.vstack([
+    mode(300, depth_rate=0.0,  thruster=3.0, altitude=5.0, hdg_rate=0.2),  # transit
+    mode(300, depth_rate=0.6,  thruster=1.5, altitude=8.0, hdg_rate=0.1),  # descent
+    mode(300, depth_rate=0.0,  thruster=0.8, altitude=3.0, hdg_rate=0.0),  # station-keep
+    mode(300, depth_rate=0.0,  thruster=1.2, altitude=1.0, hdg_rate=1.5),  # bottom survey
+])
+
+# 關鍵：標準化。推進器電流（安培）與 depth_rate（公尺/秒）落在
+# 截然不同的尺度上；不縮放的話，歐氏距離會被原始數值最大的那個
+# 特徵所主宰。
+pipe = make_pipeline(StandardScaler(), KMeans(n_clusters=4, n_init=10, random_state=0))
+modes = pipe.fit_predict(X)
+
+# 把分群中心反轉回原始單位來「命名」這些模式。
+km = pipe.named_steps["kmeans"]
+scaler = pipe.named_steps["standardscaler"]
+centers = scaler.inverse_transform(km.cluster_centers_)
+cols = ["depth_rate", "pitch", "thruster_A", "altitude_m", "hdg_rate"]
+for i, c in enumerate(centers):
+    print(f"cluster {i}: " + ", ".join(f"{n}={v:+.2f}" for n, v in zip(cols, c)))
+# -&gt; 例如 depth_rate≈+0.6 的群 -&gt; 「descent」；altitude≈1.0 且 hdg_rate≈1.5 -&gt; 「bottom survey」
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🤖</span> 對應</div>
+        <p>k-平均交給你的是匿名的分群 ID 0–3；<em>你</em>要去解讀質心（在 <code>inverse_transform</code> 之後、以真實單位）來貼上人類可讀的名稱。現在你就能自動標記一段 3 小時的下潛、直接跳到「海底測量」片段、標記異常的時間步（到每個質心的距離都很大 = 不像任何正常情況），並針對每種模式觸發不同的紀錄/控制策略——全都是非監督式的。</p>
+      </div>
+
+      <h3 id="pca-compress-classifier">(b) 在分類器前用主成分分析壓縮感測器特徵</h3>
+      <p>想像一個每次 ping 回傳 64 個 bin 的 <strong>前視聲納 (forward-looking sonar)</strong> = 一個 64 維向量，用來分類海床（沙 / 岩石 / 沉船）。相鄰的 bin 高度相關，所以<em>本質</em>維度遠低於 64。主成分分析在分類器之前先壓縮——特徵更少 → 訓練更快、過度擬合更少（回想 <a href="05-overfitting-evaluation.html">05 — 過度擬合與評估</a>），而且因為被丟掉的低變異數成分大多是雜訊，還有去雜訊的效果。</p>
+
+      <div class="codeblock">
+        <div class="code-head">pca_before_classifier.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from sklearn.datasets import load_digits          # 8x8 = 64 維，當作聲納 bin 的乾淨替身
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.model_selection import cross_val_score
+
+digits = load_digits()
+Xs, ys = digits.data, digits.target               # (1797, 64)
+
+# 保留足夠的主成分以留住 90% 的變異數 —— 讓 PCA 自己挑數量。
+clf = make_pipeline(PCA(n_components=0.90), LogisticRegression(max_iter=5000))
+clf.fit(Xs, ys)
+n_kept = clf.named_steps["pca"].n_components_
+print(f"kept {n_kept} of 64 dims for 90% variance")
+# -&gt; kept 21 of 64 dims for 90% variance
+
+acc_pca  = cross_val_score(clf, Xs, ys, cv=5).mean()
+acc_full = cross_val_score(
+    make_pipeline(LogisticRegression(max_iter=5000)), Xs, ys, cv=5).mean()
+print(f"accuracy  PCA(21d): {acc_pca:.3f}   full(64d): {acc_full:.3f}")
+# -&gt; accuracy  PCA(21d): 0.893   full(64d): 0.914
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🤖</span> 收穫</div>
+        <p>我們丟掉了 <strong>三分之二</strong> 的維度，卻維持了基本相同的準確率。對你的聲納管線而言，這意味著一個更輕、更快、能塞進遙控潛水器機載運算預算的模型——在記錄下來的資料上擬合 PCA 一次，然後即時對每筆進來的 ping 做 <code>.transform()</code>。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>常見陷阱與技巧</h2>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 在 k-平均與主成分分析之前永遠要縮放</div>
+        <p>兩者都依賴歐氏距離 / 變異數。一個以安培計（0–10）的特徵會淹沒一個以公尺/秒計（0–1）的特徵。除非特徵本來就可比較，否則請用 <code>StandardScaler</code>。這是「我的分群看起來像亂的」的頭號成因。</p>
+      </div>
+
+      <ul>
+        <li><strong>k-平均假設分群是球狀、等大小、等密度的。</strong> 它畫的是直線（Voronoi）邊界，會欣然地把一個長橢圓切成兩半，或把兩個細長的合併成一個。對於拉長/巢狀/密度不一的形狀，請用 <strong>GMM</strong>（橢圓狀）或 <strong>DBSCAN</strong>（基於密度，能找出任意形狀與離群值）。</li>
+        <li><strong>它永遠會回傳 $k$ 個分群——即使在毫無結構的雜訊上。</strong> k-平均無法告訴你「這裡沒有分群」。要用輪廓分數和領域常識來驗證；別盲目相信那些 ID。</li>
+        <li><strong>多跑幾次重啟。</strong> 保持 <code>n_init &gt;= 10</code> 和 <code>init="k-means++"</code>。單一個糟糕的隨機種子可能收斂到一個肉眼可見錯誤的 $J$ 局部最小值。</li>
+        <li><strong>主成分分析需要置中，且是由變異數驅動，而非由類別驅動。</strong> 頂端主成分 = 最大變異數，這<em>不見得</em>總是最具<em>鑑別力</em>的方向。如果你有標籤且想要分離，可考慮 <strong>LDA</strong>。主成分分析的設計本質就是非監督式的。</li>
+        <li><strong>別把意義讀進 t-SNE/UMAP 的幾何裡。</strong> 那些圖中的分群<em>大小</em>與<em>群間距離</em>並不忠實——它們只保留局部鄰域。用它們來看，用主成分分析來計算特徵。</li>
+      </ul>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>自我檢測</h2>
+
+      <p><strong>Q1.</strong> 為什麼質心 <strong>更新</strong> 步驟要把 $\mu_j$ 設為其被指派點的<em>平均</em>，而不是，比方說，中位數？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>因為目標函數 $J$ 用的是<em>平方</em>歐氏距離。對 $\mu_j$ 最小化 $\sum_{i\in C_j}\lVert x_i-\mu_j\rVert^2$ 會得到 $\nabla = -2\sum(x_i-\mu_j)=0 \Rightarrow \mu_j=\text{mean}$。算術平均是最小<em>平方</em>意義下的中心。（如果目標函數用的是絕對距離，<em>中位數</em>才會是最佳——那就是 k-medians。）</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> 慣量的手肘圖隨著 $k$ 增大持續下降，從不見底。為什麼你不能直接最小化慣量來選 $k$？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>慣量 $J$ 對 $k$ 是單調非遞增的：質心越多總是把資料擬合得越緊，當 $k=n$ 時（每個點都是它自己的群）達到 $J=0$。所以最小化 $J$ 會理所當然地選出 $k=n$，毫無用處。你要的是<em>手肘</em>（報酬遞減處），或是去最大化一個平衡的指標如輪廓分數，它對過鬆與過度切分的分群都會懲罰。</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> 在主成分分析中，共變異數矩陣的特徵值究竟是什麼，你又如何用它們來挑選成分數量？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>每個特徵值 $\lambda_j$ 是 <strong>資料沿著</strong> 其特徵向量（主成分）方向的 <strong>變異數</strong>：$w_j^\top\Sigma w_j=\lambda_j$。解釋變異數比例是 $\lambda_j/\sum_m\lambda_m$。挑選使其 <strong>累積</strong> 比例超過你的門檻（例如 0.95）的最少數量的頂端成分，保留大部分訊號，同時丟掉低變異數（常常是雜訊）的方向。</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> 你對原始的遙控潛水器遙測資料分群，其中推進器電流範圍為 0–10 A，深度變化率範圍為 0–1 m/s，而分群看起來完全忽略了深度。發生了什麼事，又該如何修正？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>k-平均使用歐氏距離，所以<em>數值</em>散布最大的特徵（推進器電流）主宰了距離，而小範圍的深度變化率實際上變得隱形了。修正方法：先標準化特徵（<code>StandardScaler</code>，零平均 / 單位變異數），讓每個特徵都能可比較地貢獻。把它包進管線裡，這樣縮放只會從訓練資料學習。</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> 你的同事做了一張漂亮的 t-SNE 圖，圖中有兩個分群相距很遠，於是他斷定這些行為模式「非常不同」。這個結論站得住腳嗎？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>不一定。t-SNE（與 UMAP）保留<em>局部</em>鄰域，卻扭曲<em>全域</em>距離與分群大小——圖中兩個分群之間的間隙在很大程度上是嵌入的產物，而非忠實的距離。要主張兩種模式相距很遠，請在原始（或主成分分析）特徵空間中量測它，例如質心之間的距離。t-SNE 只用於定性的觀看。</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>換你試試</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml08-when-kmeans-breaks">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">你對一個其實是兩條又長又平行、雪茄狀分群的資料集跑 k-平均，結果把每根雪茄都切到兩個質心去了。根本原因是什麼？</div>
+        <ul class="ex-options">
+          <li data-correct="false">k-平均沒有收斂——它需要更多迭代。</li>
+          <li data-correct="false">資料沒有標準化，所以某個特徵主宰了一切。</li>
+          <li data-correct="true">k-平均假設分群是球狀、可比較的，且畫的是直線 Voronoi 邊界，所以它無法跟隨拉長的形狀。</li>
+          <li data-correct="false">你用了 <code>k-means++</code> 而不是隨機初始化。</li>
+        </ul>
+        <div class="ex-explain">k-平均最小化每個分群到單一質心的平方距離，這會把空間切割成凸的 Voronoi 格。這隱含地假設了分群大致為球狀、等大小。一個拉長（高長寬比）的分群無法用單一中心好好概括，所以演算法傾向把它切開。解法不是更多迭代或播種——而是改用允許橢圓或任意形狀的模型：<strong>GMM</strong>（橢圓狀）或 <strong>DBSCAN</strong>（基於密度）。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml08-cumulative-evr" data-answer="0.9777" data-tol="0.002">
+        <div class="ex-head"><span class="badge">Q2</span> 動手算</div>
+        <div class="ex-q">從鳶尾花的主成分分析來看，解釋變異數比例是 $[0.9246,\ 0.0531,\ 0.0171,\ 0.0052]$。如果你保留前 <strong>兩個</strong> 主成分，你保留了總變異數的多少比例？（給一個 0 到 1 之間的數字。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">比例</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">前兩個主成分的累積 EVR 就是相加：$0.9246 + 0.0531 = 0.9777$，也就是約 <strong>97.8%</strong> 的變異數撐過了 4D → 2D 的壓縮。這就是為什麼鳶尾花「偽裝成 4D，骨子裡幾乎是 2D」——後兩個成分（$0.0171 + 0.0052 = 0.0223$）只承載約 2%，可以安全地丟掉。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml08-mean-minimizes-wcss">
+        <div class="ex-head"><span class="badge">Q3</span> 推導 —— 為什麼平均能最小化 WCSS</div>
+        <div class="ex-q">對於固定的分群 $C_j$，證明最小化 $\sum_{i\in C_j}\lVert x_i - \mu_j\rVert^2$ 的質心 $\mu_j$ 就是該群各點的算術平均。並說出對 Lloyd 迴圈的一個推論。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">把這個和當成 $\mu_j$ 的平滑函數，對 $\mu_j$ 取梯度，並令它為零。平方範數的導數會給你一個 $-2$ 的因子和一個差的總和。</div></details>
+        <details class="ex-acc"><summary>顯示一個解法</summary><div class="acc-body">
+          <p>令 $f(\mu) = \sum_{i\in C_j}\lVert x_i - \mu\rVert^2$。它的梯度是 $\nabla_\mu f = \sum_{i\in C_j} -2\,(x_i - \mu) = -2\Big(\sum_{i\in C_j} x_i - |C_j|\,\mu\Big)$。令 $\nabla_\mu f = 0$ 會得到 $\sum_{i\in C_j} x_i = |C_j|\,\mu$，因此</p>
+          <div class="math-box">$$ \mu_j = \frac{1}{|C_j|}\sum_{i\in C_j} x_i. $$</div>
+          <p>由於 $f$ 是凸的（凸拋物面之和），這個臨界點就是全域最小值。<strong>推論：</strong>在固定指派下，更新步驟是 $J$ 的精確最小平方最佳化器；而在固定質心下，指派步驟也是精確的——所以每一次 Lloyd 迭代都只會降低（或維持）$J$。由於 $J \ge 0$，這個迴圈保證會收斂，雖然只收斂到<em>局部</em>最小值（因此有 k-means++ 與多次重啟）。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本課回顧</div>
+        <p><strong>非監督式學習</strong> 在沒有標籤的情況下找出結構：<strong>k-平均</strong> 把列分組，<strong>主成分分析</strong> 重新描述欄。k-平均透過 <strong>Lloyd 迴圈</strong>（指派 → 更新為平均）最小化群內平方和；它收斂到<em>局部</em>最小值，所以要用 k-means++ 和多次重啟。用 <strong>手肘法</strong> 與 <strong>輪廓分數</strong> 選擇 $k$，並記得它假設分群是球狀、可比較的。<strong>主成分分析</strong> 投影到 <strong>共變異數矩陣的頂端特徵向量</strong> 上——也就是最大變異數的方向——而 <strong>解釋變異數比例</strong> 告訴你要保留幾個；它是線性的，所以 t-SNE/UMAP 只用於視覺化。<strong>永遠先縮放</strong>——兩個方法都是由距離/變異數驅動的。在機器人領域：把下潛紀錄分群成命名好的行為模式，並用主成分分析壓縮高維度的感測器特徵，讓下游分類器更輕、更穩健。接下來，我們將離開古典機器學習，開始打造深度學習的引擎：<a href="09-neural-networks-mlp.html">09 — 神經網路與前向傳播</a>。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂部">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+<script src="../../assets/ml-demos.js"></script>
+<script>EM.mlDemo.kmeans("demo-kmeans");</script>
+<script>EM.mlDemo.pca("demo-pca");</script>
+</body>
+</html>

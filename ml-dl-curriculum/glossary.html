@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Glossary (EN / 繁中) — Machine Learning &amp; Deep Learning</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="glossary">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · G</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL Course · Reference · Glossary</div>
+        <h1>Glossary (EN / 繁中)</h1>
+        <p>A bilingual reference of the core terms used across this course, in “Chinese (English)” paired format with a one-line plain-language gloss. This is the shared vocabulary base for all 22 lessons — cross-cutting and reusable. Come back any time you hit a term you don't recognize. Entries are grouped roughly in teaching order.</p>
+        <div class="meta"><span>📖 Reference</span><span>🌏 EN / 繁中</span><span>🔤 ~250 terms</span><span>∑ Course-wide vocabulary</span></div>
+      </section>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🧭</span> How to use this page</div>
+        <p>本詞彙表收錄本課程使用的核心術語，採「中文（英文）」並列格式，並附上一句精簡的繁體中文解釋。本表為 22 堂課程的共同術語基礎，跨課程通用；遇到不熟悉的詞彙時可隨時回來查閱。詞彙依教學順序分類排列。</p>
+        <p>This glossary collects the course's core terms in a “Chinese (English)” paired layout, each with a concise Traditional-Chinese gloss. It is the shared vocabulary base for the 22 lessons and is reusable across them. Use <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>F</kbd> to jump to any term; the section links below scroll to each topic group.</p>
+        <ul>
+          <li><a href="#core">Core concepts</a> · <a href="#math">Linear algebra / calculus / probability</a> · <a href="#supervised">Supervised models</a></li>
+          <li><a href="#evaluation">Generalization &amp; evaluation</a> · <a href="#classical">Classical ML</a> · <a href="#neural">Neural networks</a></li>
+          <li><a href="#architectures">Architectures</a> · <a href="#generative">Generative &amp; master topics</a> · <a href="#rl">Reinforcement learning</a></li>
+          <li><a href="#detection">Detection &amp; segmentation</a> · <a href="#data-selection">Data &amp; model selection</a> · <a href="#domain">Domain: autonomous vehicles</a></li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="core"><span class="sec-no">1</span>Core concepts · 核心概念</h2>
+
+      <div class="layer"><span class="step">①</span> Core <small>the words every lesson reuses</small></div>
+      <p>The vocabulary that frames the whole field: what learning is, the three paradigms, and the moving parts (data, model, parameters) shared by every later lesson.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語 (Term)</th><th>解釋 (Gloss)</th></tr></thead>
+        <tbody>
+          <tr><td><strong>機器學習 (Machine Learning)</strong></td><td>讓程式從資料中自動學出規律，而非由人手寫死規則。</td></tr>
+          <tr><td><strong>深度學習 (Deep Learning)</strong></td><td>機器學習的一支，使用多層神經網路自動學出由低到高的特徵表示。</td></tr>
+          <tr><td><strong>人工智慧 (Artificial Intelligence)</strong></td><td>讓機器展現類似人類智慧行為的廣義領域，機器學習是其中的主流方法。</td></tr>
+          <tr><td><strong>類神經網路 (Artificial Neural Network)</strong></td><td>模仿神經元連結方式、由多層運算單元堆疊而成的模型。</td></tr>
+          <tr><td><strong>監督式學習 (supervised learning)</strong></td><td>用「有標籤」的資料訓練模型，學出由輸入到正確答案的對應。</td></tr>
+          <tr><td><strong>非監督式學習 (unsupervised learning)</strong></td><td>在「沒有標籤」的資料中找出結構，例如分群或降維。</td></tr>
+          <tr><td><strong>強化學習 (reinforcement learning)</strong></td><td>代理人透過與環境互動、收取獎勵訊號來學出好的決策策略。</td></tr>
+          <tr><td><strong>模型 (model)</strong></td><td>由參數定義、能把輸入映射到輸出的數學函數或運算流程。</td></tr>
+          <tr><td><strong>特徵 (feature)</strong></td><td>描述一筆樣本的輸入變數，模型據此做判斷。</td></tr>
+          <tr><td><strong>標籤 (label)</strong></td><td>監督式學習中樣本的正確答案或目標值。</td></tr>
+          <tr><td><strong>訓練 (training)</strong></td><td>用資料調整模型參數，使其預測愈來愈接近目標的過程。</td></tr>
+          <tr><td><strong>推論 (inference)</strong></td><td>用訓練好的模型對新資料產生輸出的過程。</td></tr>
+          <tr><td><strong>預測 (prediction)</strong></td><td>模型針對某筆輸入所給出的輸出結果。</td></tr>
+          <tr><td><strong>泛化 (generalization)</strong></td><td>模型在「沒看過」的新資料上仍表現良好的能力。</td></tr>
+          <tr><td><strong>資料集 (dataset)</strong></td><td>用來訓練或評估模型的一整批樣本集合。</td></tr>
+          <tr><td><strong>資料 (data)</strong></td><td>模型學習與運算的原始素材，可為數值、影像、文字等。</td></tr>
+          <tr><td><strong>樣本 (sample)</strong></td><td>資料集中的單一筆紀錄或觀測。</td></tr>
+          <tr><td><strong>演算法 (algorithm)</strong></td><td>解決問題或訓練模型所遵循的一組明確步驟。</td></tr>
+          <tr><td><strong>參數 (parameter)</strong></td><td>模型在訓練中自行學出的內部數值，例如權重與偏值。</td></tr>
+          <tr><td><strong>超參數 (hyperparameter)</strong></td><td>訓練前由人設定、不由資料學出的設定值，例如學習率。</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The one distinction to keep straight</div>
+        <p><em>參數 (parameter)</em> is learned <strong>from</strong> data during training; <em>超參數 (hyperparameter)</em> is set <strong>before</strong> training by you. Confusing the two is the single most common beginner slip.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="math"><span class="sec-no">2</span>Linear algebra / calculus / probability · 線性代數／微積分／機率</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>the symbols behind every model</small></div>
+      <p>The mathematical toolbox from lesson <a href="01-math-foundations.html">01</a>. Vectors and matrices carry the data; derivatives and gradients drive the learning; probability frames the uncertainty.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語 (Term)</th><th>解釋 (Gloss)</th></tr></thead>
+        <tbody>
+          <tr><td><strong>純量 (scalar)</strong></td><td>單一數值，沒有方向或維度。</td></tr>
+          <tr><td><strong>向量 (vector)</strong></td><td>一串有序數值，可表示空間中的方向與大小。</td></tr>
+          <tr><td><strong>矩陣 (matrix)</strong></td><td>由列與行排成的二維數值陣列。</td></tr>
+          <tr><td><strong>張量 (tensor)</strong></td><td>純量、向量、矩陣的推廣，可有任意維度的數值陣列。</td></tr>
+          <tr><td><strong>內積 (dot product)</strong></td><td>兩向量對應元素相乘後加總，衡量兩者的對齊程度。</td></tr>
+          <tr><td><strong>矩陣乘法 (matrix multiplication)</strong></td><td>以列乘行的方式組合兩矩陣，是神經網路運算的核心。</td></tr>
+          <tr><td><strong>轉置 (transpose)</strong></td><td>把矩陣的列與行互換。</td></tr>
+          <tr><td><strong>反矩陣 (inverse matrix)</strong></td><td>與原矩陣相乘會得到單位矩陣的矩陣。</td></tr>
+          <tr><td><strong>單位矩陣 (identity matrix)</strong></td><td>對角線為 1、其餘為 0 的方陣，乘法中的恆等元素。</td></tr>
+          <tr><td><strong>範數 (norm)</strong></td><td>衡量向量長度或大小的數值。</td></tr>
+          <tr><td><strong>特徵值 (eigenvalue)</strong></td><td>線性變換沿特徵向量方向的縮放倍率。</td></tr>
+          <tr><td><strong>特徵向量 (eigenvector)</strong></td><td>經線性變換後方向不變、只被縮放的向量。</td></tr>
+          <tr><td><strong>導數 (derivative)</strong></td><td>函數在某點的瞬時變化率。</td></tr>
+          <tr><td><strong>偏導數 (partial derivative)</strong></td><td>多變數函數對其中一個變數的變化率，其餘變數固定。</td></tr>
+          <tr><td><strong>梯度 (gradient)</strong></td><td>由各偏導數組成的向量，指向函數上升最快的方向。</td></tr>
+          <tr><td><strong>連鎖律 (chain rule)</strong></td><td>複合函數的微分法則，是反向傳播的數學基礎。</td></tr>
+          <tr><td><strong>凸 (函數) (convex)</strong></td><td>任兩點連線都在函數圖形上方的函數，保證只有一個全域最小值。</td></tr>
+          <tr><td><strong>機率 (probability)</strong></td><td>某事件發生的可能性，介於 0 與 1 之間。</td></tr>
+          <tr><td><strong>分布 (distribution)</strong></td><td>描述隨機變數各種取值機率的函數。</td></tr>
+          <tr><td><strong>期望值 (expectation)</strong></td><td>隨機變數的長期平均，以機率加權求得。</td></tr>
+          <tr><td><strong>平均 (mean)</strong></td><td>一組數值的算術平均。</td></tr>
+          <tr><td><strong>變異數 (variance)</strong></td><td>衡量數值偏離平均的離散程度。</td></tr>
+          <tr><td><strong>標準差 (standard deviation)</strong></td><td>變異數的平方根，與原資料同單位的離散度量。</td></tr>
+          <tr><td><strong>高斯／常態分布 (Gaussian / normal distribution)</strong></td><td>鐘形對稱分布，由平均與標準差決定，自然界極常見。</td></tr>
+          <tr><td><strong>貝氏定理 (Bayes' rule)</strong></td><td>在已知觀測下更新事件機率的公式。</td></tr>
+          <tr><td><strong>條件機率 (conditional probability)</strong></td><td>在某事件已發生的前提下，另一事件發生的機率。</td></tr>
+          <tr><td><strong>KL 散度 (KL divergence)</strong></td><td>衡量兩個機率分布差異的非對稱指標。</td></tr>
+        </tbody>
+      </table></div>
+
+      <p>A few of these terms are easiest to anchor in symbols. The <strong>gradient (梯度)</strong> of a cost $J(\theta)$ is the vector of partial derivatives $\nabla_\theta J = \big[\frac{\partial J}{\partial \theta_1}, \dots, \frac{\partial J}{\partial \theta_d}\big]$, and the <strong>chain rule (連鎖律)</strong> $\frac{d}{dx}f(g(x)) = f'(g(x))\,g'(x)$ is exactly what backpropagation applies layer by layer.</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="supervised"><span class="sec-no">3</span>Supervised models · 監督式模型</h2>
+
+      <div class="layer"><span class="step">③</span> Supervised <small>map inputs to known answers</small></div>
+      <p>The workhorse models of lessons 02–04: regression, classification, the losses that score them, and gradient descent that fits them.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語 (Term)</th><th>解釋 (Gloss)</th></tr></thead>
+        <tbody>
+          <tr><td><strong>線性迴歸 (linear regression)</strong></td><td>用一條直線（或超平面）擬合資料來預測連續數值。</td></tr>
+          <tr><td><strong>邏輯迴歸 (logistic regression)</strong></td><td>用 sigmoid 把線性輸出轉成機率，做二元分類。</td></tr>
+          <tr><td><strong>分類 (classification)</strong></td><td>預測輸入屬於哪一個離散類別的任務。</td></tr>
+          <tr><td><strong>迴歸 (regression)</strong></td><td>預測連續數值輸出的任務。</td></tr>
+          <tr><td><strong>梯度下降 (gradient descent)</strong></td><td>沿著梯度反方向逐步調整參數以最小化損失的最佳化方法。</td></tr>
+          <tr><td><strong>隨機梯度下降 (stochastic gradient descent)</strong></td><td>每次只用一筆或一小批樣本估計梯度的梯度下降變體，更新更快。</td></tr>
+          <tr><td><strong>學習率 (learning rate)</strong></td><td>每次參數更新的步伐大小，太大易發散、太小收斂慢。</td></tr>
+          <tr><td><strong>損失函數 (loss function)</strong></td><td>衡量單一預測與目標差距的函數，訓練時要使其變小。</td></tr>
+          <tr><td><strong>成本函數 (cost function)</strong></td><td>整個資料集上損失的平均或總和。</td></tr>
+          <tr><td><strong>目標函數 (objective)</strong></td><td>最佳化過程要最小化（或最大化）的總體函數。</td></tr>
+          <tr><td><strong>均方誤差 (mean squared error)</strong></td><td>迴歸常用損失，取預測與目標誤差平方的平均。</td></tr>
+          <tr><td><strong>平均絕對誤差 (mean absolute error)</strong></td><td>取預測與目標誤差絕對值的平均，對離群值較不敏感。</td></tr>
+          <tr><td><strong>交叉熵 (cross-entropy)</strong></td><td>分類常用損失，衡量預測機率分布與真實標籤的差距。</td></tr>
+          <tr><td><strong>二元交叉熵 (binary cross-entropy)</strong></td><td>針對兩類別問題的交叉熵損失。</td></tr>
+          <tr><td><strong>sigmoid 函數 (sigmoid)</strong></td><td>把任意實數壓縮到 0 與 1 之間的 S 形函數，常用於輸出機率。</td></tr>
+          <tr><td><strong>softmax 函數 (softmax)</strong></td><td>把一組分數轉成總和為 1 的機率分布，用於多類別輸出。</td></tr>
+          <tr><td><strong>決策邊界 (decision boundary)</strong></td><td>模型用來區分不同類別的分界面。</td></tr>
+          <tr><td><strong>正規方程式 (normal equation)</strong></td><td>直接以代數解出線性迴歸最佳參數的閉式解，不需迭代。</td></tr>
+        </tbody>
+      </table></div>
+
+      <p>The two foundational losses recur everywhere: <strong>均方誤差 (MSE)</strong> $\frac{1}{n}\sum_i (\hat{y}_i - y_i)^2$ for regression, and <strong>交叉熵 (cross-entropy)</strong> $-\sum_c y_c \log \hat{y}_c$ for classification. The <strong>sigmoid</strong> $\sigma(z) = \frac{1}{1+e^{-z}}$ turns a score into a probability for binary problems.</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="evaluation"><span class="sec-no">4</span>Generalization &amp; evaluation · 泛化與評估</h2>
+
+      <div class="layer"><span class="step">④</span> Evaluation <small>does it work on unseen data?</small></div>
+      <p>The lesson <a href="05-overfitting-evaluation.html">05</a> vocabulary: the over/under-fitting axis, the splits that measure it honestly, and the metrics that go beyond raw accuracy.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語 (Term)</th><th>解釋 (Gloss)</th></tr></thead>
+        <tbody>
+          <tr><td><strong>過度擬合 (overfitting)</strong></td><td>模型記住訓練資料的雜訊，導致在新資料上表現變差。</td></tr>
+          <tr><td><strong>低度擬合 (underfitting)</strong></td><td>模型太簡單，連訓練資料的規律都學不好。</td></tr>
+          <tr><td><strong>偏差-變異數權衡 (bias-variance tradeoff)</strong></td><td>模型過簡（高偏差）與過繁（高變異）之間的取捨。</td></tr>
+          <tr><td><strong>正則化 (regularization)</strong></td><td>在損失中加入懲罰項以抑制模型過於複雜、減少過度擬合。</td></tr>
+          <tr><td><strong>L1/L2 正則化 (L1/L2 regularization)</strong></td><td>分別以參數絕對值（L1）或平方（L2）作為懲罰；L1 傾向產生稀疏權重。</td></tr>
+          <tr><td><strong>權重衰減 (weight decay)</strong></td><td>在更新時逐步縮小權重，等效於 L2 正則化。</td></tr>
+          <tr><td><strong>訓練/驗證/測試切分 (train/validation/test split)</strong></td><td>把資料分成三份，分別用於學習、調參與最終評估。</td></tr>
+          <tr><td><strong>交叉驗證 (cross-validation)</strong></td><td>輪流以不同子集當驗證集，得到更穩定的效能估計。</td></tr>
+          <tr><td><strong>k 折 (k-fold)</strong></td><td>把資料切成 k 份輪流驗證的交叉驗證做法。</td></tr>
+          <tr><td><strong>精確率 (precision)</strong></td><td>在所有被預測為正的樣本中，真正為正的比例。</td></tr>
+          <tr><td><strong>召回率 (recall)</strong></td><td>在所有實際為正的樣本中，被成功找出的比例。</td></tr>
+          <tr><td><strong>F1 分數 (F1 score)</strong></td><td>精確率與召回率的調和平均，兼顧兩者。</td></tr>
+          <tr><td><strong>準確率 (accuracy)</strong></td><td>預測正確的樣本佔全部樣本的比例。</td></tr>
+          <tr><td><strong>混淆矩陣 (confusion matrix)</strong></td><td>列出各類別預測與實際對照次數的表格。</td></tr>
+          <tr><td><strong>ROC 曲線 (ROC curve)</strong></td><td>描繪不同門檻下真陽率與假陽率關係的曲線。</td></tr>
+          <tr><td><strong>曲線下面積 (AUC)</strong></td><td>ROC 曲線下的面積，衡量分類器整體區分能力。</td></tr>
+          <tr><td><strong>決定係數 (R-squared)</strong></td><td>迴歸模型解釋目標變異程度的比例，越接近 1 越好。</td></tr>
+          <tr><td><strong>類別不平衡 (class imbalance)</strong></td><td>各類別樣本數量懸殊，易使模型偏向多數類別。</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Precision vs recall — don't mix them up</div>
+        <p><strong>精確率 (precision)</strong> answers “of what I flagged positive, how much was right?”; <strong>召回率 (recall)</strong> answers “of all real positives, how many did I catch?” $F1 = \frac{2 \cdot \text{precision} \cdot \text{recall}}{\text{precision} + \text{recall}}$ is their harmonic mean and is the metric to watch under <strong>類別不平衡 (class imbalance)</strong>, where raw 準確率 (accuracy) lies.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="classical"><span class="sec-no">5</span>Classical ML · 傳統機器學習</h2>
+
+      <div class="layer"><span class="step">⑤</span> Classical <small>strong models without deep nets</small></div>
+      <p>The pre-deep-learning toolkit from lessons 06–08: neighbors, trees, ensembles, kernels, and the unsupervised pair of clustering and dimensionality reduction.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語 (Term)</th><th>解釋 (Gloss)</th></tr></thead>
+        <tbody>
+          <tr><td><strong>k-最近鄰 (k-nearest neighbors)</strong></td><td>以最接近的 k 個樣本投票決定新樣本的類別或數值。</td></tr>
+          <tr><td><strong>維度災難 (curse of dimensionality)</strong></td><td>維度過高時資料變稀疏，距離與密度等概念失效的現象。</td></tr>
+          <tr><td><strong>決策樹 (decision tree)</strong></td><td>以一連串條件分支把資料逐步切分來做預測的樹狀模型。</td></tr>
+          <tr><td><strong>吉尼不純度 (Gini impurity)</strong></td><td>衡量節點內類別混雜程度的指標，越小越純。</td></tr>
+          <tr><td><strong>熵 (entropy)</strong></td><td>衡量不確定性或資訊量的指標，越高越混亂。</td></tr>
+          <tr><td><strong>資訊增益 (information gain)</strong></td><td>分裂前後熵的下降量，用來挑選決策樹的分裂條件。</td></tr>
+          <tr><td><strong>隨機森林 (random forest)</strong></td><td>集成多棵以隨機方式建立的決策樹，以投票或平均提升穩定度。</td></tr>
+          <tr><td><strong>梯度提升 (gradient boosting)</strong></td><td>依序加入弱模型、每棵修正前者殘差的集成方法。</td></tr>
+          <tr><td><strong>裝袋法 (bagging)</strong></td><td>對資料做有放回抽樣訓練多個模型再平均，降低變異。</td></tr>
+          <tr><td><strong>集成 (ensemble)</strong></td><td>結合多個模型的預測以獲得比單一模型更好的效果。</td></tr>
+          <tr><td><strong>特徵重要性 (feature importance)</strong></td><td>量化各特徵對模型預測貢獻程度的指標。</td></tr>
+          <tr><td><strong>支持向量機 (support vector machine)</strong></td><td>尋找能以最大間隔分隔兩類別之超平面的分類器。</td></tr>
+          <tr><td><strong>間隔 (margin)</strong></td><td>決策邊界與最近樣本之間的距離，越大泛化通常越好。</td></tr>
+          <tr><td><strong>支持向量 (support vector)</strong></td><td>位於間隔邊界上、決定分隔超平面位置的關鍵樣本。</td></tr>
+          <tr><td><strong>鉸鏈損失 (hinge loss)</strong></td><td>支持向量機所用的損失，對落在間隔內或誤分類的點才施以懲罰。</td></tr>
+          <tr><td><strong>核 (kernel)</strong></td><td>隱式衡量樣本在高維空間相似度的函數。</td></tr>
+          <tr><td><strong>核技巧 (kernel trick)</strong></td><td>不需顯式映射到高維空間，直接用核函數計算內積以處理非線性問題。</td></tr>
+          <tr><td><strong>RBF 核 (RBF kernel)</strong></td><td>以高斯函數衡量相似度的常用核，可處理高度非線性邊界。</td></tr>
+          <tr><td><strong>分群 (clustering)</strong></td><td>把相似的樣本自動歸為同一群的非監督式任務。</td></tr>
+          <tr><td><strong>k-平均 (k-means)</strong></td><td>將資料分成 k 群、反覆更新群心以最小化群內距離的分群法。</td></tr>
+          <tr><td><strong>主成分分析 (principal component analysis)</strong></td><td>找出資料變異最大的正交方向，用於降維與視覺化。</td></tr>
+          <tr><td><strong>降維 (dimensionality reduction)</strong></td><td>在盡量保留資訊下減少特徵數量的技術。</td></tr>
+        </tbody>
+      </table></div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="neural"><span class="sec-no">6</span>Neural networks · 神經網路</h2>
+
+      <div class="layer"><span class="step">⑥</span> Neural <small>stacked functions that learn features</small></div>
+      <p>The building blocks of lessons 09–12: neurons and activations, the forward/backward pass, the optimizers that train them, and the tricks that keep training stable.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語 (Term)</th><th>解釋 (Gloss)</th></tr></thead>
+        <tbody>
+          <tr><td><strong>神經元 (neuron)</strong></td><td>神經網路中的基本運算單元，對輸入加權求和後經啟動函數輸出。</td></tr>
+          <tr><td><strong>感知器 (perceptron)</strong></td><td>最早的單層神經元模型，做線性二元分類。</td></tr>
+          <tr><td><strong>神經網路 (neural network)</strong></td><td>由多個神經元分層連結而成、能逼近複雜函數的模型。</td></tr>
+          <tr><td><strong>多層感知器 (multilayer perceptron)</strong></td><td>由輸入、隱藏、輸出多層全連接神經元組成的基本網路。</td></tr>
+          <tr><td><strong>啟動函數 (activation function)</strong></td><td>為神經元引入非線性的函數，使網路能表達複雜關係。</td></tr>
+          <tr><td><strong>ReLU (ReLU)</strong></td><td>將負值歸零、正值保留的啟動函數，計算簡單且緩解梯度消失。</td></tr>
+          <tr><td><strong>tanh (tanh)</strong></td><td>把輸入壓縮到 -1 與 1 之間的 S 形啟動函數。</td></tr>
+          <tr><td><strong>前向傳播 (forward pass)</strong></td><td>把輸入依序通過各層算出輸出與損失的過程。</td></tr>
+          <tr><td><strong>反向傳播 (backpropagation)</strong></td><td>用連鎖律由輸出層往回計算各參數梯度的演算法。</td></tr>
+          <tr><td><strong>權重 (weight)</strong></td><td>神經元對各輸入的乘法係數，由訓練學出。</td></tr>
+          <tr><td><strong>偏值 (bias)</strong></td><td>神經元加在加權和上的可學常數，平移啟動函數。</td></tr>
+          <tr><td><strong>訓練週期 (epoch)</strong></td><td>整個訓練資料集被完整走過一次。</td></tr>
+          <tr><td><strong>批次 (batch)</strong></td><td>一次送入模型一起運算的一組樣本。</td></tr>
+          <tr><td><strong>小批次 (mini-batch)</strong></td><td>介於單筆與全批之間、每次更新所用的小量樣本。</td></tr>
+          <tr><td><strong>計算圖 (computation graph)</strong></td><td>把運算表示成節點與邊的圖，用以追蹤並自動計算梯度。</td></tr>
+          <tr><td><strong>最佳化器 (optimizer)</strong></td><td>根據梯度決定如何更新參數的演算法，如 SGD、Adam。</td></tr>
+          <tr><td><strong>動量 (momentum)</strong></td><td>累積過去梯度方向以加速收斂並平滑震盪的技巧。</td></tr>
+          <tr><td><strong>Adam (Adam)</strong></td><td>結合動量與自適應學習率的常用最佳化器。</td></tr>
+          <tr><td><strong>權重初始化 (weight initialization)</strong></td><td>訓練前設定權重起始值的策略，影響收斂與穩定性。</td></tr>
+          <tr><td><strong>批次正規化 (batch normalization)</strong></td><td>對每一小批的層輸出做標準化，加速並穩定訓練。</td></tr>
+          <tr><td><strong>層正規化 (layer normalization)</strong></td><td>對單一樣本的特徵做標準化，常用於 Transformer。</td></tr>
+          <tr><td><strong>丟棄法 (dropout)</strong></td><td>訓練時隨機關閉部分神經元以抑制過度擬合。</td></tr>
+          <tr><td><strong>梯度消失 (vanishing gradient)</strong></td><td>反向傳播時梯度逐層變小、深層幾乎學不動的問題。</td></tr>
+          <tr><td><strong>梯度爆炸 (exploding gradient)</strong></td><td>梯度逐層放大導致參數更新失控的問題。</td></tr>
+          <tr><td><strong>學習率排程 (learning rate schedule)</strong></td><td>訓練過程中依規則調整學習率的策略。</td></tr>
+          <tr><td><strong>自動微分 (autograd)</strong></td><td>框架自動依計算圖計算梯度的機制。</td></tr>
+          <tr><td><strong>梯度檢查 (gradient check)</strong></td><td>用數值微分比對程式算出的梯度是否正確的除錯方法。</td></tr>
+        </tbody>
+      </table></div>
+
+      <p>A neuron computes $a = g(w^\top x + b)$: the weighted sum $w^\top x + b$ passed through an activation $g$. The default choice is <strong>ReLU</strong> $g(z) = \max(0, z)$, which is cheap and sidesteps the <strong>梯度消失 (vanishing gradient)</strong> trouble that plagues saturating activations like <strong>tanh</strong>.</p>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="architectures"><span class="sec-no">7</span>Architectures · 網路架構</h2>
+
+      <div class="layer"><span class="step">⑦</span> Architectures <small>specialized wiring for structure</small></div>
+      <p>The families that exploit structure in data — convolutions for images (lesson 13), recurrence for sequences (lesson 14), attention for everything (lesson 15).</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語 (Term)</th><th>解釋 (Gloss)</th></tr></thead>
+        <tbody>
+          <tr><td><strong>卷積 (convolution)</strong></td><td>以小型濾波器在輸入上滑動求局部加權和，擷取空間特徵。</td></tr>
+          <tr><td><strong>卷積神經網路 (convolutional neural network)</strong></td><td>以卷積層為核心、擅長處理影像的網路。</td></tr>
+          <tr><td><strong>濾波器／卷積核 (filter / kernel)</strong></td><td>卷積中可學的小型權重矩陣，負責偵測特定樣式。</td></tr>
+          <tr><td><strong>池化 (pooling)</strong></td><td>對特徵圖做降採樣（如取最大或平均值），縮小尺寸並增強平移不變性。</td></tr>
+          <tr><td><strong>特徵圖 (feature map)</strong></td><td>卷積層輸出的二維特徵響應結果。</td></tr>
+          <tr><td><strong>步幅 (stride)</strong></td><td>濾波器每次滑動的格數，越大輸出越小。</td></tr>
+          <tr><td><strong>填補 (padding)</strong></td><td>在輸入邊緣補值，以控制輸出尺寸或保留邊界資訊。</td></tr>
+          <tr><td><strong>循環神經網路 (recurrent neural network)</strong></td><td>透過隱藏狀態在時間步間傳遞資訊以處理序列的網路。</td></tr>
+          <tr><td><strong>隱藏狀態 (hidden state)</strong></td><td>循環網路中攜帶過往資訊、隨時間更新的記憶向量。</td></tr>
+          <tr><td><strong>時間反向傳播 (backpropagation through time)</strong></td><td>將循環網路沿時間展開後再做反向傳播。</td></tr>
+          <tr><td><strong>長短期記憶 (LSTM)</strong></td><td>以多個閘門控制資訊存取的循環單元，能學長期依賴。</td></tr>
+          <tr><td><strong>閘控循環單元 (GRU)</strong></td><td>結構較 LSTM 精簡的閘控循環單元。</td></tr>
+          <tr><td><strong>序列 (sequence)</strong></td><td>有順序關係的一連串資料，如文字、時間序列。</td></tr>
+          <tr><td><strong>注意力 (attention)</strong></td><td>依相關性對不同輸入位置動態加權的機制。</td></tr>
+          <tr><td><strong>自注意力 (self-attention)</strong></td><td>序列中各元素彼此計算注意力，建立全域關聯。</td></tr>
+          <tr><td><strong>縮放點積注意力 (scaled dot-product attention)</strong></td><td>以查詢與鍵的點積（再縮放）算權重的注意力計算方式。</td></tr>
+          <tr><td><strong>多頭注意力 (multi-head attention)</strong></td><td>並行多組注意力以從不同子空間擷取關係。</td></tr>
+          <tr><td><strong>位置編碼 (positional encoding)</strong></td><td>為無序的注意力模型注入元素先後位置資訊。</td></tr>
+          <tr><td><strong>Transformer (Transformer)</strong></td><td>完全以注意力為基礎、可高度平行化的序列模型架構。</td></tr>
+          <tr><td><strong>嵌入 (embedding)</strong></td><td>把離散符號（如詞元）映射成稠密向量表示。</td></tr>
+          <tr><td><strong>編碼器 (encoder)</strong></td><td>把輸入序列轉成內部表示的模組。</td></tr>
+          <tr><td><strong>解碼器 (decoder)</strong></td><td>由內部表示逐步生成輸出序列的模組。</td></tr>
+        </tbody>
+      </table></div>
+
+      <p>The heart of the Transformer is <strong>縮放點積注意力 (scaled dot-product attention)</strong>: $\text{Attention}(Q, K, V) = \text{softmax}\!\big(\frac{QK^\top}{\sqrt{d_k}}\big)V$, where the $\sqrt{d_k}$ scaling keeps the dot products from saturating the softmax.</p>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="generative"><span class="sec-no">8</span>Generative &amp; master topics · 生成模型與進階主題</h2>
+
+      <div class="layer"><span class="step">⑧</span> Generative <small>create data, transfer knowledge, ship it</small></div>
+      <p>The capstone vocabulary from lessons 16–17: models that generate (autoencoders, GANs, diffusion), the reuse patterns (transfer, fine-tuning, LLMs), and the engineering that puts them in production.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語 (Term)</th><th>解釋 (Gloss)</th></tr></thead>
+        <tbody>
+          <tr><td><strong>自編碼器 (autoencoder)</strong></td><td>先壓縮再重建輸入的網路，用以學習精簡表示。</td></tr>
+          <tr><td><strong>變分自編碼器 (variational autoencoder)</strong></td><td>將潛在空間建模成機率分布、可採樣生成新資料的自編碼器。</td></tr>
+          <tr><td><strong>潛在空間 (latent space)</strong></td><td>模型內部用來表示資料壓縮特徵的低維空間。</td></tr>
+          <tr><td><strong>生成對抗網路 (generative adversarial network)</strong></td><td>讓生成器與判別器對抗訓練以生成逼真資料的架構。</td></tr>
+          <tr><td><strong>生成器 (generator)</strong></td><td>GAN 中負責由雜訊生成假資料的網路。</td></tr>
+          <tr><td><strong>判別器 (discriminator)</strong></td><td>GAN 中負責分辨真假資料的網路。</td></tr>
+          <tr><td><strong>擴散模型 (diffusion model)</strong></td><td>透過逐步加噪再學習去噪來生成資料的模型。</td></tr>
+          <tr><td><strong>異常偵測 (anomaly detection)</strong></td><td>找出與正常樣式明顯不同之資料的任務。</td></tr>
+          <tr><td><strong>重建誤差 (reconstruction error)</strong></td><td>重建輸出與原輸入的差距，常用於異常偵測判斷。</td></tr>
+          <tr><td><strong>遷移學習 (transfer learning)</strong></td><td>把在某任務學到的知識遷移到新任務以加速學習。</td></tr>
+          <tr><td><strong>微調 (fine-tuning)</strong></td><td>在預訓練模型上以少量新資料繼續訓練以適應特定任務。</td></tr>
+          <tr><td><strong>預訓練模型 (pretrained model)</strong></td><td>已在大量資料上訓練好、可作為起點的模型。</td></tr>
+          <tr><td><strong>大型語言模型 (LLM)</strong></td><td>在海量文字上訓練、能理解與生成自然語言的超大型模型。</td></tr>
+          <tr><td><strong>詞元 (token)</strong></td><td>語言模型處理文字的基本單位，可為字、子詞或符號。</td></tr>
+          <tr><td><strong>提示 (prompting)</strong></td><td>透過設計輸入文字來引導語言模型產生想要的輸出。</td></tr>
+          <tr><td><strong>人類回饋強化學習 (RLHF)</strong></td><td>以人類偏好回饋作為獎勵訊號來調校模型的方法。</td></tr>
+          <tr><td><strong>MLOps (MLOps)</strong></td><td>將機器學習模型的開發、部署與維運系統化的工程實務。</td></tr>
+          <tr><td><strong>資料洩漏 (data leakage)</strong></td><td>訓練時不當用到測試或未來資訊，導致效能被高估。</td></tr>
+          <tr><td><strong>部署 (deployment)</strong></td><td>把訓練好的模型上線提供實際服務的過程。</td></tr>
+          <tr><td><strong>資料漂移 (data drift)</strong></td><td>上線後輸入資料分布隨時間改變，使模型效能下滑。</td></tr>
+          <tr><td><strong>可重現性 (reproducibility)</strong></td><td>相同程式碼與設定能重現相同結果的能力。</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> The silent killer: 資料洩漏 (data leakage)</div>
+        <p><strong>資料洩漏 (data leakage)</strong> — letting test or future information sneak into training — inflates your metrics and is one of the hardest bugs to catch, because everything <em>looks</em> great until deployment. Pair it mentally with <strong>資料漂移 (data drift)</strong>: leakage fools you before launch, drift erodes you after.</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="rl"><span class="sec-no">9</span>Reinforcement learning · 強化學習</h2>
+
+      <div class="layer"><span class="step">⑨</span> RL <small>act, get reward, improve</small></div>
+      <p>The agent–environment vocabulary from lesson <a href="18-reinforcement-learning.html">18</a>: states, actions, rewards, the value/policy functions that drive decisions, and the algorithms that learn them.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語 (Term)</th><th>解釋 (Gloss)</th></tr></thead>
+        <tbody>
+          <tr><td><strong>代理人 (agent)</strong></td><td>在環境中觀察狀態並採取動作以求最大化獎勵的學習主體。</td></tr>
+          <tr><td><strong>環境 (environment)</strong></td><td>代理人所處、會回應其動作並給出新狀態與獎勵的系統。</td></tr>
+          <tr><td><strong>狀態 (state)</strong></td><td>對環境當前情況的描述。</td></tr>
+          <tr><td><strong>動作 (action)</strong></td><td>代理人在某狀態下可採取的決策或行為。</td></tr>
+          <tr><td><strong>獎勵 (reward)</strong></td><td>環境對代理人單一動作給出的即時回饋訊號。</td></tr>
+          <tr><td><strong>報酬 (return)</strong></td><td>從某時刻起累積（常折扣）的未來獎勵總和。</td></tr>
+          <tr><td><strong>策略 (policy)</strong></td><td>由狀態決定要採取何種動作的規則或機率分布。</td></tr>
+          <tr><td><strong>價值函數 (value function)</strong></td><td>估計某狀態未來能獲得多少累積報酬的函數。</td></tr>
+          <tr><td><strong>動作價值函數／Q 函數 (action-value / Q-function)</strong></td><td>估計在某狀態採取某動作後的累積報酬。</td></tr>
+          <tr><td><strong>馬可夫決策過程 (Markov decision process)</strong></td><td>以狀態、動作、轉移與獎勵描述序列決策問題的數學框架。</td></tr>
+          <tr><td><strong>折扣因子 (discount factor)</strong></td><td>衡量未來獎勵相對現在重要性的係數，介於 0 與 1。</td></tr>
+          <tr><td><strong>貝爾曼方程式 (Bellman equation)</strong></td><td>將某狀態價值以其後繼狀態價值遞迴表示的核心方程式。</td></tr>
+          <tr><td><strong>探索 (exploration)</strong></td><td>嘗試未知動作以發掘可能更好選擇的行為。</td></tr>
+          <tr><td><strong>利用 (exploitation)</strong></td><td>採取目前已知最好動作以獲取最大回報的行為。</td></tr>
+          <tr><td><strong>ε-貪婪 (epsilon-greedy)</strong></td><td>多數時候選最佳動作、以機率 ε 隨機探索的策略。</td></tr>
+          <tr><td><strong>Q 學習 (Q-learning)</strong></td><td>透過更新 Q 值來學出最佳動作價值的離策略演算法。</td></tr>
+          <tr><td><strong>時間差分 (temporal-difference)</strong></td><td>結合取樣與自我估計、邊互動邊更新價值的學習方式。</td></tr>
+          <tr><td><strong>離策略 (off-policy)</strong></td><td>學習的目標策略與實際產生資料的行為策略可不相同。</td></tr>
+          <tr><td><strong>回放緩衝區 (replay buffer)</strong></td><td>儲存過往互動經驗以供重複取樣訓練的記憶體。</td></tr>
+          <tr><td><strong>目標網路 (target network)</strong></td><td>緩慢更新、用來提供穩定學習目標的副本網路。</td></tr>
+          <tr><td><strong>深度 Q 網路 (deep Q-network)</strong></td><td>以深度神經網路逼近 Q 函數的強化學習方法。</td></tr>
+          <tr><td><strong>策略梯度 (policy gradient)</strong></td><td>直接對策略參數求梯度以最大化期望報酬的方法。</td></tr>
+          <tr><td><strong>獎勵塑形 (reward shaping)</strong></td><td>設計額外獎勵訊號以引導代理人更快學到目標行為。</td></tr>
+          <tr><td><strong>模擬到現實落差 (sim-to-real gap)</strong></td><td>在模擬中訓練的策略移到真實世界時表現下降的差距。</td></tr>
+        </tbody>
+      </table></div>
+
+      <p>The <strong>報酬 (return)</strong> with <strong>折扣因子 (discount factor)</strong> $\gamma$ is $G_t = \sum_{k=0}^{\infty} \gamma^k r_{t+k+1}$, and the <strong>貝爾曼方程式 (Bellman equation)</strong> ties a state's value to its successors: $V(s) = \mathbb{E}\big[r + \gamma V(s')\big]$.</p>
+
+      <!-- ============================================================ §10 -->
+      <h2 id="detection"><span class="sec-no">10</span>Detection &amp; segmentation · 物件偵測與分割</h2>
+
+      <div class="layer"><span class="step">⑩</span> Detection <small>where and what, pixel by pixel</small></div>
+      <p>The computer-vision task vocabulary from lesson <a href="19-detection-segmentation.html">19</a>: locating objects with boxes, labeling every pixel, and the metrics and modules that make it work.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語 (Term)</th><th>解釋 (Gloss)</th></tr></thead>
+        <tbody>
+          <tr><td><strong>物件偵測 (object detection)</strong></td><td>在影像中找出物體並標出其類別與位置（邊界框）的任務。</td></tr>
+          <tr><td><strong>語意分割 (semantic segmentation)</strong></td><td>為影像中每個像素標上類別，但不區分同類個體。</td></tr>
+          <tr><td><strong>實例分割 (instance segmentation)</strong></td><td>為每個像素標類別並區分同類別中的不同個體。</td></tr>
+          <tr><td><strong>邊界框 (bounding box)</strong></td><td>框住物體所在區域的矩形框。</td></tr>
+          <tr><td><strong>交集比聯集 (IoU)</strong></td><td>預測框與真實框交集面積除以聯集面積，衡量重疊程度。</td></tr>
+          <tr><td><strong>錨框 (anchor box)</strong></td><td>預先定義的多種尺寸與比例參考框，供模型在其上做預測。</td></tr>
+          <tr><td><strong>非極大值抑制 (non-maximum suppression)</strong></td><td>移除重疊度高的多餘偵測框，只保留分數最高者。</td></tr>
+          <tr><td><strong>平均精確度均值 (mAP)</strong></td><td>各類別平均精確度的平均，是物件偵測的主要評估指標。</td></tr>
+          <tr><td><strong>U-Net (U-Net)</strong></td><td>具編碼-解碼與跳躍連接結構、常用於影像分割的網路。</td></tr>
+          <tr><td><strong>轉置卷積 (transposed convolution)</strong></td><td>把特徵圖放大（上採樣）的卷積運算，用於分割等需還原尺寸的任務。</td></tr>
+          <tr><td><strong>跳躍連接 (skip connection)</strong></td><td>把較淺層特徵直接接到較深層，保留細節並改善梯度流。</td></tr>
+        </tbody>
+      </table></div>
+
+      <!-- ============================================================ §11 -->
+      <h2 id="data-selection"><span class="sec-no">11</span>Data &amp; model selection · 資料與模型選擇</h2>
+
+      <div class="layer"><span class="step">⑪</span> Data work <small>the unglamorous 80%</small></div>
+      <p>The practical vocabulary that dominates real projects: cleaning and encoding data, scaling features, and searching the hyperparameter space without fooling yourself.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語 (Term)</th><th>解釋 (Gloss)</th></tr></thead>
+        <tbody>
+          <tr><td><strong>缺失資料 (missing data)</strong></td><td>樣本中某些特徵值未被記錄或遺漏的情形。</td></tr>
+          <tr><td><strong>填補 (imputation)</strong></td><td>用平均、中位數或模型等方式估算並補上缺失值。</td></tr>
+          <tr><td><strong>類別型 (categorical)</strong></td><td>取值為離散類別而非數量的特徵，如顏色、型號。</td></tr>
+          <tr><td><strong>獨熱編碼 (one-hot encoding)</strong></td><td>把類別轉成只有一位為 1、其餘為 0 的向量。</td></tr>
+          <tr><td><strong>序數編碼 (ordinal encoding)</strong></td><td>把有大小次序的類別映射成對應整數。</td></tr>
+          <tr><td><strong>特徵縮放 (feature scaling)</strong></td><td>把各特徵調整到相近尺度（如標準化或歸一化），利於訓練。</td></tr>
+          <tr><td><strong>離群值 (outlier)</strong></td><td>明顯偏離其他樣本的極端值。</td></tr>
+          <tr><td><strong>SMOTE (SMOTE)</strong></td><td>以內插合成少數類別樣本來緩解類別不平衡的過抽樣技術。</td></tr>
+          <tr><td><strong>管線 (pipeline)</strong></td><td>把前處理與模型訓練串成一連串可重複執行的流程。</td></tr>
+          <tr><td><strong>特徵工程 (feature engineering)</strong></td><td>運用領域知識設計或轉換特徵以提升模型效能。</td></tr>
+          <tr><td><strong>網格搜尋 (grid search)</strong></td><td>在預設超參數組合上窮舉嘗試以找出最佳設定。</td></tr>
+          <tr><td><strong>隨機搜尋 (random search)</strong></td><td>在超參數空間中隨機取樣嘗試，通常比網格搜尋更省。</td></tr>
+          <tr><td><strong>貝氏最佳化 (Bayesian optimization)</strong></td><td>用機率模型引導下一步試驗，有效率地搜尋超參數。</td></tr>
+          <tr><td><strong>巢狀交叉驗證 (nested cross-validation)</strong></td><td>內層調參、外層評估的雙層交叉驗證，避免選模型時資訊洩漏。</td></tr>
+          <tr><td><strong>模型選擇 (model selection)</strong></td><td>在多個模型或設定中挑出最適合資料的那一個。</td></tr>
+        </tbody>
+      </table></div>
+
+      <!-- ============================================================ §12 -->
+      <h2 id="domain"><span class="sec-no">12</span>Domain: autonomous vehicles · 自主載具領域術語</h2>
+
+      <div class="layer"><span class="step">⑫</span> Domain <small>where this course's examples live</small></div>
+      <p>The robotics vocabulary that grounds the course's running examples: the vehicle types (USV / UAV / ROV), the control tasks, the sensors, and the sim-to-real concerns.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語 (Term)</th><th>解釋 (Gloss)</th></tr></thead>
+        <tbody>
+          <tr><td><strong>無人水面載具 (USV)</strong></td><td>在水面自主或遙控航行、無人在船上的載具。</td></tr>
+          <tr><td><strong>無人飛行載具 (UAV)</strong></td><td>無人駕駛的飛行器，俗稱無人機。</td></tr>
+          <tr><td><strong>遙控潛水器 (ROV)</strong></td><td>透過纜線由水面遙控操作的水下載具。</td></tr>
+          <tr><td><strong>自主載具 (autonomous vehicle)</strong></td><td>能自行感知環境並決策行動、無需人持續操控的載具。</td></tr>
+          <tr><td><strong>路徑跟隨 (path following)</strong></td><td>控制載具沿著預定路徑行進的控制任務。</td></tr>
+          <tr><td><strong>定點保持 (station-keeping)</strong></td><td>讓載具在風流干擾下仍維持於固定位置或姿態。</td></tr>
+          <tr><td><strong>航跡橫向誤差 (cross-track error)</strong></td><td>載具當前位置與目標路徑之間的垂直偏差。</td></tr>
+          <tr><td><strong>航向 (heading)</strong></td><td>載具當前指向的方位角。</td></tr>
+          <tr><td><strong>舵 (rudder)</strong></td><td>控制載具轉向的水面操縱面。</td></tr>
+          <tr><td><strong>推力 (thrust)</strong></td><td>推進器產生、推動載具前進的力量。</td></tr>
+          <tr><td><strong>ROS2 (ROS2)</strong></td><td>機器人作業系統第二代，提供節點通訊與模組化開發的中介軟體框架。</td></tr>
+          <tr><td><strong>聲納 (sonar)</strong></td><td>以聲波偵測水下物體距離與方位的感測器。</td></tr>
+          <tr><td><strong>光達 (lidar)</strong></td><td>以雷射量測距離、建構周遭三維點雲的感測器。</td></tr>
+          <tr><td><strong>慣性測量單元 (IMU)</strong></td><td>結合加速度計與陀螺儀量測載具加速度與角速度的感測器。</td></tr>
+          <tr><td><strong>軌跡 (trajectory)</strong></td><td>載具隨時間移動所形成的位置（含時間）路徑。</td></tr>
+          <tr><td><strong>障礙物 (obstacle)</strong></td><td>阻擋載具路徑、需偵測並閃避的物體。</td></tr>
+          <tr><td><strong>領域隨機化 (domain randomization)</strong></td><td>訓練時隨機改變模擬環境參數，使策略更能轉移到真實世界。</td></tr>
+          <tr><td><strong>航點 (waypoint)</strong></td><td>路徑上預先設定、供載具依序通過的目標座標點。</td></tr>
+        </tbody>
+      </table></div>
+
+      <!-- ============================================================ §13 -->
+      <h2 id="your-turn"><span class="sec-no">13</span>Your turn</h2>
+
+      <p>One quick check to make sure the most-confused pair has actually landed. Count carefully — the answer is a small integer.</p>
+
+      <div class="exercise" data-ex="numeric" data-id="glossary-hyperparam-count" data-answer="3" data-tol="0">
+        <div class="ex-head"><span class="badge">Q1</span> Count the hyperparameters</div>
+        <div class="ex-q">A <strong>超參數 (hyperparameter)</strong> is set <em>before</em> training and is <em>not</em> learned from data; a <strong>參數 (parameter)</strong> is learned during training. Of the following five items, how many are <strong>hyperparameters</strong>?<br>
+        ① 學習率 (learning rate) &nbsp; ② 權重 (weight) &nbsp; ③ k 折 的 k (the k in k-fold) &nbsp; ④ 偏值 (bias) &nbsp; ⑤ 折扣因子 (discount factor) γ</div>
+        <input class="ex-input" type="number" step="any" placeholder="count"><span class="ex-unit">terms</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">The answer is <strong>3</strong>. Hyperparameters (set by you before training): ① 學習率 (learning rate), ③ the k in k-fold, and ⑤ 折扣因子 γ. Parameters (learned from data during training): ② 權重 (weight) and ④ 偏值 (bias). The test is always “does the optimizer change this value, or do I?” If you set it by hand, it's a hyperparameter.</div>
+      </div>
+
+      <details class="ex-acc"><summary>Why this pair matters</summary><div class="acc-body">
+        <p>Almost every tuning workflow in this course — <strong>網格搜尋 (grid search)</strong>, <strong>隨機搜尋 (random search)</strong>, <strong>貝氏最佳化 (Bayesian optimization)</strong>, and <strong>巢狀交叉驗證 (nested cross-validation)</strong> — exists to choose <em>hyperparameters</em>. Parameters, by contrast, are fitted automatically by <strong>梯度下降 (gradient descent)</strong>. Keeping the two straight tells you which knobs you turn and which the training loop turns.</p>
+      </div></details>
+
+      <!-- ============================================================ recap -->
+      <h2 id="recap"><span class="sec-no">14</span>Key recap</h2>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Glossary recap</div>
+        <ul>
+          <li>This is a <strong>bilingual, cross-course reference</strong>: every term appears as 中文 (English) with a one-line 繁體中文 gloss, grouped roughly in teaching order.</li>
+          <li>The terms cluster into twelve groups — <strong>core → math → supervised → evaluation → classical → neural → architectures → generative → RL → detection → data/model selection → domain</strong> — mirroring the arc of the 22 lessons.</li>
+          <li>Keep the highest-value distinctions sharp: <strong>參數 vs 超參數</strong> (learned vs set), <strong>精確率 vs 召回率</strong> (of-flagged vs of-real), and <strong>資料洩漏 vs 資料漂移</strong> (fools you before launch vs erodes you after).</li>
+          <li>Use this page as a lookup, not a read-through. <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>F</kbd> any term, or jump via the section links at the top.</li>
+        </ul>
+        <p>Start the course proper at <a href="00-what-is-ml.html">00 — What Is Machine Learning?</a>, or build the math toolbox at <a href="01-math-foundations.html">01 — The Math Toolbox</a>.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

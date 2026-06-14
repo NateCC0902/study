@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>大師級總整專案：一套完整的嵌入式系統 — Embedded Mastery</title>
+<link rel="stylesheet" href="../../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../../assets/styles.css">
+</head>
+<body class="track-arduino" data-course="embedded" data-track="arduino" data-chapter="09-capstone">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">Arduino · 第 09 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Arduino 學習軌 · 第 09 章 · 大師級</div>
+        <h1>大師級總整專案：一套完整的嵌入式系統</h1>
+        <p>八個章節的碎片——GPIO、ADC、PWM、計時器、Serial、EEPROM、狀態機、電源管理。現在我們把它們熔鑄成<em>一個</em>真正的產品：一台<strong>智慧環境監測與警報器</strong>。讀到最後，你會擁有一支完整的程式（sketch），它讀取世界、做決策、執行動作、記住資料、進入睡眠——這正是出貨韌體的完整解剖。</p>
+        <div class="meta">
+          <span>⏱ 約 75 分鐘</span><span>🧠 系統整合</span><span>⚡ 完整實作</span><span>🏭 生產級模式</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="system-overview"><span class="sec-no">1</span>這套系統：我們要打造什麼</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先看見整台機器</small></div>
+      <p>總整專案（capstone）不是「把所有東西一次塞進來」——而是一個<em>每個部分你都已經理解的小系統</em>，被串接在一起，讓接縫清楚可見。我們的裝置監看一個房間，並在它太熱時提醒你。具體來說，它必須：</p>
+      <ul>
+        <li>從類比腳位上的 TMP36（或熱敏電阻）讀取<strong>溫度</strong>——<em>第 3 章，ADC</em>；</li>
+        <li>從 LDR 分壓電路讀取環境<strong>光線</strong>——<em>第 3 章</em>；</li>
+        <li>用內建 LED 顯示<strong>狀態</strong>（慢心跳＝正常，快閃＝警報）——<em>第 1／4 章</em>；</li>
+        <li>當溫度超過門檻時，發出 <strong>PWM 蜂鳴器</strong>聲，並加上<strong>遲滯（hysteresis）</strong>讓它不會抖動鳴叫——<em>第 4 章</em>；</li>
+        <li>讓一顆<strong>按鈕</strong>透過有限狀態機循環切換顯示／警報<strong>模式</strong>——<em>第 8 章</em>；</li>
+        <li>以<strong>非阻塞排程</strong>取樣——熱路徑（hot path）中絕不出現 <code>delay()</code>——<em>第 5／8 章</em>；</li>
+        <li>把警報門檻與執行中的最小／最大值<strong>持久化</strong>到 <strong>EEPROM</strong>——<em>第 7 章</em>；</li>
+        <li>把讀數以 CSV 格式透過 <strong>Serial</strong> <strong>串流</strong>輸出以供記錄——<em>第 6 章</em>；</li>
+        <li>在兩次取樣之間<strong>睡眠</strong>，讓一顆鈕扣電池撐上好幾個月——<em>第 8 章，電源管理</em>。</li>
+      </ul>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話模型</div>
+        <p>每一個嵌入式產品都是同一個迴圈：<strong>感測 → 決策 → 動作 → 記憶 → 等待</strong>。總整專案只是讓這五個步驟同時被看見，配上真實的零件與真實的數字。</p>
+      </div>
+
+      <p>以下是流經這台裝置的資料。感測器把資料餵給 MCU；MCU 驅動輸出與持久化；按鈕則回授到決策邏輯中。</p>
+
+      <div class="mermaid">
+flowchart LR
+    TMP["TMP36<br/>溫度 → A0"] --> MCU
+    LDR["LDR 分壓<br/>光線 → A1"] --> MCU
+    BTN["按鈕<br/>模式 → D2"] --> MCU
+    MCU["ATmega328P<br/>感測 · 決策 · 動作"]
+    MCU --> LED["內建 LED<br/>D13 狀態"]
+    MCU --> BUZ["蜂鳴器<br/>D9 PWM 警報"]
+    MCU --> SER["Serial<br/>CSV 記錄"]
+    MCU <--> EE[("EEPROM<br/>門檻 · 最小/最大值")]
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="architecture"><span class="sec-no">2</span>需求與模組化架構</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>把巨石切成模組</small></div>
+      <p>寫出難以維護韌體最快的方法，就是用一個巨大的 <code>loop()</code> 包辦一切。解法是<strong>模組化</strong>：每一項關注點都成為一個職責清楚、介面乾淨的小單元。如此一來，你就能逐一獨立測試、推理、替換它們——這是把業餘 sketch 和正式產品區隔開來、最有價值的一項習慣。</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>模組</th><th>職責</th><th>對外介面</th><th>來自章節</th></tr></thead>
+        <tbody>
+          <tr><td><code>sensors</code></td><td>讀取原始 ADC，轉換為 °C 與 lux</td><td><code>readTempC()</code>、<code>readLight()</code></td><td>第 3 章</td></tr>
+          <tr><td><code>scheduler</code></td><td>以非阻塞節奏觸發任務</td><td><code>due(&amp;last, period)</code></td><td>第 5／8 章</td></tr>
+          <tr><td><code>alarm</code></td><td>門檻＋遲滯，驅動蜂鳴器</td><td><code>updateAlarm(tempC)</code></td><td>第 4 章</td></tr>
+          <tr><td><code>fsm</code></td><td>按鈕事件下的模式轉換</td><td><code>fsmStep(event)</code></td><td>第 8 章</td></tr>
+          <tr><td><code>store</code></td><td>把設定與統計值載入／存到 EEPROM</td><td><code>loadCfg()</code>、<code>saveCfg()</code></td><td>第 7 章</td></tr>
+          <tr><td><code>power</code></td><td>兩次取樣間睡眠（WDT 喚醒）</td><td><code>napMs()</code></td><td>第 8 章</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 架構契約</div>
+        <p><code>loop()</code> 變成一個輕薄的<strong>協調者（orchestrator）</strong>：它問排程器「該取樣了嗎？」，呼叫 <code>sensors</code>，把讀數交給 <code>alarm</code> 與 <code>store</code>，讓 <code>fsm</code> 回應按鈕，最後呼叫 <code>power</code>。<code>loop()</code> 本身不含任何業務邏輯——它只負責<em>路由（routing）</em>。每個模組都把自己的暫存器與魔術數字藏在一個動詞後面。</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——模組為什麼值回票價</div>
+        <p>明年想把 TMP36 換成熱敏電阻？你<em>只</em>需要動 <code>sensors.readTempC()</code>——警報、FSM、EEPROM 與 Serial 的程式碼根本不知道零件變了。這種解耦正是真實韌體團隊在不必整套重寫的情況下出貨「v2 改用更便宜感測器」的方法。介面就是保險。</p>
+      </div>
+
+      <h3 id="wiring">接線與連接——讓系統落地的腳位</h3>
+      <p>模組是抽象，但每一個模組最終都會碰到某個<em>腳位</em>——也就是系統真正的邊界。腳位的選擇並非隨意：蜂鳴器需要一個<strong>支援 PWM</strong> 的腳位，按鈕想要一個支援中斷的腳位（Uno 上的 D2／D3），而類比感測器需要真正的<strong>類比</strong>腳位（A0–A5）。以下是這個架構對應到的接線清單。</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>零件</th><th>Uno 腳位</th><th>為什麼選這個腳位</th><th>備註</th></tr></thead>
+        <tbody>
+          <tr><td>TMP36 V<sub>out</sub></td><td><code>A0</code></td><td>類比輸入 → ADC</td><td>V<sub>cc</sub>→3.3 V／5 V，GND→GND</td></tr>
+          <tr><td>LDR 分壓抽頭</td><td><code>A1</code></td><td>類比輸入 → ADC</td><td>LDR 接 5 V，10 kΩ 接 GND</td></tr>
+          <tr><td>模式按鈕</td><td><code>D2</code></td><td>支援外部 INT0</td><td>另一端接 GND，<code>INPUT_PULLUP</code></td></tr>
+          <tr><td>壓電蜂鳴器</td><td><code>D9</code></td><td>Timer1 PWM（<code>OC1A</code>）</td><td>另一端接 GND</td></tr>
+          <tr><td>狀態 LED</td><td><code>D13</code></td><td><code>LED_BUILTIN</code></td><td>板子上已內建</td></tr>
+          <tr><td>Serial</td><td><code>D0/D1</code></td><td>硬體 UART</td><td>經 USB 連到主機</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——ADC 參考電壓</div>
+        <p>預設情況下，<code>analogReference(DEFAULT)</code> 是以 V<sub>cc</sub> 為基準量測（USB 供電的 Uno 上約 5 V，但它會下垂）。為了感測精度，請透過 <code>analogReference(INTERNAL)</code> 使用晶片內部的 <strong>1.1 V 帶隙（band-gap）</strong>參考電壓——它穩定且能抑制電源雜訊。你的換算數學<em>必須</em>使用你所選的同一個 V<sub>ref</sub>，否則每一筆讀數都會悄悄出錯。我們會在下一節的感測器模組裡把這件事講明白。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="scheduler"><span class="sec-no">3</span>非阻塞排程器骨架</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>計時而不停下</small></div>
+      <p>在第 1 章我們以 <code>delay()</code> 犯了罪；在第 5 章我們用 <code>millis()</code> 懺悔。一個產品永遠不能阻塞，因為它必須在取樣與閃爍的<em>同時</em>讀取按鈕。這個模式就是一個小小的輔助函式：「自從我上次執行這個任務到現在，<code>period</code> 過去了嗎？」如果是，就執行它並蓋上時間戳。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>逐行讀過</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">scheduler.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">// 每 `period` 毫秒最多回傳一次 true，然後重新計時。
+// `last` 是呼叫端自行擁有的時間戳（每個任務各一個）。
+// 對 unsigned long 做減法可保證溢位安全（overflow-safe）：
+// 即使 millis() 在約 49.7 天時回繞（wrap），(now - last) 仍然正確。
+bool due(unsigned long &amp;last, unsigned long period) {
+  unsigned long now = millis();
+  if (now - last &gt;= period) {
+    last += period;          // 剛好推進一個時間格——不會漂移（drift）
+    return true;
+  }
+  return false;
+}
+
+// --- 用法：每個任務各自帶著自己的 `last` ---
+unsigned long tSample = 0, tLog = 0, tBlink = 0;
+
+void loop() {
+  if (due(tSample, 2000)) { /* 每 2 秒讀一次感測器     */ }
+  if (due(tLog,   10000)) { /* 每 10 秒輸出一列 CSV    */ }
+  if (due(tBlink,  500))  { /* 切換心跳 LED          */ }
+  // loop() 永不阻塞——三個任務共用 CPU
+}
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 為什麼 <code>last += period</code> 勝過 <code>last = now</code></div>
+        <p>如果你寫 <code>last = now</code>，就會丟失花在任務<em>內部</em>的那幾毫秒——數小時後，節奏會逐漸落後漂移。剛好推進 <code>period</code> 能讓排程保持相位鎖定（phase-locked）：一個「2 秒」的取樣會永遠平均維持 2 秒。這跟一個即時系統的 tick 是同一個概念。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="sensors"><span class="sec-no">4</span>感測器模組與校正數學</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>從計數值到 °C</small></div>
+      <p>ADC 是一個 10 位元轉換器：它把 <span>$[0, V_{\text{ref}}]$</span> 範圍內的輸入電壓對應到 <span>$[0, 1023]$</span> 範圍內的整數碼。要還原電壓只需要一行代數：</p>
+
+      <div class="math-box">
+        $$ V_{\text{out}} = \frac{\text{ADC}}{1023}\, V_{\text{ref}} $$
+      </div>
+
+      <p><strong>TMP36</strong> 線性得漂亮：它的輸出每升高 1 °C 上升 <span>$10\,\text{mV}$</span>，並有偏移量使得 <span>$0\,^\circ\text{C}$</span> 讀作 <span>$500\,\text{mV}$</span>。把這條直線反解就能得到溫度：</p>
+
+      <div class="math-box">
+        $$ T_{^\circ C} = \frac{V_{\text{out}} - 0.5\,\text{V}}{0.01\,\text{V/}^\circ\text{C}} = \frac{V_{\text{out}} - 0.5}{0.01} $$
+      </div>
+
+      <p>實作範例：當 <span>$V_{\text{ref}} = 5\,\text{V}$</span> 且 ADC 讀數為 <span>$154$</span> 時，我們得到 <span>$V_{\text{out}} = \tfrac{154}{1023}\cdot 5 \approx 0.753\,\text{V}$</span>，因此 <span>$T = \tfrac{0.753 - 0.5}{0.01} \approx 25.3\,^\circ\text{C}$</span>——室溫。注意 TMP36 的 <span>$10\,\text{mV/}^\circ\text{C}$</span> 意味著在 5 V 下每一個 ADC 碼僅值 <span>$\tfrac{5/1023}{0.01} \approx 0.49\,^\circ\text{C}$</span> 的解析度——改用 1.1 V 參考電壓，解析度會銳化到 <span>$\approx 0.11\,^\circ\text{C}$</span>。</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 替代方案——熱敏電阻（NTC，Beta 模型）</div>
+        <p>如果你改用 10 kΩ 的 NTC 熱敏電阻，它的電阻值遵循 <strong>Beta 方程式</strong>。設參考溫度 <span>$T_0$</span>（單位<em>克耳文</em>）下的參考電阻為 <span>$R_0$</span>，材料常數為 <span>$B$</span>（典型值約 3950 K）：</p>
+        $$ \frac{1}{T} = \frac{1}{T_0} + \frac{1}{B}\ln\!\left(\frac{R}{R_0}\right) $$
+        <p>從分壓電路讀出 <span>$R$</span>——若 NTC 是上臂、固定電阻 <span>$R_{\text{fix}}$</span> 接地：<span>$R = R_{\text{fix}}\,\dfrac{V_{\text{ref}} - V_{\text{out}}}{V_{\text{out}}}$</span>。然後用 <span>$T_{^\circ C} = T - 273.15$</span> 把克耳文換回 °C。</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>兩種轉換，同一個介面</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">sensors.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;math.h&gt;
+
+const uint8_t PIN_TEMP  = A0;
+const uint8_t PIN_LIGHT = A1;
+
+// 我們選用 analogReference(DEFAULT) → Vref = 供電電壓 ≈ 5.0 V。
+// 若改呼叫 analogReference(INTERNAL)，這裡請改設 VREF = 1.1。
+const float VREF     = 5.0;
+const float ADC_FULL = 1023.0;
+
+// 取多次讀數平均以壓低 ADC 雜訊（廉價的低通濾波）。
+static uint16_t readAvg(uint8_t pin, uint8_t n = 8) {
+  uint32_t acc = 0;
+  for (uint8_t i = 0; i &lt; n; i++) acc += analogRead(pin);
+  return (uint16_t)(acc / n);
+}
+
+// --- TMP36 路徑：10 mV/°C，0 °C 時為 500 mV ---
+float readTempC() {
+  float v = readAvg(PIN_TEMP) * (VREF / ADC_FULL);  // 計數值 → 伏特
+  return (v - 0.5) / 0.01;                           // 伏特 → °C
+}
+
+// --- 熱敏電阻路徑（Beta 模型），若你改接一顆 NTC ---
+// 取消註解即可使用；回傳同樣的 float 型別，可直接替換。
+// float readTempC_NTC() {
+//   const float R_FIX = 10000.0, R0 = 10000.0;     // 歐姆
+//   const float B = 3950.0, T0 = 298.15;           // K（25 °C）
+//   float v = readAvg(PIN_TEMP) * (VREF / ADC_FULL);
+//   float r = R_FIX * (VREF - v) / v;              // 分壓 → 電阻
+//   float invT = 1.0/T0 + (1.0/B) * log(r / R0);   // Beta 方程式
+//   return (1.0 / invT) - 273.15;                  // K → °C
+// }
+
+// 把光線當作 0–100 的「亮度」指數（LDR 越亮 → 電壓越高）。
+uint8_t readLight() {
+  return (uint8_t)(readAvg(PIN_LIGHT) * 100UL / 1023);
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——平均不能取代穩定（settling）</div>
+        <p>AVR 只有一顆 ADC，它被多工（multiplex）切換到所有類比腳位。當你切換通道（A0 → A1）後，取樣保持電容（sample-and-hold capacitor）需要時間透過信號源阻抗充電。像 LDR 分壓這種高阻抗信號源，在第一次讀取時可能給出前一個通道的<em>殘影</em>。切換腳位後丟掉一次空讀 <code>analogRead()</code>，或讓信號源阻抗保持在 &lt; 10 kΩ。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="mode-fsm"><span class="sec-no">5</span>模式 FSM</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>一顆按鈕，三種行為</small></div>
+      <p>同一顆按鈕在不同時刻必須代表不同意義——這正是<strong>有限狀態機（finite-state machine）</strong>的用途（第 8 章）。我們的裝置有三種模式；每按一次便前進到下一個並循環回繞。FSM 擁有<em>目前模式</em>與合法的<em>轉換</em>；除它以外，沒有任何東西可以改變模式。</p>
+
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> NORMAL
+    NORMAL --> SILENT: 按下
+    SILENT --> SETPOINT: 按下
+    SETPOINT --> NORMAL: 按下
+    note right of NORMAL
+      心跳 + 警報啟用
+    end note
+    note right of SILENT
+      警報靜音，仍持續記錄
+    end note
+    note right of SETPOINT
+      按下使門檻 +1°C
+    end note
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>不靠表格的 switch 式 FSM</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">fsm.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">enum Mode : uint8_t { NORMAL, SILENT, SETPOINT, MODE_COUNT };
+enum Event : uint8_t { EV_NONE, EV_PRESS };
+
+volatile Mode mode = NORMAL;     // 「目前模式」的唯一擁有者
+
+// 純轉換函式：給定目前模式與一個事件，回傳下一個模式。
+// 沒有副作用 → 極易推理與測試。
+Mode fsmNext(Mode m, Event e) {
+  if (e != EV_PRESS) return m;          // 只有按下才會推進
+  switch (m) {
+    case NORMAL:   return SILENT;
+    case SILENT:   return SETPOINT;
+    case SETPOINT: return NORMAL;
+    default:       return NORMAL;
+  }
+}
+
+// 套用一個事件，並執行各模式的「進入時（on entry）」動作。
+void fsmStep(Event e) {
+  Mode next = fsmNext(mode, e);
+  if (next != mode) {
+    mode = next;                        // 提交（commit）這次轉換
+    if (mode == SETPOINT) {
+      // 進入 SETPOINT 目前還不做事；在此模式下按下會調整門檻
+    }
+  } else if (e == EV_PRESS &amp;&amp; mode == SETPOINT) {
+    bumpThreshold();                    // 在 SETPOINT 中，按一下使門檻 +1 °C
+  }
+}
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 把決策與動作分離</div>
+        <p><code>fsmNext()</code> 是一個<strong>純函式（pure function）</strong>——相同輸入給出相同輸出，完全不碰硬體。這讓轉換邏輯可在你的筆電上做單元測試，且不可能被意外破壞。<code>fsmStep()</code> 則是那層薄殼，負責提交新狀態並觸發效果。把 SETPOINT 的加值動作塞進「自迴圈（self-loop）」分支是個刻意的小技巧：在那個模式裡，一次按下<em>不是</em>一次轉換，而是一個狀態內的動作。</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——按鈕彈跳（bounce）</div>
+        <p>機械按鈕不會產生一個乾淨的邊緣；它會<em>彈跳</em>，在幾毫秒內觸發好幾次轉換。要做去彈跳（debounce）：在 D2 中斷裡記下 <code>millis()</code>，並忽略距上次邊緣 ~30 ms 內的任何邊緣。沒有去彈跳，一次實體按下會跳兩三個模式，使用者會以為韌體鬧鬼。我們會在 §9 把這部分接上。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="alarm-hysteresis"><span class="sec-no">6</span>警報：PWM、門檻與遲滯</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>為什麼單一門檻會抖動</small></div>
+      <p>天真的做法：「如果 <span>$T &gt; T_{\text{set}}$</span>，警報開；否則關。」但真實的溫度會因 ADC 雜訊而抖動個零點幾度。剛好停在門檻附近時，警報就會每秒開關好幾次——惱人，而且一看就是外行的標誌。解法是<strong>遲滯（hysteresis）</strong>：兩個門檻，中間夾一個<em>死區（deadband）</em>。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>兩個門檻，一個死區</small></div>
+      <p>選一個設定點 <span>$T_{\text{set}}$</span> 與死區寬度 <span>$\Delta$</span>。當溫度上升越過上緣時警報<strong>開啟</strong>，且只有當它跌回下緣以下時才<strong>關閉</strong>：</p>
+
+      <div class="math-box">
+        $$ T_{\text{hi}} = T_{\text{set}} + \tfrac{\Delta}{2}, \qquad T_{\text{lo}} = T_{\text{set}} - \tfrac{\Delta}{2} $$
+      </div>
+
+      <p>於是警報狀態 <span>$a$</span> 是溫度與它自身前一個值的<em>閂鎖（latched）</em>函式：</p>
+
+      <div class="math-box">
+        $$ a_{n} = \begin{cases} 1 &amp; T \ge T_{\text{hi}} \\ 0 &amp; T \le T_{\text{lo}} \\ a_{n-1} &amp; T_{\text{lo}} &lt; T &lt; T_{\text{hi}} \end{cases} $$
+      </div>
+
+      <p>在死區內，警報<em>保持</em>它的上一個狀態——正是那份記憶消滅了抖動。具體而言，當 <span>$T_{\text{set}} = 30\,^\circ\text{C}$</span> 且 <span>$\Delta = 2\,^\circ\text{C}$</span> 時：一旦 <span>$T$</span> 達到 <span>$31\,^\circ\text{C}$</span> 它就尖叫，且直到 <span>$T$</span> 跌到 <span>$29\,^\circ\text{C}$</span> 才肯安靜。幾分之一度的雜訊永遠無法翻動它。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>遲滯 ＋ 真正的 PWM 音調</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">alarm.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t PIN_BUZZER = 9;     // Timer1 OC1A——支援 PWM/tone
+const float   DEADBAND   = 2.0;   // °C 總寬度（Δ）
+
+float   gThresholdC = 30.0;       // T_set，自 EEPROM 載入
+bool    gAlarmOn    = false;      // a_{n-1}——閂鎖狀態
+
+// 若警報（此刻）作用中則回傳 true。純遲滯邏輯。
+bool updateAlarm(float tempC) {
+  float tHi = gThresholdC + DEADBAND / 2.0;   // T_hi
+  float tLo = gThresholdC - DEADBAND / 2.0;   // T_lo
+
+  if (tempC &gt;= tHi)       gAlarmOn = true;    // 向上越界 → 閂鎖為開
+  else if (tempC &lt;= tLo)  gAlarmOn = false;   // 向下越界 → 閂鎖為關
+  // 否則：在死區內 → gAlarmOn 維持先前值
+
+  return gAlarmOn;
+}
+
+// 驅動壓電蜂鳴器。tone() 會設定 Timer1，以給定頻率在 PIN_BUZZER
+// 上發出方波，且不阻塞 loop()。
+void driveBuzzer(bool on, bool silenced) {
+  if (on &amp;&amp; !silenced) tone(PIN_BUZZER, 2000);  // 2 kHz——壓電的響亮頻段
+  else                 noTone(PIN_BUZZER);       // 釋放該計時器
+}
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 為什麼是 2 kHz，又為什麼用 <code>tone()</code></div>
+        <p>壓電蜂鳴器有機械共振，通常落在 2–4 kHz，在那裡同樣的驅動下會大幅變響——挑 2 kHz 等於免費換來音量。<code>tone()</code> 會把 Timer1 設成 CTC 模式，由硬體切換腳位，因此方波在你的 <code>loop()</code> 做其他事的同時持續播放。這就是「把 PWM 當成輸出周邊」的用法，正是第 4 章的概念。呼叫 <code>tone()</code> 同時也會停用腳位 9 與 10 上的 <code>analogWrite()</code>——它們共用 Timer1。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="persistence-power"><span class="sec-no">7</span>持久化與睡眠</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>跨越斷電而記住；取樣之間打盹</small></div>
+      <p>還剩兩項非揮發性的工作。第一，<strong>持久化</strong>：使用者的門檻與執行中的最小／最大值應該在重置後仍存活，所以我們把它們保存在 EEPROM（第 7 章）。第二，<strong>電源</strong>：在每 2 秒的取樣之間，CPU 無事可做——讓它睡眠能把電流從約 15 mA 降到微安培（第 8 章），把一顆鈕扣電池從幾天變成幾個月。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>結構進、結構出的 EEPROM</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">store.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;EEPROM.h&gt;
+
+struct Config {
+  uint16_t magic;        // 哨兵值：EEPROM 是否為「我們」初始化過？
+  float    thresholdC;   // 使用者設定點
+  float    minC, maxC;   // 執行中的極值
+};
+
+const int      CFG_ADDR  = 0;
+const uint16_t CFG_MAGIC = 0xE5A1;   // 任意的「這是我們的格式」標記
+
+// 載入設定；若是有史以來第一次開機，則寫入合理的預設值。
+void loadCfg(Config &amp;c) {
+  EEPROM.get(CFG_ADDR, c);           // 整批讀出結構
+  if (c.magic != CFG_MAGIC) {        // 空白/外來的 EEPROM → 初始化它
+    c.magic      = CFG_MAGIC;
+    c.thresholdC = 30.0;
+    c.minC       =  999.0;           // 哨兵值，讓第一次取樣必定勝出
+    c.maxC       = -999.0;
+    EEPROM.put(CFG_ADDR, c);
+  }
+}
+
+// 只有在改變時才寫入——EEPROM 每個 cell 約可承受 10 萬次寫入，
+// 所以我們絕不每個 loop 都寫，只在真正有編輯時寫。
+void saveCfg(const Config &amp;c) { EEPROM.put(CFG_ADDR, c); }
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——EEPROM 磨損</div>
+        <p>一個 AVR EEPROM cell 大約能承受 <span>$10^5$</span> 次抹除/寫入週期。若你<em>每</em> 2 秒取樣就寫一次最小／最大值，你會在 <span>$\tfrac{10^5 \times 2\,\text{s}}{86400} \approx 2.3$</span> 天內耗盡一個 cell。只在某個值真正改變時（出現新紀錄，或使用者調動門檻）才呼叫 <code>saveCfg()</code>，而且 <code>EEPROM.put()</code> 本身就會跳過未變動的位元組。</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>用看門狗計時器（watchdog timer）睡眠</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">power.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;avr/sleep.h&gt;
+#include &lt;avr/wdt.h&gt;
+#include &lt;avr/power.h&gt;
+
+volatile bool wdtFired = false;
+
+// 看門狗 ISR 只負責喚醒我們；真正的工作回到 loop() 裡做。
+ISR(WDT_vect) { wdtFired = true; }
+
+// 以最低功耗模式睡眠約 2 秒，由看門狗計時器喚醒。
+void napPwrDown() {
+  // 把 WDT 設成每約 2 秒觸發中斷（不是重置）。
+  // 2 秒的預分頻 = WDP[3:0] = 0b0111。
+  cli();
+  wdt_reset();
+  WDTCSR |= (1 &lt;&lt; WDCE) | (1 &lt;&lt; WDE);          // 解鎖以便變更
+  WDTCSR  = (1 &lt;&lt; WDIE) | (1 &lt;&lt; WDP2) | (1 &lt;&lt; WDP1) | (1 &lt;&lt; WDP0); // 2 秒，中斷模式
+  sei();
+
+  set_sleep_mode(SLEEP_MODE_PWR_DOWN);         // 最深的睡眠
+  sleep_enable();
+  power_adc_disable();                          // 關閉 ADC 省下約 mA
+  sleep_mode();                                 // &lt;-- CPU 在此停住
+  // ...由 WDT 或按鈕 INT 在此喚醒...
+  sleep_disable();
+  power_adc_enable();
+}
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——看門狗同時也是你的安全網</div>
+        <p>我們用看門狗來從睡眠中<em>喚醒</em>，但在生產環境裡，它會以第二種方式名副其實：把它設成<em>重置</em>模式（設定 <code>WDE</code>），並在每個 loop 的某個已知良好的位置呼叫 <code>wdt_reset()</code>。萬一你的韌體當掉了——譬如某個感測器的 I²C 匯流排鎖死——看門狗就會逾時並自動重啟裝置。無人看管的現場硬體<em>就是靠這個</em>。同一個周邊，兩個救命的工作。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="full-sketch"><span class="sec-no">8</span>完整整合的 sketch 與除錯</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>全部串在一起</small></div>
+      <p>以下這個協調者把全部六個模組綁進一支可出貨的 sketch。先讀 <code>loop()</code>——它純粹是路由，正是 §2 那份契約。上面的各模組函式可直接嵌入；這個檔案展示的是黏合劑、帶去彈跳的按鈕 ISR、Serial CSV 串流，以及統計／持久化邏輯。</p>
+
+      <div class="codeblock">
+        <div class="code-head">env_monitor.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">// ================= 智慧環境監測與警報器 =================
+// 整合：ADC 感測器、非阻塞排程器、遲滯警報（PWM tone）、
+// 按鈕 FSM、EEPROM 持久化、Serial CSV、WDT 睡眠。
+// 腳位：A0 溫度、A1 光線、D2 按鈕、D9 蜂鳴器、D13 狀態 LED。
+
+#include &lt;EEPROM.h&gt;
+#include &lt;avr/sleep.h&gt;
+#include &lt;avr/wdt.h&gt;
+
+// ---- 腳位 ----
+const uint8_t PIN_TEMP = A0, PIN_LIGHT = A1;
+const uint8_t PIN_BTN  = 2,  PIN_BUZZER = 9, PIN_LED = LED_BUILTIN;
+
+// ---- 可調參數 ----
+const float    VREF = 5.0, ADC_FULL = 1023.0;
+const float    DEADBAND = 2.0;
+const uint16_t CFG_MAGIC = 0xE5A1;
+const int      CFG_ADDR  = 0;
+
+// ---- 持久化設定 ----
+struct Config { uint16_t magic; float thresholdC, minC, maxC; } cfg;
+
+// ---- FSM ----
+enum Mode : uint8_t { NORMAL, SILENT, SETPOINT };
+volatile Mode mode = NORMAL;
+
+// ---- 警報閂鎖 ----
+bool gAlarmOn = false;
+
+// ---- 按鈕（來自 ISR 的去彈跳邊緣）----
+volatile bool          btnEvent = false;
+volatile unsigned long btnLast  = 0;
+
+void onButton() {                       // INT0 下降緣 ISR
+  unsigned long now = millis();         // millis() 在 ISR 中可用（以計時器為基礎）
+  if (now - btnLast &gt; 30) {             // 30 ms 去彈跳視窗
+    btnLast  = now;
+    btnEvent = true;                    // 把事件交給 loop()
+  }
+}
+
+// ---- 排程器 ----
+unsigned long tSample = 0, tBlink = 0;
+bool due(unsigned long &amp;last, unsigned long period) {
+  unsigned long now = millis();
+  if (now - last &gt;= period) { last += period; return true; }
+  return false;
+}
+
+// ---- 感測器 ----
+uint16_t readAvg(uint8_t pin, uint8_t n = 8) {
+  uint32_t acc = 0;
+  for (uint8_t i = 0; i &lt; n; i++) acc += analogRead(pin);
+  return acc / n;
+}
+float readTempC() {
+  float v = readAvg(PIN_TEMP) * (VREF / ADC_FULL);
+  return (v - 0.5) / 0.01;              // TMP36：10 mV/°C，0 °C 時 0.5 V
+}
+uint8_t readLight() { return readAvg(PIN_LIGHT) * 100UL / 1023; }
+
+// ---- 持久化 ----
+void loadCfg() {
+  EEPROM.get(CFG_ADDR, cfg);
+  if (cfg.magic != CFG_MAGIC) {
+    cfg = { CFG_MAGIC, 30.0, 999.0, -999.0 };
+    EEPROM.put(CFG_ADDR, cfg);
+  }
+}
+void saveCfg() { EEPROM.put(CFG_ADDR, cfg); }
+
+// ---- 警報遲滯 ----
+bool updateAlarm(float tempC) {
+  float tHi = cfg.thresholdC + DEADBAND / 2.0;
+  float tLo = cfg.thresholdC - DEADBAND / 2.0;
+  if      (tempC &gt;= tHi) gAlarmOn = true;
+  else if (tempC &lt;= tLo) gAlarmOn = false;
+  return gAlarmOn;                      // 否則：維持先前值（死區）
+}
+
+// ---- FSM ----
+void fsmStep() {
+  switch (mode) {
+    case NORMAL:   mode = SILENT;   break;
+    case SILENT:   mode = SETPOINT; break;
+    case SETPOINT:                       // 在這裡按下會調整設定點...
+      // 從 SETPOINT 的第一次按下會回繞到 NORMAL；於下方處理
+      mode = NORMAL; break;
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(PIN_LED, OUTPUT);
+  pinMode(PIN_BTN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PIN_BTN), onButton, FALLING);
+  loadCfg();
+  Serial.println(F("# millis,tempC,light,thresh,alarm,mode,min,max"));
+}
+
+void loop() {
+  // --- 1. 處理按鈕事件（FSM）---
+  if (btnEvent) {
+    btnEvent = false;
+    if (mode == SETPOINT) {              // 在 SETPOINT，按一下使門檻加值
+      cfg.thresholdC += 1.0;
+      if (cfg.thresholdC &gt; 45.0) cfg.thresholdC = 15.0;  // 範圍回繞
+      saveCfg();                          // 持久化使用者的選擇
+    } else {
+      fsmStep();                          // 否則推進模式
+    }
+  }
+
+  // --- 2. 取樣 + 決策 + 記憶（每 2 秒）---
+  if (due(tSample, 2000)) {
+    float t = readTempC();
+    uint8_t lx = readLight();
+    bool ringing = updateAlarm(t);
+
+    // 只在真正出現新紀錄時更新持久化極值（節省 EEPROM 磨損）
+    bool rec = false;
+    if (t &lt; cfg.minC) { cfg.minC = t; rec = true; }
+    if (t &gt; cfg.maxC) { cfg.maxC = t; rec = true; }
+    if (rec) saveCfg();
+
+    // 動作：蜂鳴器，除非在 SILENT 模式被靜音
+    bool muted = (mode == SILENT);
+    if (ringing &amp;&amp; !muted) tone(PIN_BUZZER, 2000);
+    else                  noTone(PIN_BUZZER);
+
+    // 透過 Serial 串流一列 CSV（第 6 章）
+    Serial.print(millis());   Serial.print(',');
+    Serial.print(t, 2);       Serial.print(',');
+    Serial.print(lx);         Serial.print(',');
+    Serial.print(cfg.thresholdC, 1); Serial.print(',');
+    Serial.print(ringing);    Serial.print(',');
+    Serial.print((uint8_t)mode); Serial.print(',');
+    Serial.print(cfg.minC, 1); Serial.print(',');
+    Serial.println(cfg.maxC, 1);
+  }
+
+  // --- 3. 心跳：正常時慢、警報時快 ---
+  unsigned long beat = gAlarmOn ? 120 : 500;
+  if (due(tBlink, beat)) digitalWrite(PIN_LED, !digitalRead(PIN_LED));
+
+  // --- 4.（選用）閒置時在此睡眠以延長電池壽命 ---
+  // 若沒有蜂鳴器作用中且 serial 已清空，napPwrDown() 可在取樣間
+  // 把我們降到 µA；上面的熱迴圈省略了它，這樣在 USB 供電的展示
+  // 工作台上心跳才會保持流暢。
+}
+</code></pre>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 注意 <code>loop()</code> <em>沒有</em>包含什麼</div>
+        <p>沒有 <code>delay()</code>。沒有戳弄 ADC 暫存器。沒有 EEPROM 位址。沒有遲滯的算術。每一個硬細節都活在一個具名的動詞後面，而 <code>loop()</code> 讀起來幾乎就像 §1 那句話：<em>感測 → 決策 → 動作 → 記憶 → 等待</em>。那份可讀性<strong>正是</strong>架構回報你的成果。</p>
+      </div>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>專家如何為整合系統除錯</small></div>
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——先隔離，再追蹤</div>
+        <p>當一個多模組系統行為異常時，絕不要一次除錯全部。先<strong>隔離</strong>：把警報與睡眠註解掉，確認單靠感測器 + Serial 能產出合理的 CSV。然後一次重新啟用一個模組。再<strong>追蹤</strong>：你的 Serial CSV 串流<em>就是</em>你的邏輯分析儀——把它導進一張圖，你就能親眼看著溫度曲線越過 <span>$T_{\text{hi}}$</span>、而 <code>alarm</code> 那一欄翻成 1。大多數「不可能發生」的 bug（一個差一格的遲滯邊緣、一個沒能持久化的門檻），在你把日誌畫成圖的那一刻就會變得顯而易見。printf-over-Serial 至今仍是地球上最常被使用的嵌入式除錯器，原因正在於此。</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 延伸點子（當這太簡單時）</div>
+        <p>加一個<strong>滾動平均（rolling-average）</strong>濾波器來平滑溫度。加一個 <strong>FAULT</strong> 狀態，當感測器讀到不可能的值（開路／短路 → ADC 被釘在 0 或 1023）時閂鎖住。驅動一片 <strong>I²C OLED</strong> 做真正的顯示。加一顆<strong>濕度</strong>感測器並算出露點。把資料連同時間戳記錄到 SD 卡。以上每一項都能嵌進某個既有模組而不擾動其他模組——向自己證明這套架構吧。</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>⑤ 換你上場</h2>
+      <div class="layer"><span class="step">⑤</span> 練習 <small>由你決定並動手做</small></div>
+      <p>三道配得上總整專案的考題。一道架構抉擇、一道遲滯預算、一個你自己加上去的功能。進度會儲存在這台裝置上。</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="ard09-arch-tradeoff">
+        <div class="ex-head"><span class="badge">Q1</span> 架構決策</div>
+        <div class="ex-q">你的隊友提議「為了永不丟資料」，在<em>每一次</em> 2 秒取樣時都把 <code>min</code>／<code>max</code> 存到 EEPROM。門檻很少改變；最小／最大值偶爾改變。最強的反對理由是什麼？</div>
+        <ul class="ex-options">
+          <li data-correct="false">EEPROM 寫入太慢，會讓 <code>loop()</code> 阻塞好幾秒</li>
+          <li data-correct="true">EEPROM cell 約能承受 10 萬次寫入；每 2 秒寫一次會在幾天內把它磨壞</li>
+          <li data-correct="false">EEPROM 是揮發性的，所以資料反正會在重置時遺失</li>
+          <li data-correct="false"><code>Config</code> 結構太大，塞不進 1 KB 的 EEPROM</li>
+        </ul>
+        <div class="ex-explain">一個 AVR EEPROM cell 額定約 10⁵ 次寫入。以每 2 秒一次計，那是 <span>$\tfrac{10^5\times2}{86400}\approx2.3$</span> 天就會失效。解法——只在出現<em>真正的新紀錄或使用者編輯</em>時才寫——正是這支 sketch 所做的。（EEPROM 是非揮發性的，而單次 <code>EEPROM.put()</code> 寫約 14 位元組只花幾毫秒，所以其他選項在事實上都是錯的。）</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="ard09-hysteresis" data-answer="29" data-tol="0.01">
+        <div class="ex-head"><span class="badge">Q2</span> 算給我看——遲滯邊緣</div>
+        <div class="ex-q">警報使用設定點 <span>$T_{\text{set}} = 30\,^\circ\text{C}$</span> 與死區 <span>$\Delta = 2\,^\circ\text{C}$</span>，所以它在 <span>$T_{\text{hi}} = T_{\text{set}} + \Delta/2$</span> 時開啟。一旦在鳴叫，溫度（°C）降到多少時它會<strong>關閉</strong>？（記得 $T_{\text{lo}} = T_{\text{set}} - \Delta/2$。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="°C"><span class="ex-unit">°C</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$T_{\text{lo}} = 30 - \tfrac{2}{2} = 29\,^\circ\text{C}$。它在 <span>$T_{\text{hi}}=31\,^\circ\text{C}$</span> 閂鎖為開，並一直維持到溫度一路跌到 <span>$29\,^\circ\text{C}$</span>。開與關之間的 <span>$2\,^\circ\text{C}$</span> 間隙就是消滅抖動的死區——任何比它小的雜訊都永遠無法翻動警報。</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="ard09-rolling-avg">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰——滾動平均平滑化</div>
+        <div class="ex-q">ADC 雜訊讓原始溫度抖動。加上一個對最近 <code>N = 4</code> 筆取樣的<strong>滾動平均（rolling average）</strong>，讓警報對<em>趨勢</em>反應，而不是單一取樣的尖峰。在 <code>loop()</code> 中用一個平滑後的值取代 <code>readTempC()</code> 的輸出，使用固定的環形緩衝區（circular buffer，不用動態記憶體）。讓每次取樣維持 O(1)。</div>
+        <details class="ex-acc">
+          <summary>提示</summary>
+          <div class="acc-body">保留一個靜態陣列 <code>buf[4]</code> 和一個執行中的 <code>sum</code>。每來一筆新取樣：先減掉你即將覆蓋的那一格，寫入新值，把它加進 <code>sum</code>，再把索引對 4 取模前進。平均值就是 <code>sum / 4</code>。完全不需要遍歷緩衝區——那就是 O(1) 的訣竅。</div>
+        </details>
+        <details class="ex-acc">
+          <summary>顯示一種解法</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">smooth.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">// 對最近 4 筆溫度取樣做 O(1) 的滾動平均。
+float smoothTempC(float sample) {
+  const uint8_t N = 4;
+  static float    buf[N] = {0};      // 環形緩衝區（static = 跨呼叫保留）
+  static float    sum    = 0;
+  static uint8_t  idx    = 0;
+  static bool     primed = false;
+
+  sum -= buf[idx];                   // 移除即將被覆蓋的值
+  buf[idx] = sample;                 // 存入新取樣
+  sum += sample;                     // 把它加進執行中的總和
+  idx = (idx + 1) % N;               // 環狀前進
+  if (idx == 0) primed = true;       // 緩衝區已繞過一圈
+
+  // 在緩衝區填滿之前，依目前已有的筆數來除
+  return primed ? (sum / N) : (sum / (idx == 0 ? N : idx));
+}
+
+// 在 loop() 中，把原始讀數送過濾波器：
+//   float t = smoothTempC(readTempC());
+//   bool ringing = updateAlarm(t);
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">這些 <code>static</code> 區域變數就是全部的訣竅：它們在多次呼叫之間保留值，又不污染全域命名空間。減掉離開的取樣、加上進來的取樣，使工作量不論 <code>N</code> 多大都保持常數——這是一個貨真價實的移動平均（moving-average）濾波器，與 DSP 和感測器融合（sensor fusion）所用的是同一個基本元件。把 <code>N</code> 調大就能以反應速度換取更平滑的輸出。</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> 本章回顧</div>
+        <p>你打造了一個完整的產品。現在你能夠：把一套系統分解成藏在動詞命名介面背後、可測試的模組；在永不阻塞的前提下排程工作；透過 TMP36 直線或熱敏電阻 Beta 方程式把原始 ADC 計數值轉成 °C；用兩門檻的遲滯死區馴服警報，並以硬體 PWM 音調驅動它；讓單一按鈕穿過一個有限狀態機；把設定持久化到 EEPROM 而不把它磨壞；用看門狗讓 CPU 睡眠；並透過隔離模組、追蹤 Serial CSV 串流來為整套東西除錯。那個迴圈——<strong>感測、決策、動作、記憶、等待</strong>——就是你未來會出貨的每一個嵌入式產品。你已經以一名真正的韌體工程師之姿，抵達 Arduino 學習軌的終點。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="回到頂端">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../../../assets/vendor/highlight.min.js"></script>
+<script src="../../../assets/katex/katex.min.js"></script>
+<script src="../../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../../assets/vendor/mermaid.min.js"></script>
+<script src="../../../assets/app.js"></script>
+</body>
+</html>

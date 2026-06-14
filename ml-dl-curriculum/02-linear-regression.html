@@ -104,6 +104,9 @@ flowchart LR
         <p>Squaring also means outliers dominate. A residual of 10 contributes 100; ten residuals of 1 contribute 10 total. One bad sonar reading can drag your whole fit.</p>
       </div>
 
+      <div class="sim"><div class="sim-title"><span>🧪</span> Drag the line — minimize the MSE</div><canvas id="demo-linfit"></canvas></div>
+      <p>Move the slope and intercept; the readout shows the MSE and the green least-squares optimum.</p>
+
       <h3 id="normal-equation">The normal equation</h3>
       <p>To minimize the bowl, take the gradient of $L$ with respect to $w$ and set it to zero. Using $\lVert Xw - y\rVert^2 = (Xw-y)^\top(Xw-y)$ and the matrix-calculus rule $\nabla_w (Xw-y)^\top(Xw-y) = 2X^\top(Xw - y)$:</p>
 
@@ -327,5 +330,7 @@ plt.tight_layout(); plt.show()
 <script src="../assets/katex/contrib/auto-render.min.js"></script>
 <script src="../assets/vendor/mermaid.min.js"></script>
 <script src="../assets/app.js"></script>
+<script src="../assets/ml-demos.js"></script>
+<script>EM.mlDemo.linearFit("demo-linfit");</script>
 </body>
 </html>

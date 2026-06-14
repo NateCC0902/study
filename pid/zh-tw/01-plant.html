@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>受控體與開迴路 — USV 的 PID 控制</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-pid" data-course="pid" data-track="main" data-chapter="01-plant">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> PID&nbsp;·&nbsp;USV</a>
+  <span class="spacer"></span>
+  <span class="track-pill">PID · 第 01 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">PID 課程 · 第 01 章 · 基礎</div>
+        <h1>受控體與開迴路：你即將馴服的這艘船</h1>
+        <p>在動任何一個增益（gain）之前，你得先對自己<em>到底在操控什麼</em>建立正確的心智模型。我們會從物理把這艘船搭起來，看它在沒有控制器時如何漂走，然後寫下你接下來整門課都要拿來整定（tuning）的那條控制律。</p>
+        <div class="meta"><span>⏱ 約 30 分鐘</span><span>🧠 Nomoto 模型</span><span>⚡ 即時模擬</span><span>∑ 離散 PID</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="the-boat"><span class="sec-no">1</span>這艘船：同一個模型，貫穿每個案例</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先把畫面建起來</small></div>
+      <p>我們的「受控體（plant）」——控制術語裡指被控制的對象——是一艘維持羅盤航向（heading）的無人水面載具（USV）。你不能直接命令航向；你命令的是<strong>舵角（rudder angle）</strong> $\delta$。舵讓船體（hull）以某個偏航角速度（yaw rate）$r$ <em>轉向</em>，而航向 $\psi$ 就是這份轉向累積出來的結果。這一句話正是後面所有困難的根源。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話的模型</div>
+        <p>舵設定的是<strong>轉向速率</strong>，不是航向。航向是轉向的累計總和——所以船總是帶著動量<em>衝進</em>你所指的方向。</p>
+      </div>
+
+      <p>我們採用最簡單、卻仍像真船的模型：<strong>一階（first-order）Nomoto 模型</strong>。它說偏航角速度透過單一時間常數（time constant）落後於舵，而航向是偏航角速度的積分。</p>
+
+      <div class="mermaid">
+flowchart LR
+    D["舵 δ"] -->|"增益 K、延遲 T"| R["偏航角速度 r"]
+    R -->|"∫ dt"| P["航向 ψ"]
+    W["水流／風"] --> R
+</div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>推導它</small></div>
+      <p>Nomoto 方程與航向積分式，其實就是兩條互相耦合的一階常微分方程：</p>
+      <div class="math-box">$$ T\,\dot r + r = K\,(\delta + d), \qquad \dot\psi = r $$</div>
+      <p>其中 $K$ 是穩態轉向增益（每單位舵角對應的偏航角速度），$T$ 是時間常數（船體響應有多遲鈍），$d$ 是一個固定擾動（disturbance）——水流（current）或風（wind）——它的作用就跟一個卡在偏移位置的舵一模一樣。讀一下穩態：令 $\dot r = 0$，這艘船就會以 $r_\infty = K(\delta+d)$ 永遠轉下去。<em>不存在</em>任何能讓 $\dot\psi = 0$ 的航向，除非 $r = 0$，也就是除非舵加擾動的總和為零。</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>項目</th><th>數值</th><th>意義</th></tr></thead>
+        <tbody>
+          <tr><td>$K$</td><td>0.6 (rad/s)/rad</td><td>10° 舵 → 約 6 °/s 穩態轉向</td></tr>
+          <tr><td>$T$</td><td>2.5 s</td><td>船體要花多久才醞釀到那個角速度</td></tr>
+          <tr><td>舵止（rudder stop）</td><td>±35°</td><td>致動器（actuator）飽和（saturation）</td></tr>
+          <tr><td>伺服機變化率（servo slew）</td><td>25 °/s</td><td>舵不可能瞬間跳動（第 07 章才要緊）</td></tr>
+          <tr><td>水流 $d$</td><td>≡ 4° 卡住的舵</td><td>持續推動船首（bow）的固定推力</td></tr>
+          <tr><td>迴圈速率</td><td>20 Hz（$dt=0.05$ s）</td><td>典型業餘 USV 的控制速率</td></tr>
+        </tbody>
+      </table></div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="open-loop"><span class="sec-no">2</span>開迴路：船自己會怎麼動</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>放開方向盤</small></div>
+      <p>把舵固定在一個角度，雙手放開，看著它。這裡沒有控制器——只有受控體。拖動滑桿，讀這兩格面板：上方是航向，下方是舵。</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>🧭</span> 開迴路航向（固定舵、無控制器）</div>
+        <canvas id="sim-openloop"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 該注意的地方</div>
+        <p>偏航角速度不會瞬間跳到它的最終值——它是<em>爬</em>上去的，在 $t=T=2.5$ s 時達到約 63%（這正是一階延遲（lag）的行為）。而航向<strong>永遠不會穩定</strong>：它會一直斜坡上升，因為航向是一個非零轉向速率的積分。把舵設成 0° 它才終於停下——但這樣你也哪兒都去不了了。</p>
+      </div>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>為什麼重要</small></div>
+      <p>所有靠速率轉向的載具都是這樣：船、四旋翼的偏航（yaw）、汽車航向、戰車砲塔。你永遠沒辦法在開迴路下「設定航向」；你得把舵的時機抓得分毫不差，再分毫不差地把它收回來。只要一有擾動，你就偏了。這正是我們要閉合迴路（close the loop）的理由。</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="two-facts"><span class="sec-no">3</span>導致一切的兩個事實</h2>
+      <p>把這兩點記在腦子裡——後面每一章都是在跟它們纏鬥：</p>
+      <ol>
+        <li><strong>舵控制的是速率，不是航向。</strong>你命令的是轉向；航向是累積出來的。所以船會帶著動量<em>衝進</em>目標。</li>
+        <li><strong>響應（response）有延遲。</strong>不管舵現在做了什麼，船體還是會把舊的動作再持續個幾秒（$T=2.5$ s）。</li>
+      </ol>
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 延遲＋累積＝超調</div>
+        <p>帶著動量衝進設定值，加上有延遲的響應，就是超調（overshoot）與振鈴（ringing）的萬用配方。好的控制器不會抹去這兩個事實——它會<em>預判</em>它們。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="control-law"><span class="sec-no">4</span>你將要實作的控制律</h2>
+      <div class="layer"><span class="step">②</span> 數學 <small>離散 PID</small></div>
+      <p>連續 PID 是 $u(t) = k_p e + k_i\!\int e\,dt + k_d \dfrac{de}{dt}$，誤差（error）$e = \psi_\text{set} - \psi$。我們在微控制器上每隔 $dt$ 跑一次，所以要離散化：積分變成累加和，微分（derivative）變成有限差分。</p>
+      <div class="math-box">$$ u_n = k_p e_n + k_i \underbrace{\textstyle\sum_k e_k\,dt}_{\text{積分}} + k_d \underbrace{\frac{e_n - e_{n-1}}{dt}}_{\text{微分}}, \qquad u \leftarrow \mathrm{clamp}(u,\,-\delta_\max,\,+\delta_\max) $$</div>
+
+      <div class="codeblock">
+        <div class="code-head">控制步驟（每個 dt） <span class="lang">虛擬碼</span></div>
+<pre><code class="language-python">error      = wrap(setpoint - heading)        # rad，永遠先纏繞（第 07 章）
+integral  += error * dt                       # rad·s，跨呼叫持續保留
+derivative = (error - prev_error) / dt        # rad/s
+
+u = kp*error + ki*integral + kd*derivative    # 舵的 rad 數
+u = clamp(u, -RUDDER_MAX, +RUDDER_MAX)
+prev_error = error
+</code></pre>
+      </div>
+
+      <p>這三個增益都有<em>單位</em>，從物理上去讀它們，能讓整定少很多神祕感：</p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>增益</th><th>單位</th><th>讀作</th></tr></thead>
+        <tbody>
+          <tr><td>$k_p$</td><td>rad 舵 / rad 誤差</td><td>「我偏差每一度，要打多少舵」</td></tr>
+          <tr><td>$k_i$</td><td>rad 舵 / (rad·s)</td><td>「我對<em>持續存在</em>的誤差施壓的力道有多大」</td></tr>
+          <tr><td>$k_d$</td><td>rad 舵 / (rad/s)</td><td>「擺動每秒一度，要打多少舵」</td></tr>
+        </tbody>
+      </table></div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="by-hand"><span class="sec-no">5</span>手算一個時間步</h2>
+      <p>操船途中的一個快照，增益 $k_p=2,\ k_i=0.2,\ k_d=3$：航向 60°、設定值（setpoint）90°、前一次誤差 31°、目前為止的積分量 0.80 rad·s。</p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>步驟</th><th>計算</th><th>結果</th></tr></thead>
+        <tbody>
+          <tr><td>error</td><td>wrap(90°−60°)=30°</td><td>0.5236 rad</td></tr>
+          <tr><td>P</td><td>2 × 0.5236</td><td><strong>+1.047 rad</strong>（60°）</td></tr>
+          <tr><td>integral</td><td>0.80 + 0.5236×0.05</td><td>0.8262 rad·s</td></tr>
+          <tr><td>I</td><td>0.2 × 0.8262</td><td><strong>+0.165 rad</strong>（9.5°）</td></tr>
+          <tr><td>derivative</td><td>(0.5236 − 0.5411)/0.05</td><td>−0.349 rad/s</td></tr>
+          <tr><td>D</td><td>3 × (−0.349)</td><td><strong>−1.047 rad</strong>（−60°）</td></tr>
+          <tr><td>總和</td><td>1.047 + 0.165 − 1.047</td><td>0.165 rad = <strong>9.5°</strong></td></tr>
+        </tbody>
+      </table></div>
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 再讀一次這個結果</div>
+        <p>船離設定值還有 30°，可是 P 項與 D 項<em>恰好互相抵消</em>，控制器幾乎是在滑行。船首已經以 20 °/s 收進來——再用力推只會超調得更兇。<strong>那個抵消就是阻尼（damping）。</strong>單靠 P 會命令出 60°，被箝位（clamp）到 35°，全速衝進超調。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="the-class"><span class="sec-no">6</span>用程式碼寫出 PID</h2>
+      <div class="layer"><span class="step">③</span> 程式碼 <small>每一行都讀</small></div>
+      <p>這是控制器寫成一個小而可重用的類別——跟你會放進 ROS 2 節點（node）的形狀一模一樣。其中的狀態（<code>integral</code>、<code>prev_error</code>）正是讓它成為一個控制器、而不只是一條公式的關鍵：它會記憶。</p>
+      <div class="codeblock">
+        <div class="code-head">pid_controller.py <span class="lang">Python</span></div>
+<pre><code class="language-python">class PID:
+    def __init__(self, kp, ki, kd, output_limits=(-1.0, 1.0)):
+        self.kp, self.ki, self.kd = kp, ki, kd
+        self.out_min, self.out_max = output_limits
+        self.integral = 0.0
+        self.prev_error = None          # None = 尚無前一次取樣
+
+    def reset(self):
+        """控制器在關閉後重新接管時呼叫。"""
+        self.integral = 0.0
+        self.prev_error = None
+
+    def update(self, error, dt):
+        """一個控制步驟。error 已經做過角度纏繞（rad）。"""
+        p = self.kp * error
+        self.integral += error * dt
+        i = self.ki * self.integral
+        d = 0.0 if self.prev_error is None else self.kd * (error - self.prev_error) / dt
+        self.prev_error = error
+        u = p + i + d
+        return max(self.out_min, min(self.out_max, u))   # 箝位
+</code></pre>
+      </div>
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> <code>update()</code> 裡頭藏著兩個設計選擇</div>
+        <p>這個版本是誠實的骨架。<strong>抗積分飽和（anti-windup）</strong>（第 05 章）與<strong>對量測值微分（derivative-on-measurement）</strong>（第 06 章）都是你之後要加進這裡的決定。我們會先碰上促成每一項的 bug，再去修它們。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>換你了</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="pid01-why-ramp">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">在開迴路模擬裡，航向為什麼會一直斜坡上升、而不是穩定在某個角度？</div>
+        <ul class="ex-options">
+          <li data-correct="false">這個模型不穩定——任何舵都會讓它發散爆掉。</li>
+          <li data-correct="true">航向是一個非零偏航角速度的積分，所以它會無上界地累積。</li>
+          <li data-correct="false">擾動會隨時間不斷變大。</li>
+          <li data-correct="false">舵的變化率限制讓它停不下來。</li>
+        </ul>
+        <div class="ex-explain">固定的舵給出固定的穩態偏航角速度 $r_\infty = K\delta$。於是航向 $\psi = \int r\,dt$ 永遠線性爬升。只有 $r = 0$（淨舵為零）才能讓它停下——這正是為什麼你需要回授（feedback）才能<em>維持</em>一個航向。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="pid01-steady-rate" data-answer="6.0" data-tol="0.2">
+        <div class="ex-head"><span class="badge">Q2</span> 算一算</div>
+        <div class="ex-q">在 $K = 0.6$ (rad/s)/rad、舵固定為 $10° = 0.1745$ rad 時，穩態偏航角速度是多少<strong>度每秒</strong>？（提示：$r_\infty = K\delta$，再換算單位。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">°/s</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$r_\infty = 0.6 \times 0.1745 = 0.1047$ rad/s $= 6.0$ °/s。船體在 $T = 2.5$ s 後達到約 63%（3.8 °/s），$3T$ 後約 95%。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="pid01-discretize">
+        <div class="ex-head"><span class="badge">Q3</span> 推導——把積分項離散化</div>
+        <div class="ex-q">連續的 I 項是 $k_i\int_0^t e(\tau)\,d\tau$。請說明它如何在程式裡變成累加和 <code>integral += error*dt</code>，並指出哪一個變數必須在每次呼叫之間持續保留。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">在 $[0,t]$ 上的定積分，就是 $e(\tau)$ 之下的面積。用寬 $dt$、高 $e_k$ 的矩形去近似那塊面積。</div></details>
+        <details class="ex-acc"><summary>看一個解答</summary><div class="acc-body">
+          <p>矩形（左黎曼和）近似：$\int_0^{t_n} e\,d\tau \approx \sum_{k=0}^{n} e_k\,dt$。每一步都在前一個總和上加一個矩形 $e_n\,dt$，這正是 <code>integral += error*dt</code>。那個<strong>累加器 <code>self.integral</code> 必須跨 <code>update()</code> 呼叫持續保留</strong>——它<em>就是</em>控制器對「誤差已經滯留多久」的記憶。每次控制器重新接管時就把它重置（<code>reset()</code>），否則幾分鐘前留下的陳舊累加和會變成一個積分飽和（windup）bug。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章回顧</div>
+        <p>這艘船是一個一階 Nomoto 受控體：舵 →（有延遲的）偏航角速度 →（積分而成的）航向，再加上一個固定水流。開迴路下它會永遠斜坡上升——你必須閉合迴路。離散 PID 控制律把 P、I、D 加總起來並箝位到舵的極限；它的狀態（<code>integral</code>、<code>prev_error</code>）就是它的記憶。下一章：只開 P 項，認識那根彈簧。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+<script src="../../assets/pid-sim.js"></script>
+<script>EM.pidSim("sim-openloop", EM.pidPresets.openLoop());</script>
+</body>
+</html>

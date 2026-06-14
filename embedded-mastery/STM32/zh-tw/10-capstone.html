@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>大師級總整合專題：使用 PID 的即時馬達控制 — Embedded Mastery</title>
+<link rel="stylesheet" href="../../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../../assets/styles.css">
+</head>
+<body class="track-stm32" data-course="embedded" data-track="stm32" data-chapter="10-capstone">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">STM32 · 第 10 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">STM32 學習軌 · 第 10 章 · 大師級</div>
+        <h1>大師級總整合專題：使用 PID 的即時馬達控制</h1>
+        <p>這個學習軌的所有內容，其實都是一台機器的零件。現在我們要把它們組裝起來：一個正交編碼器（quadrature encoder）餵資料給計時器、一個在中斷中以固定速率執行的 PID、用 PWM 驅動 H 橋（H-bridge），以及透過 UART+DMA 串流送出的遙測資料（telemetry）—— 一個閉迴路直流馬達轉速控制器，在外界不斷干擾下仍能守住設定值（setpoint）。這是全套課程的壓軸大戲，在這裡時脈、計時器、中斷與 DMA 不再只是各自獨立的主題，而是融合成一個<em>系統</em>。</p>
+        <div class="meta">
+          <span>⏱ ~60 分鐘</span><span>🧠 控制理論</span><span>⚡ 完整韌體</span><span>🔧 調校與除錯</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="system-overview"><span class="sec-no">1</span>整台機器，就在一個迴圈裡</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先把整幅圖建立起來</small></div>
+      <p>馬達很固執。用固定電壓叫它「轉到 3000 RPM」，它只會乖乖照辦到某個條件改變為止 —— 負載變重、繞線變熱、電池電壓下降 —— 接著它就會漂移。<strong>開迴路</strong>（open-loop）控制（選一個工作週期然後祈禱它聽話）無法回擊。解法是工程學裡最古老的點子：<em>量測輸出、跟你想要的值比較、修正兩者的差，並且持續不斷地做。</em>那就是<strong>閉迴路</strong>（closed loop），而位於中央的控制器就是 <strong>PID</strong>。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話模型</div>
+        <p>回授控制器一秒鐘轉動<strong>量測 → 比較 → 修正</strong>這個輪子好幾千次，每次只把致動器（actuator）推動剛剛好的量，使<em>誤差</em> —— 設定值與現實之間的落差 —— 趨近於零。</p>
+      </div>
+
+      <p>下面是整個系統，以控制迴路方塊圖呈現。把訊號從頭到尾追蹤一次，你會看到這個學習軌的每一章都掛上了一個職稱：</p>
+
+      <div class="mermaid">
+flowchart LR
+    SP([設定值<br/>RPM 目標]) --> SUM(( + / − ))
+    SUM -- "誤差 e" --> PID["PID 控制器<br/>(控制 ISR, Ts=1ms)"]
+    PID -- "u → 工作週期 + 方向" --> PWM["TIM1 PWM<br/>+ H 橋"]
+    PWM -- "電壓" --> M(["直流馬達"])
+    M -- "軸" --> ENC["正交<br/>編碼器"]
+    ENC --> CNT["TIM2 編碼器模式<br/>→ 計數 → RPM"]
+    CNT -- "量測 RPM" --> SUM
+    PID -. "遙測" .-> UART["UART + DMA<br/>→ 主機"]
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 誰做什麼（整個學習軌，組裝完成）</div>
+        <p><strong>第 2 章 — 時脈：</strong>那個替一切計時的 84&nbsp;MHz 計時器時脈。<br>
+        <strong>第 4/5 章 — 計時器與中斷：</strong>一個計時器以<em>固定</em>速率觸發控制 ISR；另一個計數編碼器邊緣；第三個產生 PWM。<br>
+        <strong>第 5 章 — 編碼器與 PWM 模式：</strong>編碼器模式下的 TIM2 是轉速感測器；PWM 模式下的 TIM1 是油門。<br>
+        <strong>第 7/8 章 — UART 與 DMA：</strong>遙測資料離開晶片，不需要 CPU 在旁照看。<br>
+        <strong>本章 — PID：</strong>把它們串成一個迴圈的大腦。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="requirements"><span class="sec-no">2</span>需求與模組地圖</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先有規格再碰矽晶</small></div>
+      <p>在動任何一個暫存器之前，先把「好」的定義釘死。轉速控制器有可量測的需求，而它們會驅動後面所有的選擇 —— 時脈速率、取樣週期，甚至是哪個計時器分配到哪裡。</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>需求</th><th>目標</th><th>為何重要</th></tr></thead>
+        <tbody>
+          <tr><td>控制速率 <span>$f_s = 1/T_s$</span></td><td><code>1 kHz</code>（Ts = 1 ms）</td><td>相對於馬達的機械時間常數要夠快；固定下來才能有穩定的積分／微分</td></tr>
+          <tr><td>穩態誤差</td><td><code>≈ 0 RPM</code></td><td>這正是積分項的全部工作</td></tr>
+          <tr><td>安定時間（settling time）</td><td>對步階輸入 &lt; 200 ms</td><td>感覺「俐落」而不拖泥帶水</td></tr>
+          <tr><td>過衝（overshoot）</td><td>&lt; 10 %</td><td>保護機構；限制電流尖峰</td></tr>
+          <tr><td>遙測速率</td><td><code>50–100 Hz</code></td><td>足以畫出步階響應圖；透過 DMA 成本低廉</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p>這份韌體由四個彼此協作的模組構成。要讓它們保持解耦 —— PID 不該知道自己正在驅動一個 H 橋，而編碼器讀取器也不該知道 PID 的存在。乾淨的接縫，正是讓你能換馬達或重新調校而不必重寫一切的關鍵。</p>
+
+      <div class="mermaid">
+flowchart TB
+    subgraph APP["應用層"]
+        MAIN["main(): 設定 + 遙測"]
+        ISR["TIM6 控制 ISR<br/>@ 1 kHz"]
+    end
+    subgraph DRV["驅動程式"]
+        ENC["encoder_read_rpm()"]
+        MOT["motor_set(duty, dir)"]
+        TEL["telemetry_send_dma()"]
+        PID["pid_update(e)"]
+    end
+    ISR --> ENC
+    ISR --> PID
+    PID --> MOT
+    ISR --> TEL
+    MAIN --> ISR
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> STM32F4 上的計時器分配</div>
+        <p>我們使用 Nucleo 等級的零件（例如 <strong>STM32F411</strong>，Cortex-M4 @ 100&nbsp;MHz）。<strong>TIM2</strong>（32 位元，掛在 APB1 上）= 編碼器計數器。<strong>TIM1</strong>（進階型，掛在 APB2 上）= 給 H 橋用的互補式 PWM。<strong>TIM6</strong>（基本型）= 1&nbsp;kHz 的控制迴路節拍。三個計時器、三項工作 —— 互不爭用。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="measuring-speed"><span class="sec-no">3</span>量測轉速：從邊緣到 RPM</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>數齒</small></div>
+      <p>一個鎖在馬達軸上的正交編碼器會輸出兩個方波 <strong>A</strong> 與 <strong>B</strong>，相位差 90°。相位的先後順序告訴你方向；邊緣計數告訴你距離。在<strong>編碼器模式</strong>（第 5 章）下，計時器的硬體會免費替你完成解碼：每一個 A/B 邊緣都會讓 <code>TIMx-&gt;CNT</code> 遞增或遞減。CPU 從不需要為每個邊緣處理一次中斷 —— 它只要讀一個早已存好位置的暫存器即可。要得到<em>轉速</em>，我們每個控制週期取樣那個計數器一次，看看它移動了多少。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>誠實地推導 RPM</small></div>
+      <p>令 <span>$\text{CPR}$</span> 為編碼器的<strong>每轉計數（counts per revolution）</strong>。資料手冊通常標的是<em>線數</em>（PPR，每轉脈衝數）；在 4 倍正交解碼下，計時器會計入兩個通道的每一個邊緣，因此</p>
+
+      <div class="math-box">
+        $$ \text{CPR} = 4 \times \text{PPR} $$
+      </div>
+
+      <p>假設軸在一個控制週期 <span>$T_s$</span>（秒）內轉過 <span>$\Delta\text{counts}$</span>，而馬達與輸出之間夾著一個減速比為 <span>$G$</span> 的齒輪箱（編碼器裝在馬達側）。在那段時間窗內，<em>輸出</em>軸的轉數是 <span>$\Delta\text{counts}/(\text{CPR}\cdot G)$</span>，而一分鐘有 <span>$60/T_s$</span> 個這樣的時間窗，所以：</p>
+
+      <div class="math-box">
+        $$ \text{RPM} = \frac{\Delta\text{counts}}{\text{CPR}\cdot G}\cdot\frac{60}{T_s} $$
+      </div>
+
+      <p>實例計算：一個 500 線的編碼器（<span>$\text{PPR}=500 \Rightarrow \text{CPR}=2000$</span>）、無齒輪箱（<span>$G=1$</span>）、<span>$T_s = 1\,\text{ms}$</span>。若一個節拍內 <span>$\Delta\text{counts}=100$</span>：</p>
+
+      <div class="math-box">
+        $$ \text{RPM} = \frac{100}{2000\cdot 1}\cdot\frac{60}{0.001} = 0.05 \times 60000 = 3000\ \text{RPM} $$
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱 —— 計數器回繞（wraparound）</div>
+        <p>差值的回繞必須正確。在一個 16 位元計數器上，從 <code>65530</code> 變到 <code>4</code> 是 <strong>+10</strong>，而不是 <strong>−65526</strong>。請計算 <code>delta = (int16_t)(now - prev)</code>，讓二補數減法替你完成回繞，或者使用 32 位元計時器（TIM2/TIM5）並搭配更寬的型別轉換。把這件事弄錯，你的「轉速」每溢位一次就會劇烈跳動一次。</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>每一行都讀過</small></div>
+      <div class="codeblock">
+        <div class="code-head">encoder.c <span class="lang">C / STM32 (CMSIS)</span></div>
+<pre><code class="language-c">// TIM2 已預先設定為編碼器模式（TI1+TI2，4 倍）。
+// CPR = 4 * PPR。Ts 是控制週期，單位為秒。
+#define ENC_CPR   2000.0f   // 500 線編碼器，4 倍正交
+#define ENC_GEAR  1.0f
+#define CTRL_TS   0.001f    // 1 kHz
+
+static uint32_t enc_prev = 0;
+
+// 每個控制週期恰好呼叫一次。
+float encoder_read_rpm(void) {
+    uint32_t now = TIM2-&gt;CNT;                 // 硬體解碼後的位置
+    // 帶正負號的差值，並做正確的 32 位元回繞
+    int32_t  d   = (int32_t)(now - enc_prev);
+    enc_prev = now;
+    // RPM = (d / (CPR*GEAR)) * (60 / Ts)
+    return ((float)d / (ENC_CPR * ENC_GEAR)) * (60.0f / CTRL_TS);
+}
+</code></pre>
+      </div>
+      <p>一次減法、一次型別轉換、一次乘法 —— 整個轉速感測器就這樣。所有的粗重活（去抖動邊緣、解碼方向）都由計時器周邊在 CPU 睡覺時完成。這正是用矽晶硬體取代輪詢接腳的全部意義所在。</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="pid-control"><span class="sec-no">4</span>PID 控制器</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>三個聲音在爭論</small></div>
+      <p>PID 是三項修正量的加總。<strong>比例（P）</strong>對<em>當下</em>的誤差做反應 —— 落差越大、推得越用力，但純 P 永遠會留下一個殘餘偏差。<strong>積分（I）</strong>記得<em>過去</em>的誤差，持續累加直到連一丁點穩態落差都被消滅 —— 它能消除偏差但可能造成過衝。<strong>微分（D）</strong>藉由對誤差變化的快慢做反應來<em>預測未來</em> —— 它能阻尼振盪，就像避震器一樣。調好它們各自的音量，你就會得到一個快速到達、平穩安定、且不會振鈴（ring）的控制器。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>先連續，再離散</small></div>
+      <p>以誤差 <span>$e(t) = \text{設定值} - \text{量測值}$</span> 表示，經典的連續控制律是：</p>
+
+      <div class="math-box">
+        $$ u(t) = K_p\,e(t) + K_i\!\int_0^{t}\! e(\tau)\,d\tau + K_d\,\frac{de(t)}{dt} $$
+      </div>
+
+      <p>微控制器無法連續積分 —— 它以寬度為 <span>$T_s$</span> 的離散節拍運行。把積分換成累加和（矩形法則），把微分換成後向差分。在第 <span>$k$</span> 步：</p>
+
+      <div class="math-box">
+        $$ u_k = K_p\,e_k \;+\; K_i\,T_s\!\sum_{j=0}^{k} e_j \;+\; K_d\,\frac{e_k - e_{k-1}}{T_s} $$
+      </div>
+
+      <p>仔細看 <span>$T_s$</span> 出現的位置：它<strong>乘</strong>進積分項，又<strong>除</strong>進微分項。如果 <span>$T_s$</span> 飄移，同樣的 <span>$K_i$</span> 與 <span>$K_d$</span> 就代表完全不同的意義。光是這一個事實，就是 §6 之所以存在的原因 —— 迴圈<em>必須</em>以固定速率打節拍，否則你的調校就是一場謊言。</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 抗積分飽和（Anti-windup）—— 積分項的黑暗面</div>
+        <p>當馬達飽和（工作週期釘死在 100%）時，輸出已經無法再變大，但 <span>$\sum e_j$</span> 仍持續堆積。等到設定值終於放鬆下來，那個臃腫的積分要花上好久才能消化，造成巨大的過衝。解藥是<strong>箝位（clamping）</strong>：只要輸出飽和就停止累加，並把積分限制在實際能產生合法輸出的範圍內：</p>
+        <p>$$ I_{\min} \le K_i\,T_s\!\sum e_j \le I_{\max}, \qquad I_{\max}=u_{\max} $$</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>更新函式</small></div>
+      <div class="codeblock">
+        <div class="code-head">pid.c <span class="lang">C / STM32</span></div>
+<pre><code class="language-c">typedef struct {
+    float kp, ki, kd;     // 增益
+    float ts;             // 取樣週期 [s]
+    float integ;          // 持續累加的積分項（已乘上 ki*ts）
+    float prev_e;         // e_{k-1}
+    float out_min, out_max;
+} pid_t;
+
+float pid_update(pid_t *p, float setpoint, float measured) {
+    float e = setpoint - measured;             // e_k
+
+    float P = p-&gt;kp * e;                        // 比例
+    p-&gt;integ += p-&gt;ki * p-&gt;ts * e;              // 累加 Ki*Ts*Σe
+    // 在使用之前先箝位積分（抗積分飽和）
+    if (p-&gt;integ &gt; p-&gt;out_max) p-&gt;integ = p-&gt;out_max;
+    if (p-&gt;integ &lt; p-&gt;out_min) p-&gt;integ = p-&gt;out_min;
+    float D = p-&gt;kd * (e - p-&gt;prev_e) / p-&gt;ts; // 後向差分
+    p-&gt;prev_e = e;
+
+    float u = P + p-&gt;integ + D;
+    if (u &gt; p-&gt;out_max) u = p-&gt;out_max;        // 箝位輸出
+    if (u &lt; p-&gt;out_min) u = p-&gt;out_min;
+    return u;                                   // 帶正負號：正負號 = 方向
+}
+</code></pre>
+      </div>
+      <p>請注意 <code>u</code> 是<em>帶正負號</em>的。它的大小代表「用多大力」；它的正負號代表「往哪個方向」。那個正負號，正是 H 橋接下來所需要的。</p>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pwm-hbridge"><span class="sec-no">5</span>把 <em>u</em> 變成電壓：PWM 與 H 橋</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>大小與方向</small></div>
+      <p>PID 交給我們一個帶正負號的數。馬達需要兩樣東西才能依此行動：<strong>多少</strong>平均電壓（由 PWM 工作週期設定）以及<strong>哪個極性</strong>（由 H 橋的開關模式設定）。我們把 <code>u</code> 拆成 <code>|u|</code> → 工作週期，以及 <code>sign(u)</code> → 方向接腳。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>從 PWM 暫存器算工作週期</small></div>
+      <p>承第 5 章：計時器計數到 <span>$\text{ARR}$</span>，而比較暫存器 <span>$\text{CCR}$</span> 設定工作週期。PWM 頻率與工作週期為：</p>
+
+      <div class="math-box">
+        $$ f_{\text{pwm}} = \frac{f_{\text{tim}}}{(\text{PSC}+1)(\text{ARR}+1)}, \qquad D = \frac{\text{CCR}}{\text{ARR}+1} $$
+      </div>
+
+      <p>在時脈為 <span>$f_{\text{tim}}=84\,\text{MHz}$</span>（APB2 計時器時脈）的 TIM1 上，選擇 <span>$\text{PSC}=0$</span> 與 <span>$\text{ARR}=4199$</span> 可得 <span>$f_{\text{pwm}} = 84{\times}10^6/4200 = 20\,\text{kHz}$</span> —— 高於可聽範圍，所以馬達不會發出嘯叫，而且夠精細，使得 <span>$\text{CCR}\in[0,4200]$</span> 能提供約 0.024% 的工作週期解析度。</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 實際案例 —— 為什麼是 20 kHz 而不是 1 kHz</div>
+        <p>無人機電調（ESC）、電動自行車控制器、以及 CNC 主軸驅動器，幾乎全部都把馬達 PWM 跑在 16–30&nbsp;kHz，只為一個理由：人類聽覺的上限大約是 20&nbsp;kHz。把切換頻率推到那之上，磁致伸縮（magnetostriction）的「嘯叫」就會消失在寂靜中。低於那之下，工作台上每一架四旋翼都在尖叫。控制<em>迴路</em>仍然跑在 1&nbsp;kHz；只有 PWM 載波是快的。在腦中要把這兩個速率分開。</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>拆分正負號與大小</small></div>
+      <div class="codeblock">
+        <div class="code-head">motor.c <span class="lang">C / STM32</span></div>
+<pre><code class="language-c">#define PWM_ARR   4199u            // 20 kHz @ 84 MHz，PSC=0
+
+// u 是帶正負號的 PID 輸出，此處已縮放至 |u| 落在 [0, 1]。
+void motor_set(float u) {
+    // 方向：驅動 H 橋的致能接腳
+    if (u &gt;= 0.0f) {
+        GPIOA-&gt;BSRR = (1u &lt;&lt; 8);          // IN1 = 1  (正轉)
+        GPIOA-&gt;BSRR = (1u &lt;&lt; (9 + 16));   // IN2 = 0  (重置 bit 9)
+    } else {
+        GPIOA-&gt;BSRR = (1u &lt;&lt; (8 + 16));   // IN1 = 0
+        GPIOA-&gt;BSRR = (1u &lt;&lt; 9);          // IN2 = 1  (反轉)
+        u = -u;                          // 取絕對值
+    }
+    if (u &gt; 1.0f) u = 1.0f;
+    // 大小 -&gt; CCR。  D = CCR/(ARR+1)  =&gt;  CCR = D*(ARR+1)
+    TIM1-&gt;CCR1 = (uint32_t)(u * (PWM_ARR + 1));
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱 —— 直通短路（shoot-through）</div>
+        <p>H 橋的每一臂有兩個電晶體。如果某一臂的上半與下半曾經<em>同時</em>導通，你就會透過它們把電源短路 —— 那是一種「直通短路」，能在數微秒內把整座橋汽化。真正的閘極驅動器會在切換之間插入<strong>死區時間（dead-time）</strong>（數百奈秒，期間兩者皆關閉）。TIM1 透過 <code>BDTR</code> 暫存器的 <code>DTG</code> 欄位，以硬體產生這段死區時間。永遠不要用沒有死區時間的裸 GPIO 去驅動半橋。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="fixed-rate-loop"><span class="sec-no">6</span>固定速率的控制迴路</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>節拍器</small></div>
+      <p>整個迴圈都活在一個每隔 <span>$T_s$</span> 觸發一次的計時器中斷裡。不是「大概每毫秒、等主迴圈有空時」—— 而是<em>恰好</em>每毫秒、毫無抖動（jitter），因為硬體計時器（TIM6）產生中斷的方式與 CPU 此刻在做什麼無關。在 ISR 內部我們執行那三個步驟然後離開。其他所有事情（遙測格式化、命令解析）都發生在較慢的主迴圈裡。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 為何固定的 <span>$T_s$</span> 沒有妥協餘地</div>
+        <p>回想離散控制律：積分項是 <span>$K_i T_s \sum e$</span>，而微分項是 <span>$K_d (e_k - e_{k-1})/T_s$</span>。兩者都<strong>直接隨 <span>$T_s$</span> 縮放</strong>。如果週期抖動 —— 比方說 ISR 偶爾被一個忙碌的 <code>printf</code> 延遲 —— 那麼有效的 <span>$K_i$</span> 與 <span>$K_d$</span> 也會跟著抖動。一個為 1&nbsp;ms 調好的控制器，在 1.3&nbsp;ms 時行為會不同：微分的踢力減弱、積分過度累加，一個原本穩定的迴圈可能開始振鈴、甚至變得不穩定。固定的 <span>$T_s$</span> 才能讓你調好的那套數學，真正<em>就是</em>實際運行的那套數學。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>產生 1 kHz 的節拍</small></div>
+      <p>在這個零件上，掛在 APB1 的 TIM6 看到的是 84&nbsp;MHz 的計時器時脈。要做到 1&nbsp;kHz 的更新，我們要 <span>$(\text{PSC}+1)(\text{ARR}+1) = f_{\text{tim}}/f_s$</span>：</p>
+
+      <div class="math-box">
+        $$ (\text{PSC}+1)(\text{ARR}+1) = \frac{84\times10^6}{1000} = 84000 $$
+      </div>
+
+      <p>選 <span>$\text{PSC}=83$</span>（除以 84 → 1&nbsp;MHz 的節拍）與 <span>$\text{ARR}=999$</span>（數 1000 個節拍 → 1&nbsp;ms）。乾淨、精確，凌晨 3 點也能在腦中重新推導出來。</p>
+
+      <div class="mermaid">
+sequenceDiagram
+    participant T as TIM6 1kHz
+    participant ISR as 控制 ISR
+    participant M as 主迴圈
+    T->>ISR: 每 1 ms 一次 UPDATE 中斷
+    ISR->>ISR: 讀 RPM、e、pid_update、motor_set
+    ISR->>M: 設定遙測就緒旗標
+    M->>M: 格式化 + DMA 送出（慢，~50 Hz）
+    Note over ISR,M: ISR 短小且具決定性；<br/>粗重工作留在主迴圈
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="full-firmware"><span class="sec-no">7</span>完整整合的韌體</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>每一行都讀過</small></div>
+      <p>下面是控制 ISR —— 跳動的心臟。它刻意做得極小：三個驅動程式呼叫加上一個旗標。決定性來自在中斷內部做得<em>更少</em>，而不是更多。</p>
+
+      <div class="codeblock">
+        <div class="code-head">control.c <span class="lang">C / STM32 (CMSIS)</span></div>
+<pre><code class="language-c">volatile float g_setpoint_rpm = 0.0f;   // 由主機下達命令
+volatile float g_measured_rpm = 0.0f;   // 最新量測值（供遙測用）
+volatile uint8_t g_tlm_ready  = 0;      // ISR -&gt; 主迴圈的交握
+
+static pid_t pid = {
+    .kp = 0.0008f, .ki = 0.012f, .kd = 0.00003f,
+    .ts = CTRL_TS, .integ = 0.0f, .prev_e = 0.0f,
+    .out_min = -1.0f, .out_max = 1.0f
+};
+
+// TIM6 以「恰好」1 kHz 觸發此函式。讓它保持短小、分支少。
+void TIM6_DAC_IRQHandler(void) {
+    if (TIM6-&gt;SR &amp; TIM_SR_UIF) {        // 確認這是更新事件
+        TIM6-&gt;SR &amp;= ~TIM_SR_UIF;        // 清除中斷旗標（W0C）
+
+        float rpm = encoder_read_rpm();           // 1. 量測
+        float u   = pid_update(&amp;pid,
+                               g_setpoint_rpm, rpm); // 2. 計算
+        motor_set(u);                              // 3. 致動
+
+        g_measured_rpm = rpm;          // 發布給遙測使用
+        g_tlm_ready    = 1;            // 喚醒主迴圈的傳送者
+    }
+}
+</code></pre>
+      </div>
+
+      <p><code>main()</code> 啟動時脈與周邊，然後永遠循環，只做那些<em>緩慢</em>、非關鍵的工作：把遙測節流到約 50&nbsp;Hz，並透過 UART+DMA 送出去，讓 CPU 永遠不會卡在那條緩慢的序列線上（第 7/8 章）。</p>
+
+      <div class="codeblock">
+        <div class="code-head">main.c <span class="lang">C / STM32</span></div>
+<pre><code class="language-c">static char tlm[48];
+
+int main(void) {
+    clock_config_84mhz();      // 第 2 章：PLL -&gt; 84 MHz 計時器時脈
+    encoder_init_tim2();       // 第 5 章：TIM2 編碼器模式，4 倍
+    pwm_init_tim1_20khz();     // 第 5 章：TIM1 PWM + 死區時間（BDTR）
+    uart_dma_init();           // 第 7/8 章：USART2 TX 透過 DMA1
+    ctrl_timer_init_1khz();    // TIM6，PSC=83，ARR=999，啟用 IRQ
+
+    g_setpoint_rpm = 1500.0f;  // 示範：守住 1500 RPM
+
+    uint32_t div = 0;
+    for (;;) {
+        if (g_tlm_ready) {
+            g_tlm_ready = 0;
+            // 抽取 1 kHz -&gt; ~50 Hz，以免淹沒 UART
+            if (++div &gt;= 20) {
+                div = 0;
+                int n = snprintf(tlm, sizeof tlm, "%ld,%ld\n",
+                                 (long)g_setpoint_rpm,
+                                 (long)g_measured_rpm);
+                uart_dma_send((uint8_t *)tlm, n);  // 非阻塞
+            }
+        }
+        // CPU 此外都是閒置的：睡到下一個事件再說
+        __WFI();
+    }
+}
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 實際案例 —— 為什麼用 DMA 而不是 <code>printf</code></div>
+        <p>在 115200&nbsp;鮑率（baud）下，用阻塞式的 <code>HAL_UART_Transmit</code> 一個位元組一個位元組地推送約 14 位元組的遙測，會讓 CPU 停擺超過一毫秒 —— 長到足以<em>錯過下一個控制節拍</em>。把緩衝區交給 DMA，傳輸就會在背景進行，同時核心在 <code>__WFI()</code> 中沉睡。這正是量產馬達驅動、飛行控制器與實驗室儀器裡的固定模式：快速且具決定性的迴圈是神聖不可侵犯的，而緩慢的 I/O 永遠要卸載出去。打破這條規則，你的迴圈抖動（從而你的調校）就會土崩瓦解。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="tuning-debug"><span class="sec-no">8</span>調校與除錯</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>讓它真的乖乖聽話</small></div>
+      <p>增益不是從公式裡來的 —— 它是從方法裡來的。一套 Ziegler–Nichols 風格的程序，能給你一個合理的起點：</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>步驟</th><th>你做什麼</th><th>你觀察什麼</th></tr></thead>
+        <tbody>
+          <tr><td>1. 只用 P</td><td>設 <span>$K_i=K_d=0$</span>；逐步提高 <span>$K_p$</span> 直到轉速穩定地<em>振盪</em></td><td>持續振盪的起始點 → 那就是臨界增益 <span>$K_u$</span></td></tr>
+          <tr><td>2. 量測</td><td>記錄振盪週期 <span>$T_u$</span></td><td>遙測圖上波峰與波峰之間的週期</td></tr>
+          <tr><td>3. 套用</td><td>經典 ZN：<span>$K_p=0.6K_u$</span>，<span>$K_i=1.2K_u/T_u$</span>，<span>$K_d=0.075K_uT_u$</span></td><td>步階響應：上升、過衝、安定</td></tr>
+          <tr><td>4. 微調</td><td>憑感覺撥動：多加 <span>$K_d$</span> 來阻尼振鈴，減少 <span>$K_i$</span> 來削減過衝</td><td>過衝 &lt; 10%，安定 &lt; 200 ms</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p>最有用的單一診斷工具就是<strong>步階響應</strong>：對設定值下達一個突然的跳變，然後把量測 RPM 隨時間相對於命令值畫出來。它的形狀<em>就是</em>你的調校，一眼即可讀懂：</p>
+
+      <div class="mermaid">
+flowchart LR
+    A["步階命令"] --> B{響應形狀？}
+    B -- "緩慢、永遠到不了" --> C["Ki 太低"]
+    B -- "大過衝 + 振鈴" --> D["Kp/Ki 太高<br/>或 Kd 太低"]
+    B -- "雜訊多 / 抽搐" --> E["Kd 太高<br/>(放大了雜訊)"]
+    B -- "快速、小過衝、平穩" --> F["調好了！"]
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 從外部觀察迴圈</div>
+        <p>觀察一個運行中控制器的三扇窗，由便宜到貴：<strong>(1)</strong> UART+DMA 遙測串流 → 在序列繪圖器（serial plotter）中即時畫出來。<strong>(2)</strong> <strong>SWD/ITM</strong> —— 在 ISR 的開頭與結尾切換一個 GPIO 並用示波器量測；脈衝寬度<em>就是</em>你的 ISR 執行時間，而它的間距則證明了 <span>$T_s$</span> 毫無抖動。<strong>(3)</strong> 偵錯器對 <code>g_measured_rpm</code> 與 <code>pid.integ</code> 的即時監看（live-watch）—— 一個不斷爬升、永遠無法安定的積分，就是飽和（windup）的氣味。</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 常見的失效模式</div>
+        <p><strong>回授正負號搞錯</strong> —— 編碼器 A/B 接反，導致誤差修正反而<em>注入</em>能量：馬達瞬間衝到全速。解法：把計數差值取負，或交換通道。<br>
+        <strong>ISR 超時（overrun）</strong> —— 控制 ISR 花的時間超過 <span>$T_s$</span>；下一個節拍被錯過，而 <span>$T_s$</span> 悄悄地倍增。解法：縮小 ISR，把工作移到主迴圈。<br>
+        <strong>積分飽和（windup）</strong> —— 飽和之後恢復緩慢且過衝很大。解法：§4 的那個箝位。<br>
+        <strong>微分雜訊</strong> —— 一個有雜訊的編碼器讓 <span>$D$</span> 尖叫；請對量測值濾波，或降低 <span>$K_d$</span>。</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="extensions"><span class="sec-no">9</span>接下來往哪走：串級控制與電流限制</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>專業人士怎麼蓋</small></div>
+      <p>單一速度迴圈是地基；認真的驅動器會疊起多重迴圈。標準架構是<strong>串級（cascade）</strong>：一個外層的位置／速度 PID，其<em>輸出就是</em>一個跑得更快的內層電流（轉矩）PID 的設定值。內層迴圈直接限制電流 —— 而限制電流<em>就是</em>限制轉矩<em>就是</em>保護你的馬達與橋免於燒毀。</p>
+
+      <div class="mermaid">
+flowchart LR
+    SP([速度設定值]) --> S["速度 PID<br/>(1 kHz)"]
+    S -- "電流設定值" --> C["電流 PID<br/>(10 kHz)"]
+    C -- "工作週期" --> P["PWM + 橋"]
+    P --> M(["馬達"])
+    M -- "軸轉速" --> S
+    M -- "相電流<br/>(ADC 分流電阻)" --> C
+      </div>
+
+      <p>內層迴圈透過 ADC 從一個分流電阻（shunt resistor）讀取馬達電流，通常與 PWM 同步（在計數的底部取樣，此時電流穩定）。有了它，你就得到了硬性、快速的電流限制 —— 而你距離驅動每一台現代無刷馬達（從無人機到電動車）的<strong>磁場導向控制（FOC, field-oriented control）</strong>就只差一步了。你在這裡組裝起來的零件，正是 FOC 賴以建構的那些零件。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 這個模式可以一般化</div>
+        <p>用計時器／ADC 量測、在固定速率 ISR 中計算、用 PWM 致動、透過 DMA 遙測觀察。換掉被控對象（plant）—— 加熱器、無人機姿態、電池充電器、雷射功率 —— 而這副骨架<em>完全相同</em>。你學到的不只是馬達控制；你學到的是每一個即時控制系統的形狀。</p>
+      </div>
+
+      <!-- ============================================================ §10 -->
+      <h2 id="your-turn"><span class="sec-no">10</span>⑤ 換你上場</h2>
+      <div class="layer"><span class="step">⑤</span> 練習 <small>你來寫、你來決定</small></div>
+      <p>三道檢核：一道概念、一道計算、一段程式碼。你的進度會儲存在這台裝置上，並顯示在首頁。</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="stm10-fixed-rate">
+        <div class="ex-head"><span class="badge">Q1</span> 概念檢核</div>
+        <div class="ex-q">為什麼 PID 控制迴路必須以<strong>固定</strong>取樣週期 <span>$T_s$</span> 運行，而不能只是「等主迴圈有空就跑」？</div>
+        <ul class="ex-options">
+          <li data-correct="false">因為編碼器硬體只在固定排程下更新它的計數器</li>
+          <li data-correct="true">因為離散的積分項（$K_iT_s\sum e$）與微分項（$K_d\,\Delta e/T_s$）會隨 $T_s$ 縮放，所以抖動的週期會改變有效增益，可能讓一個調好的迴圈失穩</li>
+          <li data-correct="false">因為除非迴圈週期固定，否則無法產生 PWM</li>
+          <li data-correct="false">因為 UART+DMA 遙測需要固定的資料速率</li>
+        </ul>
+        <div class="ex-explain">積分項乘上 <span>$T_s$</span>，而微分項除以它。如果 <span>$T_s$</span> 漂移（例如一個阻塞的 <code>printf</code> 延遲了 ISR），那麼<em>有效的</em> <span>$K_i$</span> 與 <span>$K_d$</span> 也跟著漂移 —— 你精心調好的那個控制器，不再是實際運行的那個控制器，而一個穩定的迴圈可能開始振鈴或變得不穩定。編碼器、PWM 與遙測都能容忍抖動；唯獨<em>控制數學</em>不行。</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="stm10-rpm" data-answer="3000" data-tol="1">
+        <div class="ex-head"><span class="badge">Q2</span> 算算看</div>
+        <div class="ex-q">一個 500 線的編碼器（所以 $\text{CPR}=4\times500=2000$）裝在馬達軸上，無齒輪箱（$G=1$）。控制迴路跑在 1&nbsp;kHz（$T_s=0.001\,\text{s}$）。在一個控制週期內計數器前進了 $\Delta\text{counts}=100$。轉速是多少 <strong>RPM</strong>？請用 $\text{RPM} = \dfrac{\Delta\text{counts}}{\text{CPR}\cdot G}\cdot\dfrac{60}{T_s}$。</div>
+        <input class="ex-input" type="number" step="any" placeholder="RPM"><span class="ex-unit">RPM</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$\text{RPM} = \dfrac{100}{2000\cdot 1}\cdot\dfrac{60}{0.001} = 0.05 \times 60000 = 3000\ \text{RPM}$。分數 <span>$100/2000 = 0.05$</span> 是這個 1&nbsp;ms 時間窗內的轉數；乘上每分鐘 <span>$60/T_s = 60000$</span> 個時間窗，就得到 RPM。把 <span>$\Delta\text{counts}$</span> 減半，轉速就減半；把 <span>$T_s$</span> 加倍，同樣的差值讀出的 RPM 就只剩一半。</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="stm10-pid-fn">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰 —— 離散 PID 更新</div>
+        <div class="ex-q">寫一個 C 函式 <code>pid_update(pid_t *p, float setpoint, float measured)</code>，實作離散控制律 $u_k = K_p e_k + K_i T_s\sum e + K_d (e_k - e_{k-1})/T_s$，回傳一個箝位在 <code>[out_min, out_max]</code> 的帶正負號輸出，並包含積分的抗飽和箝位。假設此結構持有 <code>kp, ki, kd, ts, integ, prev_e, out_min, out_max</code>。</div>
+        <details class="ex-acc">
+          <summary>提示</summary>
+          <div class="acc-body">先計算 <code>e = setpoint - measured</code>。把積分以 <code>integ += ki*ts*e</code> 累加，並在使用它<em>之前</em>把 <code>integ</code> 箝位到輸出邊界（那就是抗積分飽和）。微分是 <code>kd*(e - prev_e)/ts</code> —— 記得之後要更新 <code>prev_e</code>。把三項加總、箝位總和、回傳。回傳值的正負號就是馬達方向。</div>
+        </details>
+        <details class="ex-acc">
+          <summary>顯示一種解法</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">pid.c <span class="lang">C / STM32</span></div>
+<pre><code class="language-c">float pid_update(pid_t *p, float setpoint, float measured) {
+    float e = setpoint - measured;             // e_k
+
+    float P = p-&gt;kp * e;                        // 比例
+
+    p-&gt;integ += p-&gt;ki * p-&gt;ts * e;              // Ki*Ts*Σe
+    if (p-&gt;integ &gt; p-&gt;out_max) p-&gt;integ = p-&gt;out_max;  // 抗積分飽和
+    if (p-&gt;integ &lt; p-&gt;out_min) p-&gt;integ = p-&gt;out_min;
+
+    float D = p-&gt;kd * (e - p-&gt;prev_e) / p-&gt;ts; // 後向差分
+    p-&gt;prev_e = e;                             // 為下一個節拍儲存
+
+    float u = P + p-&gt;integ + D;
+    if (u &gt; p-&gt;out_max) u = p-&gt;out_max;        // 輸出箝位
+    if (u &lt; p-&gt;out_min) u = p-&gt;out_min;
+    return u;   // |u| -&gt; PWM 工作週期，sign(u) -&gt; H 橋方向
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">是兩個箝位，不是一個：箝位<em>積分</em>，讓它無法累加到超過致動器所能輸出的程度；以及箝位<em>總輸出</em>到合法的工作週期範圍。儲存 <code>prev_e</code> 正是讓微分成為跨節拍真正差分的關鍵 —— 而這也正是迴圈必須以固定 <span>$T_s$</span> 運行的原因。</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> 本章回顧</div>
+        <p>你把整個 STM32 學習軌組裝成了一台閉迴路機器。你能在處理正確回繞的前提下，從編碼器計數推導出 RPM；能寫出離散 PID 控制律，並解釋為何固定的 <span>$T_s$</span> 是承重結構；能把一個帶正負號的控制輸出，在 20&nbsp;kHz 下拆分成 PWM 大小與 H 橋方向；能在一個具決定性的 1&nbsp;kHz 計時器 ISR 中運行整個迴圈，同時把遙測卸載給 UART+DMA；並能從步階響應來調校與除錯它。同一副骨架 —— 量測、在固定速率 ISR 中計算、致動、透過 DMA 觀察 —— 同樣驅動著加熱器、無人機與電動車馬達。那就是即時控制的形狀，而現在它屬於你了。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="回到頂端">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../../../assets/vendor/highlight.min.js"></script>
+<script src="../../../assets/katex/katex.min.js"></script>
+<script src="../../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../../assets/vendor/mermaid.min.js"></script>
+<script src="../../../assets/app.js"></script>
+</body>
+</html>

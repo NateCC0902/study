@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>暫存器層級的 GPIO：MODER、BSRR 與 HAL — Embedded Mastery</title>
+<link rel="stylesheet" href="../../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../../assets/styles.css">
+</head>
+<body class="track-stm32" data-course="embedded" data-track="stm32" data-chapter="03-gpio">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">STM32 · 第 03 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">STM32 學習路線 · 第 03 章 · 中階</div>
+        <h1>暫存器層級的 GPIO：MODER、BSRR 與 HAL</h1>
+        <p>在 Arduino 上，你寫下 <code>digitalWrite(13, HIGH)</code>，一支腳位就拉成高電位。那一行程式碼藏了十幾個硬體位元。在 STM32 上，我們要把引擎蓋完全掀開：透過寫入晶片真正會讀取的<em>確切</em>暫存器來設定一支腳位，並了解為什麼其中一個暫存器 ── <strong>BSRR</strong> ── 正是「正確韌體」與「只在中斷觸發時才咬你一口的海森堡蟲（heisenbug）」之間的分水嶺。接著我們會用 HAL 做出同樣的閃爍，並精準掌握 HAL 究竟替我們做了什麼。</p>
+        <div class="meta">
+          <span>⏱ 約 45 分鐘</span><span>🧠 暫存器模型</span><span>⚡ 裸機 GPIO</span><span>🔧 HAL vs CMSIS</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="ports-and-pins"><span class="sec-no">1</span>埠、腳位與暫存器檔案</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先建立整體圖像</small></div>
+      <p>STM32 的腳位不是讓你一支一支單獨定址的散亂電線。它們被組織成每組 16 支腳位的<strong>埠（port）</strong>：<code>GPIOA</code>、<code>GPIOB</code>……一直到最大型號上的 <code>GPIOK</code>。我們整章都會緊盯的那支腳位 ── Nucleo-F446 開發板上的綠色使用者 LED ── 是 <strong>PA5</strong>：A 埠、第 5 號腳位。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話模型</div>
+        <p>每個 GPIO 埠都是一<strong>小塊記憶體映射（memory-mapped）的暫存器</strong>；設定或驅動一支腳位，無非就是把正確的位元寫進該埠基底位址上正確的暫存器裡。</p>
+      </div>
+
+      <p>因為埠以 16 支為一組，硬體把全部 16 支腳位的控制塞進少數幾個 32 位元暫存器。每支腳位 2 位元 × 16 支腳位 = 32 位元 ── 剛好就是一個暫存器。這個算術不是巧合；這就是為什麼 <code>MODER</code>、<code>OSPEEDR</code> 和 <code>PUPDR</code> 全都是「每支腳位 2 位元」的暫存器，而 <code>OTYPER</code> 和 <code>IDR</code> 因為每支腳位只需 1 位元，所以上半部留著沒用。</p>
+
+      <p>在程式碼裡，一個埠就是一個疊在它基底位址上的 C <code>struct</code>。CMSIS（供應商提供的標頭檔集合）把 <code>GPIOA</code> 給你當成指向該結構的指標，於是 <code>GPIOA-&gt;MODER</code> 會直接解參考到晶片上。以下是你即將遇到的暫存器檔案，依宣告順序列出：</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>暫存器</th><th>位元 / 腳位</th><th>作用</th><th>第 <em>n</em> 支腳位使用</th></tr></thead>
+        <tbody>
+          <tr><td><code>MODER</code></td><td>2</td><td>方向：輸入 / 輸出 / 替代 / 類比</td><td>位元 [2n+1 : 2n]</td></tr>
+          <tr><td><code>OTYPER</code></td><td>1</td><td>輸出型式：推挽（push-pull）/ 開漏（open-drain）</td><td>位元 [n]</td></tr>
+          <tr><td><code>OSPEEDR</code></td><td>2</td><td>轉換率（slew-rate）/ 驅動速度</td><td>位元 [2n+1 : 2n]</td></tr>
+          <tr><td><code>PUPDR</code></td><td>2</td><td>內部上下拉：無 / 上拉 / 下拉</td><td>位元 [2n+1 : 2n]</td></tr>
+          <tr><td><code>IDR</code></td><td>1</td><td>輸入資料（讀取當下的腳位）</td><td>位元 [n]（唯讀）</td></tr>
+          <tr><td><code>ODR</code></td><td>1</td><td>輸出資料（被鎖存的驅動值）</td><td>位元 [n]</td></tr>
+          <tr><td><code>BSRR</code></td><td>2</td><td>對 <code>ODR</code> 位元進行原子式的設定 / 重設</td><td>設定：位元 [n] · 重設：位元 [n+16]</td></tr>
+          <tr><td><code>AFRL</code>/<code>AFRH</code></td><td>4</td><td>哪個周邊擁有這支腳位（AF0–AF15）</td><td>每支腳位一個 4 位元半位元組（nibble）</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱 ── 埠出生時沒有時脈</div>
+        <p>正如我們在<a href="02-clocks.html">第 02 章</a>反覆強調的，每個周邊喚醒時時脈都是<em>關閉</em>的。在啟用 GPIOA 時脈之前就去讀 <code>GPIOA-&gt;MODER</code>，你會得到一堆 0，而你寫進去的值會悄無聲息地消失。任何 STM32 程式裡，GPIO 的第一行永遠是 RCC 的時脈啟用。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="moder-math"><span class="sec-no">2</span>MODER：每支腳位兩位元的數學</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>推導位元位置</small></div>
+      <p><code>MODER</code> 是決定一支腳位<em>是什麼</em>的暫存器。每支腳位有一個 2 位元欄位，四個值分別是：</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>值</th><th>模式</th><th>意義</th></tr></thead>
+        <tbody>
+          <tr><td><code>00</code></td><td>輸入</td><td>高阻抗（Hi-Z）數位輸入（透過 <code>IDR</code> 讀取）</td></tr>
+          <tr><td><code>01</code></td><td>輸出</td><td>通用輸出（透過 <code>ODR</code>/<code>BSRR</code> 驅動）</td></tr>
+          <tr><td><code>10</code></td><td>替代（Alternate）</td><td>某個周邊擁有這支腳位（計時器、UART、SPI……）</td></tr>
+          <tr><td><code>11</code></td><td>類比（Analog）</td><td>ADC/DAC，或最低功耗的「斷開」</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p>第 <span>$n$</span> 支腳位的兩個位元位於位置 <span>$2n$</span>（低位）與 <span>$2n+1$</span>（高位）。整條規則就是這樣：</p>
+
+      <div class="math-box">
+        $$ \text{MODER field for pin } n \;=\; \text{bits } [\,2n+1 : 2n\,] $$
+      </div>
+
+      <p>對於我們在 <strong>PA5</strong> 上的 LED，代入 <span>$n=5$</span>：</p>
+
+      <div class="math-box">
+        $$ 2n = 10, \qquad 2n+1 = 11 \;\;\Rightarrow\;\; \text{PA5 uses MODER bits } [\,11:10\,] $$
+      </div>
+
+      <p>要把 PA5 設為輸出，我們需要在該欄位填入值 <code>01</code>。以原始的 32 位元字組來看，那就是把 <span>$1$</span> 左移進位元 10：</p>
+
+      <div class="math-box">
+        $$ \texttt{0b01} \ll 10 \;=\; 1 \times 2^{10} \;=\; 1024 \;=\; \texttt{0x00000400} $$
+      </div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 讀取-修改-寫回（read-modify-write）慣用法</div>
+        <p>你不能直接把 <code>1024</code> <em>寫入</em> <code>MODER</code> ── 那會把其餘 15 支腳位的欄位也清成 <code>00</code>。你必須<strong>先清除欄位，再設定它</strong>：先 <code>MODER &amp;= ~(0b11 &lt;&lt; 10)</code> 把 PA5 的兩個位元都歸零，再 <code>MODER |= (0b01 &lt;&lt; 10)</code> 寫入新值。先清除再設定，是任何多位元欄位的通用模式。</p>
+      </div>
+
+      <p>把這個位移一般化，你就得到了每一個暫存器巨集所建立的公式。對於 2 位元欄位，第 <span>$n$</span> 支腳位的位移是 <span>$2n$</span>；對於 4 位元的 <code>AFR</code> 半位元組則是 <span>$4n$</span>（再考慮低/高的拆分）。把這一家子背起來：</p>
+
+      <div class="math-box">
+        $$ \text{shift}_{\,k\text{-bit field}}(n) \;=\; k \cdot n, \qquad \text{mask} \;=\; \big(2^{k}-1\big) \ll k n $$
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="bsrr"><span class="sec-no">3</span>BSRR：為什麼原子式寫入很重要</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>你看不見的競爭條件</small></div>
+      <p>一旦腳位成為輸出，就有兩種方式可以改變它的電位。最顯而易見的是 <code>ODR</code> ── 輸出資料暫存器，每支腳位 1 位元。要設定 PA5，你會寫 <code>GPIOA-&gt;ODR |= (1 &lt;&lt; 5)</code>。看起來人畜無害。它其實是個陷阱。</p>
+
+      <p><code>|=</code> 不是單一的機器操作。CPU 必須把整個 32 位元的 <code>ODR</code> <strong>讀</strong>進一個暫存器，<strong>OR</strong> 上你的位元，再把結果<strong>寫</strong>回去 ── 三個步驟。如果在這個讀取與寫入<em>之間</em>有中斷觸發，而該 ISR 又剛好碰到同一個埠上的某支腳位，你的寫回會用一份過時的 <code>ODR</code> 副本，悄無聲息地把 ISR 的變更覆蓋掉。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱 ── 更新遺失（lost-update）競爭</div>
+        <p>主程式執行 <code>ODR |= (1&lt;&lt;5)</code>。它讀取 ODR，被中斷打斷，ISR 對另一支腳位執行 <code>ODR |= (1&lt;&lt;3)</code> 後返回。主程式恢復執行並把自己那份過時的值寫回 ── 第 3 號腳位剛剛就被<strong>清除</strong>了。沒有任何錯誤訊息。這個臭蟲一小時才出現一次，在現場發生，永遠不會在你的工作台上重現。這是最常見的裸機 GPIO 臭蟲。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>分成兩半的暫存器</small></div>
+      <p>STM32 用 <strong>BSRR</strong> ── 位元設定/重設暫存器（Bit Set/Reset Register）── 來解決這個問題。它是 32 位元、拆成兩半，而最關鍵的是它<strong>唯寫、無法讀取</strong>，所以根本沒有東西可以讀取-修改-寫回：</p>
+
+      <div class="math-box">
+        $$ \underbrace{\text{BR}_{15}\ldots\text{BR}_{0}}_{\text{bits }[31:16]\;\text{RESET}} \;\;\Big|\;\; \underbrace{\text{BS}_{15}\ldots\text{BS}_{0}}_{\text{bits }[15:0]\;\text{SET}} $$
+      </div>
+
+      <p>對位元 <span>$n$</span>（低半部）寫入 <code>1</code> 會<em>設定</em>第 <span>$n$</span> 支腳位。對位元 <span>$n+16$</span>（高半部）寫入 <code>1</code> 會<em>重設</em>它。在任何地方寫入 <code>0</code> 都不會有任何作用。所以對 PA5 而言：</p>
+
+      <div class="math-box">
+        $$ \text{set PA5: } \texttt{BSRR} = 1 \ll 5 = \texttt{0x0020}; \qquad \text{reset PA5: } \texttt{BSRR} = 1 \ll (5{+}16) = \texttt{0x0020\,0000} $$
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 為什麼這在構造上就是正確的</div>
+        <p>對 <code>BSRR</code> 的一次寫入是一條<strong>單一儲存指令（store）</strong>，硬體會以原子方式套用它 ── 它只會碰到你寫入 <code>1</code> 的那些位元，其他每支腳位都不動。沒有讀取步驟，所以也沒有讓中斷得以破壞的時間窗。<strong>請一律用 BSRR 驅動輸出，絕不要用 <code>ODR |=</code>。</strong> HAL 的 <code>HAL_GPIO_WritePin</code> 內部用的正是 BSRR，原因就在這裡。</p>
+      </div>
+
+      <p>你甚至可以在一次寫入中對不同腳位同時設定與重設：<code>BSRR = (1&lt;&lt;5) | (1&lt;&lt;(3+16))</code> 會同時設定 PA5 並清除 PA3 ── 一次原子式儲存，兩支腳位。如果你在同一次寫入中對同一支腳位<em>同時</em>設定與重設，重設勝出：高半部具有優先權。</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="bitfield-map"><span class="sec-no">4</span>一支腳位，每個暫存器：位元欄位地圖</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>一次看見所有位元</small></div>
+      <p>以下是 PA5 穿過所有控制它的暫存器的軌跡。注意所有 2 位元暫存器在第 5 號腳位上都落在位元 [11:10]，1 位元暫存器只用第 5 號位元，而 BSRR 把設定（位元 5）與重設（位元 21）拆開。組態只在設定時寫入一次；在熱迴圈裡只會碰到 BSRR（以及輸入時的 IDR）。</p>
+
+      <div class="mermaid">
+flowchart TB
+    subgraph CFG["組態 — 設定時只寫一次"]
+        M["MODER 位元 11:10 = 01<br/>（輸出）"]
+        O["OTYPER 位元 5 = 0<br/>（推挽）"]
+        S["OSPEEDR 位元 11:10<br/>（轉換率）"]
+        P["PUPDR 位元 11:10 = 00<br/>（無上下拉）"]
+    end
+    subgraph RT["執行期 — 每次迴圈都寫"]
+        BS["BSRR 位元 5<br/>設定 PA5"]
+        BR["BSRR 位元 21<br/>重設 PA5"]
+        ID["IDR 位元 5<br/>讀取 PA5"]
+    end
+    CFG --> PIN(["PA5 — 實體腳位"])
+    BS --> PIN
+    BR --> PIN
+    PIN --> ID
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 位址是從哪來的？</div>
+        <p>在 STM32F446 上，GPIOA 的基底是 <code>0x40020000</code>，<code>MODER</code> 在偏移 <code>0x00</code>、<code>IDR</code> 在 <code>0x10</code>、<code>ODR</code> 在 <code>0x14</code>、<code>BSRR</code> 在 <code>0x18</code>。你永遠不會硬寫死這些值 ── CMSIS 標頭檔 <code>stm32f4xx.h</code> 宣告了 <code>GPIO_TypeDef</code> 結構，讓編譯器去計算它們。<code>GPIOA-&gt;BSRR</code> <em>就是</em> <code>*(volatile uint32_t*)(0x40020000 + 0x18)</code>。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="register-blink"><span class="sec-no">5</span>從暫存器讓 PA5 閃爍，逐行詳註</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>逐行閱讀</small></div>
+      <p>現在我們把一切組合起來：啟用時脈、把 PA5 設定成無上下拉的推挽輸出，並用 BSRR 永遠切換它。這是純 CMSIS ── 沒有 HAL、沒有 Arduino ── 而且正是晶片實際執行的內容。</p>
+
+      <div class="codeblock">
+        <div class="code-head">blink_reg.c <span class="lang">C / CMSIS</span></div>
+<pre><code class="language-c">#include "stm32f4xx.h"   // CMSIS：GPIOA、RCC、暫存器位元遮罩
+
+#define LED_PIN  5       // PA5 = Nucleo-F446 上的綠色使用者 LED
+
+void delay(volatile uint32_t n) { while (n--) __NOP(); }
+
+int main(void) {
+    // 1) 時脈：GPIOA 掛在 AHB1 匯流排上。要先啟用它的時脈，
+    //    否則底下每一個寫入都會被未供時脈的周邊吞掉。
+    RCC-&gt;AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+
+    // 2) 模式：把 PA5 的 MODER[11:10] 設為 0b01（輸出）。
+    //    先清除這個 2 位元欄位，再 OR 上新值。
+    GPIOA-&gt;MODER &amp;= ~(0x3u &lt;&lt; (2 * LED_PIN));   // 清除位元 11:10
+    GPIOA-&gt;MODER |=  (0x1u &lt;&lt; (2 * LED_PIN));   // 01 = 輸出
+
+    // 3) 輸出型式：0 = 推挽（同時能驅動高電位「與」低電位）。
+    GPIOA-&gt;OTYPER &amp;= ~(0x1u &lt;&lt; LED_PIN);
+
+    // 4) 上下拉：00 = 無上拉/下拉（LED 兩者皆不需要）。
+    GPIOA-&gt;PUPDR &amp;= ~(0x3u &lt;&lt; (2 * LED_PIN));
+
+    while (1) {
+        // 設定 PA5 ── BSRR 的低半部。一次原子式儲存，無讀取。
+        GPIOA-&gt;BSRR = (1u &lt;&lt; LED_PIN);          // == 0x00000020
+        delay(800000);
+        // 重設 PA5 ── BSRR 的高半部，位元（pin + 16）。
+        GPIOA-&gt;BSRR = (1u &lt;&lt; (LED_PIN + 16));   // == 0x00200000
+        delay(800000);
+    }
+}
+</code></pre>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 每個區塊真正做了什麼</div>
+        <p><strong>(1)</strong> 翻動 <code>RCC-&gt;AHB1ENR</code> 裡的一個位元，把時脈接到 GPIOA。<strong>(2)</strong> 對 2 位元的 MODER 欄位先清除再設定，讓腳位成為受驅動的輸出。<strong>(3)</strong> 與 <strong>(4)</strong> 選擇推挽以及不接內部電阻。迴圈從不呼叫任何函式來「寫入」腳位 ── 它只是把一個常數存入 <code>BSRR</code>。那一次儲存<em>就是</em> digitalWrite，而且是原子式的。</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱 ── 缺少 <code>volatile</code></div>
+        <p><code>delay()</code> 的計數器刻意宣告為 <code>volatile</code>。少了它，會做最佳化的編譯器看見一個算不出任何可觀察結果的迴圈，就會把它<em>整個刪掉</em> ── 你的 LED 看起來永遠不閃。CMSIS 的暫存器結構本身就已宣告為 <code>volatile</code>，這正是為什麼 <code>GPIOA-&gt;BSRR = …</code> 永遠不會被最佳化掉。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="hal-equivalent"><span class="sec-no">6</span>用 HAL 做同一個閃爍 ── 以及 HAL 藏起了什麼</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>結果相同，視角不同</small></div>
+      <p>STM32 的 HAL（硬體抽象層，Hardware Abstraction Layer）把那些暫存器包進具名的結構與函式裡。以下是完全相同的閃爍。注意每一行 HAL 如何對應到你現在已經理解的暫存器寫入。</p>
+
+      <div class="codeblock">
+        <div class="code-head">blink_hal.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">#include "stm32f4xx_hal.h"
+
+int main(void) {
+    HAL_Init();
+    // __HAL_RCC_GPIOA_CLK_ENABLE() 展開後就是先前那「同一行」：
+    //   RCC-&gt;AHB1ENR |= RCC_AHB1ENR_GPIOAEN;  （外加一次回讀以同步）
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+
+    GPIO_InitTypeDef cfg = {0};
+    cfg.Pin   = GPIO_PIN_5;              // 位元遮罩 1&lt;&lt;5，而非數字 5
+    cfg.Mode  = GPIO_MODE_OUTPUT_PP;     // -&gt; MODER=01、OTYPER=0（推挽）
+    cfg.Pull  = GPIO_NOPULL;             // -&gt; PUPDR=00
+    cfg.Speed = GPIO_SPEED_FREQ_LOW;     // -&gt; OSPEEDR=00
+    HAL_GPIO_Init(GPIOA, &amp;cfg);          // 替我們做「先清除再設定」
+
+    while (1) {
+        HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);  // 讀 ODR、寫 BSRR
+        HAL_Delay(500);                          // 經由 SysTick 延遲 500 ms
+    }
+}
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> HAL 是一層薄手套，不是黑盒子</div>
+        <p><code>HAL_GPIO_Init</code> 對 <code>MODER</code>/<code>OTYPER</code>/<code>OSPEEDR</code>/<code>PUPDR</code> 所做的，正是你親手寫的那個「先清除再設定」。<code>HAL_GPIO_WritePin</code> 寫入 <code>BSRR</code>（設定在低半部、重設在高半部）。<code>HAL_GPIO_TogglePin</code> 讀取目前的 <code>ODR</code> 位元，再寫入 <code>BSRR</code> 相反的那一半。懂了這些暫存器，你就能讀懂 HAL 的原始碼、為它除錯，並在計較週期數的地方繞過它。</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱 ── <code>GPIO_PIN_5</code> 是遮罩，不是索引</div>
+        <p>HAL 的 <code>GPIO_PIN_5</code> 是 <code>(1 &lt;&lt; 5) = 0x20</code>，是一個位元遮罩 ── 不是整數 5。在 HAL 要遮罩的地方傳入數字 5，你會去設定到第 2 號腳位和第 0 號腳位（因為 <code>5 = 0b101</code>）。裸機那一側用的是索引 5 搭配明確的位移；HAL 用的是事先位移好的遮罩。別把兩者搞混。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="alternate-and-input"><span class="sec-no">7</span>替代功能與讀取按鈕</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>把腳位交給周邊</small></div>
+      <p>到目前為止，PA5 都只是一支由軟體驅動的普通輸出。但同一支腳位也可以改接到某個<em>周邊</em>：計時器的 PWM 通道、UART 的 TX 線、SPI 時脈。這就是 <code>MODER = 10</code>（替代）的意思 ── 而 <code>AFRL</code>/<code>AFRH</code> 則選擇腳位要路由到 16 種可能替代功能（AF0–AF15）中的<em>哪一個</em>。</p>
+
+      <p>每支腳位有一個 4 位元的半位元組。0–7 號腳位位於 <code>AFRL</code>（低位暫存器），8–15 號腳位位於 <code>AFRH</code>。PA5 的替代功能 1（AF1）是 TIM2_CH1 ── 我們在後面章節做 PWM 時會用到的計時器通道。要把 PA5 路由到某個周邊，你要把 <code>MODER=10</code> 並寫入 AF 半位元組：</p>
+
+      <div class="math-box">
+        $$ \text{AFR nibble shift for pin } n<8 \;=\; 4n \quad\Rightarrow\quad \text{PA5} \to \text{AFRL bits }[23:20] $$
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">af_pwm_pin.c <span class="lang">C / CMSIS</span></div>
+<pre><code class="language-c">// 把 PA5 路由到 TIM2_CH1（替代功能 AF1）以使用硬體 PWM。
+GPIOA-&gt;MODER  &amp;= ~(0x3u &lt;&lt; (2 * 5));   // 清除 MODER[11:10]
+GPIOA-&gt;MODER  |=  (0x2u &lt;&lt; (2 * 5));   // 10 = 替代（ALTERNATE）功能
+
+GPIOA-&gt;AFR[0] &amp;= ~(0xFu &lt;&lt; (4 * 5));   // AFR[0] 即 AFRL；清除半位元組[23:20]
+GPIOA-&gt;AFR[0] |=  (0x1u &lt;&lt; (4 * 5));   // AF1 = TIM2_CH1
+// 從這裡開始，是計時器（而非 CPU）擁有這支腳位的電壓。
+</code></pre>
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>現在來讀一個輸入</small></div>
+      <p>讀取是反過來的鏡像。把腳位設定為輸入（<code>MODER=00</code>），啟用上拉讓線路閒置時為高電位，然後讀取 <code>IDR</code> 的第 <span>$n$</span> 號位元。Nucleo 板上的使用者按鈕 B1 接到 PC13，按下時把線路拉到接地，所以「上拉 + 按下 = 0」是最自然的讀法。</p>
+
+      <div class="codeblock">
+        <div class="code-head">button.c <span class="lang">C / CMSIS</span></div>
+<pre><code class="language-c">RCC-&gt;AHB1ENR |= RCC_AHB1ENR_GPIOCEN;      // 為 C 埠供應時脈
+
+GPIOC-&gt;MODER &amp;= ~(0x3u &lt;&lt; (2 * 13));       // 00 = 輸入（PC13）
+GPIOC-&gt;PUPDR &amp;= ~(0x3u &lt;&lt; (2 * 13));       // 清除上下拉欄位
+GPIOC-&gt;PUPDR |=  (0x1u &lt;&lt; (2 * 13));       // 01 = 上拉，線路閒置時為高電位
+
+// IDR 位元 13 讀取「當下」的腳位電壓。按鈕按下時把它接地。
+if ((GPIOC-&gt;IDR &amp; (1u &lt;&lt; 13)) == 0) {
+    // 已按下：腳位被對抗上拉而拉到 0 V
+}
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 為什麼上下拉電阻是必要的</div>
+        <p>一支沒有任何東西在驅動的裸輸入腳位是<strong>浮接（floating）</strong>的 ── 它的電壓會隨雜訊飄移，<code>IDR</code> 會回傳隨機的 1 與 0。<code>PUPDR</code> 的內部上拉（約 40&nbsp;kΩ）把線路綁到一個已知電位，讓斷開的開關讀到乾淨的 <code>1</code>、按下時讀到 <code>0</code>。沒有上下拉，就沒有可靠的讀取。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="toggle-speed"><span class="sec-no">8</span>實際案例：一支腳位能切換多快？</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>這會出貨進產品</small></div>
+      <p>「切換一支腳位」聽起來微不足道，直到你需要去<em>位元敲擊（bit-bang）</em>一個協定 ── 親手驅動一條時脈線、一條 NeoPixel 燈條或一條軟體 SPI 線，因為沒有空閒的周邊可用。這時最大切換頻率就成了你能跟什麼東西溝通的硬性上限。</p>
+
+      <p>在 STM32F446 上，CPU 最高跑到 <span>$f_{\text{clk}} = 180\,\text{MHz}$</span>，而 GPIO 掛在 AHB1 匯流排上以完整的 <code>HCLK</code> 運作。從 CPU 的角度看，一次 <code>BSRR</code> 寫入是單週期的儲存。在一個交替設定/重設的緊湊組合語言迴圈裡，實務上的天花板大約是 <code>HCLK</code> 除以每次切換所需的週期數：</p>
+
+      <div class="math-box">
+        $$ f_{\text{toggle}} \;\approx\; \frac{f_{\text{clk}}}{\text{cycles per edge}} \;=\; \frac{180\,\text{MHz}}{\sim 2} \;\approx\; 90\,\text{MHz (best case, asm loop)} $$
+      </div>
+
+      <p>一個實際的 C 語言 <code>while(1){ BSRR=set; BSRR=reset; }</code> 迴圈，把迴圈額外負擔算進去，會落在大約 <span>$10\text{–}45\,\text{MHz}$</span>，視快閃記憶體的等待狀態（wait-state）與指令快取而定。現在拿來跟 Arduino Uno 的 <code>digitalWrite()</code> 比一比：它每次呼叫都要做腳位對埠的查表、關閉中斷，以及一次讀取-修改-寫回 ── 在 16&nbsp;MHz 下約 <strong>50 個 CPU 週期</strong>，所以不到 <strong>約 150&nbsp;kHz</strong>。在 AVR 上做直接埠寫入（<code>PORTB ^= 1&lt;&lt;5</code>）可達約 2–4&nbsp;MHz。暫存器層級的 STM32 快了兩到三個<em>數量級</em>。</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 實際案例 ── 位元敲擊一條 WS2812 LED 燈條</div>
+        <p>WS2812「NeoPixel」LED 沒有時脈線；每個位元純粹靠資料腳位維持高電位的時間長短來編碼 ── 1 是約 0.8&nbsp;µs 高電位，0 是約 0.4&nbsp;µs 高電位，容差 ±150&nbsp;ns。要打中那個時序，意味著要在 <code>BSRR</code> 寫入之間數 CPU 週期。在 16&nbsp;MHz 的 AVR 上這緊到令人痛苦，而且必須手寫組合語言；在 180&nbsp;MHz、有單週期 <code>BSRR</code> 的 STM32 上，你有用不完的週期 ── 這正是為什麼高速 LED 燈條驅動程式都轉向了 ARM。上面那段切換速度的數學，就是決定你的協定在軟體裡到底可不可行的預算。</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>⑤ 換你上場</h2>
+      <div class="layer"><span class="step">⑤</span> 練習 <small>由你來寫、由你來判斷</small></div>
+      <p>三道檢核。點一個答案、輸入一個數字，或揭開一道程式挑戰。進度會儲存在這台裝置上，並顯示在首頁。</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="stm03-bsrr-why">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢核</div>
+        <div class="ex-q">為什麼設定一支腳位時，<code>GPIOA-&gt;BSRR = (1&lt;&lt;5)</code> 比 <code>GPIOA-&gt;ODR |= (1&lt;&lt;5)</code> 更好？</div>
+        <ul class="ex-options">
+          <li data-correct="false">BSRR 比較快，因為它跳過了時脈啟用步驟</li>
+          <li data-correct="true">BSRR 是單一原子式寫入，所以中斷無法破壞讀取-修改-寫回</li>
+          <li data-correct="false">ODR 每個電源週期只能寫入一次</li>
+          <li data-correct="false">BSRR 會把更多電流驅動到腳位上</li>
+        </ul>
+        <div class="ex-explain"><code>ODR |=</code> 是一個<strong>讀取-修改-寫回</strong>：讀 ODR、OR 上位元、寫回。在讀取與寫入之間落下的中斷可能改變該埠上的另一支腳位，而過時的寫回又把它覆蓋掉。<code>BSRR</code> 是唯寫的，並以單一原子式儲存套用，只碰到你設定的那些位元 ── 沒有讀取、沒有競爭。</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="stm03-moder-bit" data-answer="10" data-tol="0">
+        <div class="ex-head"><span class="badge">Q2</span> 算一算</div>
+        <div class="ex-q">在 <code>MODER</code> 裡，第 <span>$n$</span> 支腳位的 2 位元欄位佔據位元 $[\,2n{+}1 : 2n\,]$。要把 <strong>PA5</strong> 設為輸出，你要在該欄位寫入值 <code>01</code>，也就是 <code>0b01 &lt;&lt; X</code>。位移量 <strong>X</strong>（欄位的低位元位置）是多少？</div>
+        <input class="ex-input" type="number" step="any" placeholder="位元位置"><span class="ex-unit">位元</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$2n = 2 \times 5 = 10$，所以 PA5 的欄位是位元 $[11:10]$，位移為 <strong>10</strong>。因此 <code>0b01 &lt;&lt; 10 = 1024 = 0x400</code>，這就是你（在清除位元 11:10 之後）OR 進 <code>MODER</code> 以把 PA5 設為輸出的值。</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="stm03-reg-blink">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰 ── 暫存器層級的 PA5 閃爍</div>
+        <div class="ex-q">從零開始，寫出把 <strong>PA5</strong> 設為推挽輸出、然後永遠切換它的裸機設定，過程中<em>絕不</em>讀取 <code>ODR</code>。你可以保留一個軟體 <code>state</code> 旗標，並由它挑選要用 BSRR 的哪一半。不准用 HAL。</div>
+        <details class="ex-acc">
+          <summary>提示</summary>
+          <div class="acc-body">啟用 GPIOA 時脈（<code>RCC-&gt;AHB1ENR |= RCC_AHB1ENR_GPIOAEN</code>），先清除再設定 <code>MODER[11:10]=01</code>，然後在迴圈裡寫 <code>BSRR = (1&lt;&lt;5)</code> 拉高、寫 <code>BSRR = (1&lt;&lt;21)</code> ── 那就是 <code>1&lt;&lt;(5+16)</code> ── 拉低。每一輪翻轉一個本地的 <code>state</code>，這樣你就永遠不需要回讀腳位。</div>
+        </details>
+        <details class="ex-acc">
+          <summary>顯示一種解法</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">blink_pa5.c <span class="lang">C / CMSIS</span></div>
+<pre><code class="language-c">#include "stm32f4xx.h"
+#define PIN 5
+
+static void delay(volatile uint32_t n){ while(n--) __NOP(); }
+
+int main(void) {
+    RCC-&gt;AHB1ENR |= RCC_AHB1ENR_GPIOAEN;        // 1) 為 GPIOA 供應時脈
+
+    GPIOA-&gt;MODER &amp;= ~(0x3u &lt;&lt; (2 * PIN));        // 2) 清除 MODER[11:10]
+    GPIOA-&gt;MODER |=  (0x1u &lt;&lt; (2 * PIN));        //    01 = 輸出
+    GPIOA-&gt;OTYPER &amp;= ~(0x1u &lt;&lt; PIN);            //    推挽
+    GPIOA-&gt;PUPDR  &amp;= ~(0x3u &lt;&lt; (2 * PIN));      //    無上下拉
+
+    uint32_t state = 0;
+    while (1) {
+        // 由 state 挑選 BSRR 的哪一半：state 為真時用高半部（重設），否則設定
+        GPIOA-&gt;BSRR = state ? (1u &lt;&lt; (PIN + 16))    // 重設：位元 21
+                            : (1u &lt;&lt;  PIN);         // 設定：位元 5
+        state ^= 1u;
+        delay(800000);
+    }
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">這堂課的重點：每一次電位改變都是單一的原子式 <code>BSRR</code> 儲存，由一個軟體旗標來挑選 ── 而不是去讀取硬體。把 <code>delay()</code> 換成 SysTick 時間戳（第 02 章），你就有了一個非阻塞的心跳。改用 <code>AFR</code> 把同一支腳位路由到 TIM2_CH1，計時器就會免費替你閃它，而 CPU 還能去睡覺。</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> 本章回顧</div>
+        <p>你現在能直接用 CMSIS 設定任何一支 STM32 腳位了：在 <code>RCC-&gt;AHB1ENR</code> 啟用它的埠時脈、把位元 $[2n{+}1:2n]$ 處 2 位元的 <code>MODER</code> 欄位設好、在 <code>OTYPER</code> 選推挽/開漏、在 <code>PUPDR</code> 選上下拉。你透過 <code>BSRR</code> 原子式地驅動輸出 ── 設定在低半部、重設在高半部 ── 而且你確切知道為什麼 <code>ODR |=</code> 是個潛伏的競爭。你能用上拉透過 <code>IDR</code> 讀取輸入、用 <code>MODER=10</code> 加上 <code>AFR</code> 半位元組把腳位交給周邊，而且你已經看見同一個閃爍在 HAL 裡不過就是這些換上了名字的暫存器寫入。下一章，我們讓周邊自己替我們做切換 ── 計時器與 PWM。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="回到頂端">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../../../assets/vendor/highlight.min.js"></script>
+<script src="../../../assets/katex/katex.min.js"></script>
+<script src="../../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../../assets/vendor/mermaid.min.js"></script>
+<script src="../../../assets/app.js"></script>
+</body>
+</html>

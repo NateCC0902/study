@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>通訊：UART、I²C 與 SPI — Embedded Mastery</title>
+<link rel="stylesheet" href="../../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../../assets/styles.css">
+</head>
+<body class="track-arduino" data-course="embedded" data-track="arduino" data-chapter="06-serial-i2c-spi">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">Arduino · 第 06 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Arduino 學習路線 · 第 06 章 · 中階→進階</div>
+        <h1>通訊：UART、I²C 與 SPI</h1>
+        <p>一顆 MCU 的價值，取決於它能跟哪些東西<em>對話</em>。感測器、顯示器、SD 卡、無線電、其他微控制器——它們全都使用三種匯流排之一。學會這三種，你幾乎就能把晶片接上地球上的任何東西。我們會從每種匯流排的接線一根一根建立起來，做時序計算，最後讓三種匯流排<em>同時</em>運作。</p>
+        <div class="meta">
+          <span>⏱ 約 50 分鐘</span><span>🧠 匯流排協定</span><span>⚡ 多裝置</span><span>🔧 Wire 與 SPI 函式庫</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="parallel-vs-serial"><span class="sec-no">1</span>並列與串列：用時間換取線路</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先建立整體圖像</small></div>
+      <p>你手上有一個位元組——八個位元——而你需要把它從晶片 A 搬到晶片 B。方法剛好只有兩種。<strong>並列（parallel）：</strong>拉八條線，把八個位元一次全部送上去，一個時脈滴答就完成。<strong>串列（serial）：</strong>只拉<em>一</em>條線，把位元一個接一個塞進去，一個位元組要八個滴答。並列每個時脈更快，但吃掉接腳和 PCB 面積；串列每個時脈較慢，但很省接腳、佈線也漂亮。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 最根本的取捨</div>
+        <p>本章每一種匯流排都是<strong>串列</strong>的：它用<em>時間</em>（每個位元組要更多時脈滴答）去換<em>線路</em>（更少實體接腳）。在一顆只有約 20 支可用接腳的 MCU 上，線路才是稀缺資源——所以串列幾乎在哪裡都勝出。</p>
+      </div>
+
+      <p>「但並列比較快啊！」——在 1990 年代、對短纜線而言，確實如此。然後時脈速度一路飆升，並列撞上一堵牆：在高頻下那八條線不再能保持同步（<strong>偏移 skew</strong>），串擾（crosstalk）也把資料毀掉。這正是為什麼 USB、SATA、PCIe、HDMI 和乙太網路如今全都是<em>串列</em>的。在微控制器上，你必須掌握的三種串列匯流排是 <strong>UART</strong>、<strong>I²C</strong> 和 <strong>SPI</strong>。它們的差別在於用幾條線、是否帶時脈，以及如何挑選要跟哪個裝置對話。</p>
+
+      <div class="mermaid">
+flowchart LR
+    subgraph P["並列 — 8 條線"]
+        PA["MCU"] == "D0..D7<br/>每滴答 1 位元組" ==> PB["裝置"]
+    end
+    subgraph S["串列 — 1 條線"]
+        SA["MCU"] -- "bit7→bit0<br/>每位元組 8 滴答" --> SB["裝置"]
+    end
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="uart"><span class="sec-no">2</span>UART：非同步的主力</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>沒有時脈線——只要對好速度</small></div>
+      <p>UART（Universal Asynchronous Receiver/Transmitter，通用非同步收發器）是最簡單的匯流排，也是你每次呼叫 <code>Serial.print()</code> 時就已經在用的。它是<strong>點對點（point-to-point）</strong>的：剛好兩個裝置，以兩條資料線相連——<strong>TX</strong>（傳送）與 <strong>RX</strong>（接收）——而且交叉接線，讓每一端的 TX 餵給對方的 RX。<em>非同步（asynchronous）</em>這個詞就是整個訣竅所在：<strong>沒有共用的時脈線</strong>。取而代之，雙方事先講好一個速度——<strong>鮑率（baud rate）</strong>——然後各自依照自己內部的時脈去取樣線路。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 訊框格式：8N1 約定</div>
+        <p>因為沒有時脈，接收端需要知道一個位元組<em>何時</em>開始。所以每個位元組都被包進一個<strong>訊框（frame）</strong>裡。閒置時線路維持 HIGH；一個下降緣就是<strong>起始位元（start bit）</strong>（1 位元，LOW）。接著是 <strong>8 個資料位元</strong>（LSB 先送），可選地加上一個同位元（parity bit），再來是 <strong>1 個停止位元（stop bit）</strong>（HIGH）。常見的設定「<strong>8N1</strong>」表示 8 個資料位元、No（無）同位、1 個停止位元 → <strong>線路上要 10 個位元才能載運 8 個位元的酬載</strong>。</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    A["MCU A<br/>TX ●──"] -->|線| B["── ● RX<br/>MCU B"]
+    B2["MCU B<br/>TX ●──"] -->|線| A2["── ● RX<br/>MCU A"]
+    G["GND ●━━━━━━━━━━━━━━ ● GND<br/>(共用參考——必須)"]
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>鮑率、位元時間與吞吐量</small></div>
+      <p><strong>鮑率</strong>是每秒的訊號事件數——在這裡就是位元數。線路上一個位元的持續時間，也就是<strong>位元時間（bit time）</strong>，就是它的倒數：</p>
+
+      <div class="math-box">
+        $$ t_{\text{bit}} = \frac{1}{\text{baud}} $$
+      </div>
+
+      <p>在無所不在的 <span>$115200$</span> 鮑率下，<span>$t_{\text{bit}} = 1/115200 \approx 8.68\,\mu\text{s}$</span>；在老派的 <span>$9600$</span> 鮑率下，每個位元則暴增到 <span>$104.2\,\mu\text{s}$</span>。現在來看關鍵洞見：8N1 每個位元組要花<strong>線路上 10 個位元</strong>（起始 + 8 + 停止），所以有用的<strong>位元組吞吐量（byte throughput）</strong>是</p>
+
+      <div class="math-box">
+        $$ \text{throughput} = \frac{\text{baud}}{10} \;\text{bytes/s} \qquad\Rightarrow\qquad \frac{115200}{10} = 11{,}520\ \text{B/s} $$
+      </div>
+
+      <p>而送出一個 <span>$N$</span> 位元組緩衝區所需的時間就只是</p>
+
+      <div class="math-box">
+        $$ t = \frac{10\,N}{\text{baud}} \qquad\Rightarrow\qquad \frac{10 \times 64}{115200} \approx 5.56\,\text{ms（64 位元組）} $$
+      </div>
+
+      <p>那個 <em>÷10</em> 就是訊框格式的額外開銷——你有 20% 的線路時間沒在載運酬載。這是沒有時脈線的代價。注意鮑率和位元組/秒<strong>不是</strong>同一個數字；把這兩者搞混就是經典的新手錯誤。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>逐行讀過</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">uart_echo.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">void setup() {
+  // 以 115200 鮑率、8N1（預設訊框）開啟硬體 UART。
+  // 在 Uno 上，這個 UART 就是接到 USB 的那一個，所以你 PC 上的
+  // 序列監控視窗（Serial Monitor）就是匯流排上的「另一個裝置」。
+  Serial.begin(115200);
+  Serial.println("Type a number, I'll double it:");
+}
+
+void loop() {
+  // Serial.available() 回傳已經到達的位元組數，這些位元組存在
+  // 核心透過中斷填入的 64 位元組 RX 緩衝區裡。
+  if (Serial.available() &gt; 0) {
+    // parseInt() 會阻塞，直到收到一個完整的整數，
+    // 再把 ASCII 數字轉成 long。
+    long n = Serial.parseInt();
+    Serial.print("You sent ");
+    Serial.print(n);              // print = 經由 TX 送出 ASCII
+    Serial.print(", doubled = ");
+    Serial.println(n * 2);        // println 會加上 "\r\n"
+  }
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——鮑率不符與缺少共地</div>
+        <p>如果兩端對鮑率的設定不一致，接收端會在錯誤的時刻取樣，你就會得到<strong>亂碼字元</strong>（那種一看就知道的「Ÿ¿Œ」一團亂）。把兩端設成完全一樣。而且 UART 需要<strong>共用接地</strong>：TX/RX 是<em>相對於 GND</em>的電壓，所以沒有共同參考，這些位元就毫無意義。兩塊沒有共地的板子「在講」UART，是第一名的無聲失敗。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="i2c"><span class="sec-no">3</span>I²C：兩條線，掛上一整群裝置</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>一條帶位址的共線派對線</small></div>
+      <p>UART 對兩個裝置很棒，但它撐不起一整群。輪到 <strong>I²C</strong> 上場（Inter-Integrated Circuit，唸作「eye-squared-see」）。它只用<strong>兩條線</strong>，由匯流排上<em>每一個</em>裝置共用：<strong>SDA</strong>（serial data，串列資料）與 <strong>SCL</strong>（serial clock，串列時脈）。和 UART 不同，I²C <em>確實</em>帶有時脈——這正是它<strong>同步（synchronous）</strong>的原因——而且有一個裝置，也就是<strong>控制器（controller）</strong>（歷史上稱「master 主機」），負責驅動該時脈並啟動每一次交易。其他裝置則是<strong>目標（target）</strong>（「slave 從機」），只有被點名時才回應。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 位址：100 多顆晶片如何共用 2 條線</div>
+        <p>每個目標都有一個由製造商燒進去的<strong>7 位元位址</strong>（有時會留幾支接腳讓你微調低位元）。七個位元 → <span>$2^7 = 128$</span> 個槽位，其中 16 個保留，剩下最多 <strong>112 個可用位址</strong>——口語上就稱「約 127 個裝置」。控制器廣播一個位址；只有相符的那個目標會回應。這就像一條派對線，你喊一個名字，就有一個人回話。</p>
+      </div>
+
+      <p>巧妙之處在於電路設計：兩條線都是<strong>開汲極（open-drain）</strong>。一個裝置只能把線路<em>拉低</em>到 0；它永遠無法把線路驅動到高。兩顆外接的<strong>上拉電阻（pull-up resistor）</strong>（通常 4.7 kΩ）會在沒人拉低時，把兩條線輕輕拉到 <span>$V_{cc}$</span>。這表示任意數量的裝置都能共用線路而永遠不會打架（不會有兩個輸出短路），也賦予了 I²C 它的招牌特性：<strong>ACK/NACK</strong>。每個位元組之後，接收端會把 SDA 拉低一個時脈以表示「收到了」（ACK）；讓它浮回高就表示「沒有」（NACK）。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>上拉電阻選值與匯流排速度</small></div>
+      <p>I²C 可跑 <strong>100 kHz</strong>（標準模式）或 <strong>400 kHz</strong>（快速模式）；有些零件可達 1 MHz 以上。上拉電阻值是一個實實在在的工程取捨。線路是一個 RC 電路：匯流排電容 <span>$C_b$</span>（線路 + 每個裝置的接腳電容）透過上拉電阻 <span>$R_p$</span> 充電。上升時間必須塞得進一個時脈週期。規格把它上限定在</p>
+
+      <div class="math-box">
+        $$ t_r \approx 0.847\,R_p\,C_b \;\le\; \begin{cases} 1000\ \text{ns} &amp; \text{(100 kHz)}\\ 300\ \text{ns} &amp; \text{(400 kHz)} \end{cases} $$
+      </div>
+
+      <p>以典型的 <span>$C_b = 100\,\text{pF}$</span> 來看，要達到 300 ns 的快速模式上限，需要 <span>$R_p \le t_r / (0.847\,C_b) \approx 3.5\,\text{k}\Omega$</span>——這就是為什麼 4.7 kΩ 在 100 kHz 行得通，但在 400 kHz 或長匯流排時要降到約 2.2 kΩ。電阻<strong>太大</strong> → 邊緣遲緩 → 資料損毀；電阻<strong>太小</strong> → 開汲極電晶體灌不出足夠電流來達到有效的 LOW。中間有一個窗口，而匯流排電容決定了這個窗口。</p>
+
+      <div class="mermaid">
+flowchart TB
+    VCC["Vcc 3.3V / 5V"]
+    R1["Rp 4.7kΩ"]
+    R2["Rp 4.7kΩ"]
+    VCC --> R1 --> SDA(("SDA"))
+    VCC --> R2 --> SCL(("SCL"))
+    SDA --- M["MCU<br/>(控制器)"]
+    SCL --- M
+    SDA --- T1["溫度 0x48"]
+    SCL --- T1
+    SDA --- T2["RTC 0x68"]
+    SCL --- T2
+    SDA --- T3["OLED 0x3C"]
+    SCL --- T3
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——一條匯流排、三顆晶片、零額外接腳</div>
+        <p>那張圖是一個真實、可量產的設計：一顆溫度感測器（TMP102，位址 <code>0x48</code>）、一顆即時時鐘（DS3231，位址 <code>0x68</code>）和一片 OLED 顯示器（SSD1306，位址 <code>0x3C</code>），全都掛在<em>同樣</em>兩支接腳上（Uno 上的 A4/A5）。再加第四、第五個裝置，你還是只用兩支接腳。<em>這</em>就是為什麼 I²C 主宰了感測器擴充板——Adafruit 和 SparkFun 出貨了好幾百種。</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>透過 Wire 函式庫讀取一個暫存器</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">i2c_read_temp.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;Wire.h&gt;
+
+const uint8_t TMP102_ADDR = 0x48;  // 7 位元目標位址
+const uint8_t TEMP_REG    = 0x00;  // 存放溫度的暫存器
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();                    // 以控制器身分加入匯流排
+}
+
+void loop() {
+  // 1) 告訴感測器我們要從「哪一個」暫存器讀取。
+  Wire.beginTransmission(TMP102_ADDR);
+  Wire.write(TEMP_REG);            // 設定內部暫存器指標
+  Wire.endTransmission(false);     // false = 重複起始（repeated-START），保留匯流排
+
+  // 2) 現在向該暫存器要回 2 個位元組。
+  Wire.requestFrom(TMP102_ADDR, (uint8_t)2);
+  uint8_t msb = Wire.read();       // 最高有效位元組先到
+  uint8_t lsb = Wire.read();
+
+  // TMP102 把一個 12 位元的值靠左對齊地塞進 16 位元裡。
+  int16_t raw = ((msb &lt;&lt; 8) | lsb) &gt;&gt; 4;
+  float celsius = raw * 0.0625f;   // 每個 LSB 代表 0.0625 °C
+
+  Serial.print("Temp: "); Serial.print(celsius); Serial.println(" C");
+  delay(1000);
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——7 位元 vs 8 位元位址</div>
+        <p>規格書最愛把你搞糊塗。<strong>Wire 函式庫要的是 7 位元位址</strong>（<code>0x48</code>），它會自己接上讀/寫位元。許多規格書反而印出<strong>8 位元位址</strong>，也就是已經把那個位元移進去的版本（<code>0x90</code> 寫 / <code>0x91</code> 讀）。如果你的裝置毫無反應，就檢查你是不是餵給 Wire 一個左移過的位址。拿不定主意時，跑一個 <code>i2c_scanner</code> 草稿碼——它會逐一探測全部 127 個位址，並回報誰有 ACK。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="spi"><span class="sec-no">4</span>SPI：四條線，全速前進</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>純粹的速度、全雙工</small></div>
+      <p>當你需要<em>快</em>——把像素串流到顯示器、從 SD 卡讀取數 KB、跟無線電對話——你就會伸手拿 <strong>SPI</strong>（Serial Peripheral Interface，串列周邊介面）。它花更多線路去買更多速度。四條訊號：<strong>SCK</strong>（時脈，來自控制器）、<strong>MOSI</strong>（Controller-Out Peripheral-In，控制器輸出/周邊輸入）、<strong>MISO</strong>（Controller-In Peripheral-Out，控制器輸入/周邊輸出），以及<em>每個裝置一條</em>的 <strong>CS</strong> / SS（Chip Select，晶片選擇）。資料<em>同時</em>朝兩個方向流動——這就是<strong>全雙工（full duplex）</strong>——而且沒有定址協定：你靠把某個晶片的 CS 線拉低（LOW）來選中它。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 移位暫存器心智模型</div>
+        <p>SPI 實質上就是兩個接成一個環的移位暫存器。在每個 SCK 邊緣，控制器和周邊各自移出一個位元（MOSI / MISO）、移入一個位元。經過 8 個時脈，它們就<strong>交換了一整個位元組</strong>。所以每一次 SPI 傳輸都是一次<em>交換</em>：要讀，你就必須同時寫（通常是一個無用的虛擬位元組 dummy byte）。這種對稱性正是 SPI 沒有 ACK、也沒有流量控制的原因——它就只是被時脈推動的位元交換，而這恰恰是它快的原因（數十 MHz，相對於 I²C 的 0.4 MHz）。</p>
+      </div>
+
+      <p>代價是：每個周邊都要一支專屬的 CS 接腳。三個 SPI 裝置 = SCK + MOSI + MISO 共用 + 3 條 CS = 6 支接腳，相對於 I²C 永遠的 2 支。SPI 用接腳換速度；I²C 用速度換接腳。看你缺哪種資源來選。</p>
+
+      <div class="mermaid">
+flowchart LR
+    M["MCU (控制器)"]
+    M -- SCK --> D1["SD 卡"]
+    M -- MOSI --> D1
+    M -. MISO .-> M
+    D1 -- MISO --> M
+    M -- "CS1" --> D1
+    M -- "SCK / MOSI / MISO (共用)" --> D2["顯示器"]
+    M -- "CS2" --> D2
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>四種 SPI 模式（CPOL/CPHA）</small></div>
+      <p>SPI 唯一的微妙之處是<strong>時序極性</strong>。兩個位元定義了時脈的行為：<strong>CPOL</strong>（clock polarity，時脈極性——閒置是 HIGH 還是 LOW？）和 <strong>CPHA</strong>（clock phase，時脈相位——在第一個還是第二個邊緣取樣？）。它們的四種組合就是四種 <strong>SPI 模式</strong>：</p>
+
+      <div class="math-box">
+        $$ \text{Mode} = 2\cdot\text{CPOL} + \text{CPHA}, \qquad \text{CPOL},\text{CPHA}\in\{0,1\} $$
+      </div>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>模式</th><th>CPOL</th><th>CPHA</th><th>閒置時脈</th><th>資料取樣於</th></tr></thead>
+        <tbody>
+          <tr><td><code>SPI_MODE0</code></td><td>0</td><td>0</td><td>LOW</td><td>上升緣</td></tr>
+          <tr><td><code>SPI_MODE1</code></td><td>0</td><td>1</td><td>LOW</td><td>下降緣</td></tr>
+          <tr><td><code>SPI_MODE2</code></td><td>1</td><td>0</td><td>HIGH</td><td>下降緣</td></tr>
+          <tr><td><code>SPI_MODE3</code></td><td>1</td><td>1</td><td>HIGH</td><td>上升緣</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p>傳輸時間簡單到很殘酷——沒有像 UART 那樣的訊框開銷，也沒有像 I²C 那樣的 ACK：<span>$t = 8N / f_{\text{SCK}}$</span>。在 <span>$f_{\text{SCK}} = 8\,\text{MHz}$</span> 下，一個 512 位元組的 SD 區塊要花 <span>$8 \times 512 / 8{\times}10^6 = 512\,\mu\text{s}$</span>——大約比同樣酬載走 400 kHz I²C 快 11 倍。<strong>把模式對到規格書</strong>，不然你會在錯誤的邊緣取樣位元，讀到的是純雜訊。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>設定一次交易</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">spi_read.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;SPI.h&gt;
+
+const int CS_PIN = 10;             // 此周邊的晶片選擇腳
+
+void setup() {
+  pinMode(CS_PIN, OUTPUT);
+  digitalWrite(CS_PIN, HIGH);     // HIGH = 未選中（閒置）
+  SPI.begin();                    // 設定 SCK、MOSI、MISO 的方向
+}
+
+uint8_t readRegister(uint8_t reg) {
+  // 一次交易會鎖定匯流排速度、位元順序與模式，這樣兩個設定
+  // 不同的 SPI 裝置才能安全共存。
+  SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(CS_PIN, LOW);      // 選中「這個」裝置
+  SPI.transfer(reg | 0x80);       // 許多零件：bit7=1 表示「讀取」
+  uint8_t value = SPI.transfer(0x00);  // 送出虛擬位元組，把回覆時脈進來
+  digitalWrite(CS_PIN, HIGH);     // 取消選中
+  SPI.endTransaction();
+  return value;
+}
+
+void loop() { /* 視需要呼叫 readRegister(...) */ }
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 為什麼 <code>SPI.transfer</code> 同時送出又接收</div>
+        <p>沒有獨立的「讀取」呼叫。<code>SPI.transfer(x)</code> 把 <code>x</code> 從 MOSI 移出，<em>同時</em>回傳周邊從 MISO 移回來的東西——每個方向一個位元組，同樣的 8 個時脈。要<em>從</em>裝置拉資料，你就移出一個用完即丟的 <code>0x00</code>，讓 SCK 持續滴答，回覆就會搭著 MISO 進來。全雙工不是你要去開啟的功能；它就是這條線運作的方式。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="comparison"><span class="sec-no">5</span>選擇匯流排：速查表</h2>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>這是你在每一塊板子上都要做的決定</small></div>
+      <p>三種匯流排，三個甜蜜點。把這張表內化，匯流排選擇就會從一整個下午的規格書考古，變成五秒鐘的決定。</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>特性</th><th>UART</th><th>I²C</th><th>SPI</th></tr></thead>
+        <tbody>
+          <tr><td>資料線</td><td>2（TX、RX）</td><td>2（SDA、SCL）</td><td>3 + 每裝置 1 條 CS</td></tr>
+          <tr><td>時脈</td><td>無（非同步）</td><td>共用（SCL）</td><td>共用（SCK）</td></tr>
+          <tr><td>典型速度</td><td>9.6k–115.2k 鮑率</td><td>100k / 400k Hz</td><td>1–50+ MHz</td></tr>
+          <tr><td>每匯流排裝置數</td><td>2（點對點）</td><td>約 112（7 位元位址）</td><td>每支 CS 腳 1 個</td></tr>
+          <tr><td>雙工</td><td>全雙工</td><td>半雙工</td><td>全雙工</td></tr>
+          <tr><td>需要上拉電阻？</td><td>否</td><td>是（必須）</td><td>否</td></tr>
+          <tr><td>定址方式</td><td>無（就兩端）</td><td>協定內（7 位元）</td><td>晶片選擇線</td></tr>
+          <tr><td>距離</td><td>數公尺（搭 RS-232/485 更遠）</td><td>約 1 公尺（板上）</td><td>數公分</td></tr>
+          <tr><td>最適用於</td><td>PC/除錯、GPS、數據機</td><td>許多慢速感測器</td><td>快速：SD、顯示器、ADC、無線電</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 一句話決策規則</div>
+        <p><strong>一堆慢速感測器、又缺接腳？</strong>用 I²C。<strong>一個快速裝置——顯示器、SD、無線電？</strong>用 SPI。<strong>要透過纜線跟 PC、GPS 或另一塊板子對話？</strong>用 UART。真實產品會同時用上三種，各自做它最擅長的事。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="all-at-once"><span class="sec-no">6</span>真實案例：三種匯流排，一台資料記錄器</h2>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>這會出貨進產品裡</small></div>
+      <p>這裡有一塊你這個週末就能做出來的真實板子：一台環境資料記錄器。一顆<strong>I²C 上的溫度感測器</strong>、一張<strong>SPI 上的 SD 卡</strong>，以及<strong>UART 上的除錯輸出</strong>——三種匯流排同時運作，各自發揮所長。MCU 是樞紐；什麼都不衝突，因為每種匯流排各自掌握自己的接腳。</p>
+
+      <div class="mermaid">
+flowchart TB
+    MCU["Arduino (ATmega328P)"]
+    MCU -- "A4/A5 · I²C" --> TMP["TMP102 溫度<br/>0x48"]
+    MCU -- "D10-13 · SPI" --> SD["microSD 卡"]
+    MCU -- "USB · UART" --> PC["PC / 序列監控視窗<br/>115200 鮑率"]
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">datalogger.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;Wire.h&gt;      // I2C：溫度感測器
+#include &lt;SPI.h&gt;       // SPI：SD 卡（被 SD.h 在底層使用）
+#include &lt;SD.h&gt;
+
+const uint8_t TMP102 = 0x48;
+const int     SD_CS  = 4;        // SD 擴充板的晶片選擇腳
+
+void setup() {
+  Serial.begin(115200);          // UART  → 對 PC 除錯
+  Wire.begin();                  // I2C   → 感測器匯流排
+  if (!SD.begin(SD_CS)) {        // SPI   → SD 卡（SD 函式庫驅動 SPI）
+    Serial.println("SD init failed!");
+    while (1);                    // 停住：沒有磁碟就沒有記錄的意義
+  }
+  Serial.println("Logger ready.");
+}
+
+float readTempC() {
+  Wire.beginTransmission(TMP102);
+  Wire.write(0x00);
+  Wire.endTransmission(false);
+  Wire.requestFrom(TMP102, (uint8_t)2);
+  int16_t raw = ((Wire.read() &lt;&lt; 8) | Wire.read()) &gt;&gt; 4;
+  return raw * 0.0625f;
+}
+
+void loop() {
+  float t = readTempC();                       // ← 來自 I2C
+  File f = SD.open("log.csv", FILE_WRITE);      // ← 經由 SPI
+  if (f) { f.print(millis()); f.print(','); f.println(t); f.close(); }
+  Serial.print("Logged "); Serial.println(t);   // ← 經由 UART
+  delay(2000);
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——匯流排爭用與電壓位準</div>
+        <p>三種匯流排能共存，<em>純粹</em>是因為它們在不同的接腳上——千萬不要把一條 SPI MISO 接到一條 I²C SDA 上。還有兩個更隱晦的陷阱：(1) 在 Uno 上，接腳 <strong>D11–13</strong> 是 SPI 匯流排，所以別把它們挪去做別的事；(2) 注意<strong>電壓位準</strong>——一張 3.3 V 的 SD 卡接在 5 V 的 Uno 上，需要在 MOSI/SCK 上加裝位準轉換器（level shifter），否則你會慢慢把它烤壞。混壓匯流排是業餘專案的無聲殺手。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>⑤ 換你上場</h2>
+      <div class="layer"><span class="step">⑤</span> 練習 <small>由你來寫、由你來決定</small></div>
+      <p>三道檢測。點選一個答案、輸入一個數字，或揭曉一道程式挑戰。你的進度會存在這台裝置上，並顯示在首頁。</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="ard06-buschoice">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢測</div>
+        <div class="ex-q">你要在一顆 MCU 上掛<strong>八顆慢速溫度感測器</strong>，同時盡可能少燒接腳。該用哪種匯流排，而這八顆總共要幾條線？</div>
+        <ul class="ex-options">
+          <li data-correct="false">SPI——它最快，所以一律用它（10 條線：3 條共用 + 8 條 CS）</li>
+          <li data-correct="true">I²C——總共 2 條線；每顆感測器在共用匯流排上各有自己的 7 位元位址</li>
+          <li data-correct="false">UART——每顆感測器 2 條線，所以 16 條線</li>
+          <li data-correct="false">SPI——2 條線，就跟 I²C 一樣</li>
+        </ul>
+        <div class="ex-explain">對於<em>少接腳上掛許多慢速裝置</em>，答案就是 I²C：八顆感測器全都共用同樣的<strong>2 條線</strong>（SDA + SCL），各以其 7 位元位址區分。SPI 會需要每個裝置一支獨立的 CS 腳（3 條共用 + 8 = 11 支接腳）；UART 是點對點，所以根本沒辦法把它們匯流。速度不是這裡的限制——接腳數才是。</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="ard06-uarttime" data-answer="5.56" data-tol="0.2">
+        <div class="ex-head"><span class="badge">Q2</span> 算算看</div>
+        <div class="ex-q">你以 <strong>115200 鮑率、8N1</strong> 透過 UART 送出一個 <strong>64 位元組</strong>的封包。這次傳輸花多久時間，以<strong>毫秒</strong>計？（回想 8N1 每個位元組用 10 個線路位元，所以 $t = \dfrac{10N}{\text{baud}}$。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="ms"><span class="ex-unit">ms</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$t = \dfrac{10 \times 64}{115200} = \dfrac{640}{115200} \approx 5.56\times10^{-3}\,\text{s} = 5.56\,\text{ms}$。等價地，吞吐量是 $115200/10 = 11{,}520$ B/s，而 $64 / 11520 \approx 5.56$ ms。那個係數 10（而非 8）就是訊框開銷——起始 + 8 個資料 + 停止位元。</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="ard06-i2cregread">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰——讀取一個 I²C 暫存器</div>
+        <div class="ex-q">寫一個函式 <code>uint8_t readReg(uint8_t addr, uint8_t reg)</code>，使用 <code>Wire</code> 函式庫，從一個 I²C 裝置讀取<strong>單一個 8 位元暫存器</strong>：把裝置的暫存器指標指向 <code>reg</code>，然後請求並回傳<strong>一</strong>個位元組。這是幾乎每一顆 I²C 晶片通用的「讀取一個暫存器」模式。</div>
+        <details class="ex-acc">
+          <summary>提示</summary>
+          <div class="acc-body">這個模式分成兩個階段。<strong>寫入階段：</strong><code>beginTransmission(addr)</code>、<code>write(reg)</code>，然後 <code>endTransmission(false)</code>——那個 <code>false</code> 會送出<em>重複起始（repeated START）</em>，而不是釋放匯流排。<strong>讀取階段：</strong><code>requestFrom(addr, 1)</code>，然後 <code>Wire.read()</code> 回傳該位元組。</div>
+        </details>
+        <details class="ex-acc">
+          <summary>顯示一個解答</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">read_reg.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;Wire.h&gt;
+
+// 從任何 I2C 裝置讀取一個 8 位元暫存器。
+uint8_t readReg(uint8_t addr, uint8_t reg) {
+  Wire.beginTransmission(addr);   // 對裝置開始一次寫入
+  Wire.write(reg);                // 設定它的內部暫存器指標
+  Wire.endTransmission(false);    // 重複起始（repeated-START）：保留匯流排
+
+  Wire.requestFrom(addr, (uint8_t)1);   // 要求 1 個位元組
+  return Wire.available() ? Wire.read() : 0;
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+  uint8_t whoAmI = readReg(0x68, 0x75); // MPU-6050 WHO_AM_I → 0x68
+  Serial.print("WHO_AM_I = 0x");
+  Serial.println(whoAmI, HEX);
+}
+
+void loop() {}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;"><code>endTransmission(false)</code> 是關鍵：單純的 <code>true</code> 會送出 STOP、釋放匯流排，而有些裝置會在 STOP 時重設它們的指標。重複起始讓整段對話保持原子性（atomic）。先讀一個 <code>WHO_AM_I</code> 暫存器是經典的健全性檢查——如果它回傳規格書上的魔術數字，就代表你的接線和位址都正確。</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> 章節回顧</div>
+        <p>你現在能把<strong>串列與並列</strong>當成一種「線路換時間」的取捨來推理，也已徹底掌握三種匯流排。<strong>UART</strong>：2 條線、無時脈、講好鮑率、每位元組 10 位元、吞吐量 = 鮑率/10。<strong>I²C</strong>：2 條共用線加上拉電阻、用 7 位元位址掛約 100 多個裝置、ACK/NACK、100k/400 kHz。<strong>SPI</strong>：4 條線、全雙工的移位暫存器交換、每裝置一條 CS、MHz 等級快、四種 CPOL/CPHA 模式。你寫了透過 Wire 與 SPI 的暫存器讀取、選了上拉電阻值、算了傳輸時間，並在一台資料記錄器上同時跑了三種匯流排。下一章我們將讓這些匯流排實際動起來，驅動真正的感測器與致動器。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="回到頂端">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../../../assets/vendor/highlight.min.js"></script>
+<script src="../../../assets/katex/katex.min.js"></script>
+<script src="../../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../../assets/vendor/mermaid.min.js"></script>
+<script src="../../../assets/app.js"></script>
+</body>
+</html>

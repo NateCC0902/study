@@ -122,6 +122,9 @@ flowchart LR
     Q -->|no| Done["Done&lt;br/&gt;(local min of J)"]
 </div>
 
+      <div class="sim"><div class="sim-title"><span>🧪</span> k-means iterations</div><canvas id="demo-kmeans"></canvas></div>
+      <p>Pick k and step the iterations; watch points re-assign and centroids settle (inertia drops).</p>
+
       <h3 id="choosing-k">Choosing $k$</h3>
       <ul>
         <li><strong>Elbow method.</strong> Plot $J(k)$ vs $k$. It always decreases (more centroids → tighter), but the <em>rate</em> drops sharply at the "right" $k$ — the elbow. Pick where the curve bends from steep to flat.</li>
@@ -156,6 +159,9 @@ $$</div>
 $$</div>
 
       <p>That's the <strong>eigenvector equation</strong>. So the optimal directions are the <strong>eigenvectors of $\Sigma$</strong>, and the variance captured along each is its <strong>eigenvalue</strong> $\lambda$ (since $w^\top\Sigma w = \lambda$). Sort eigenvalues descending: the top eigenvector is <strong>PC1</strong> (most variance), next is <strong>PC2</strong> (most <em>remaining</em> variance, orthogonal to PC1), and so on.</p>
+
+      <div class="sim"><div class="sim-title"><span>🧪</span> PCA principal axes</div><canvas id="demo-pca"></canvas></div>
+      <p>Raise the correlation; PC1 (orange) captures more of the variance.</p>
 
       <p>To reduce to $p < d$ dimensions, project onto the top $p$ eigenvectors $W_p = [w_1, \dots, w_p]$:</p>
 
@@ -505,5 +511,8 @@ print(f"accuracy  PCA(21d): {acc_pca:.3f}   full(64d): {acc_full:.3f}")
 <script src="../assets/katex/contrib/auto-render.min.js"></script>
 <script src="../assets/vendor/mermaid.min.js"></script>
 <script src="../assets/app.js"></script>
+<script src="../assets/ml-demos.js"></script>
+<script>EM.mlDemo.kmeans("demo-kmeans");</script>
+<script>EM.mlDemo.pca("demo-pca");</script>
 </body>
 </html>

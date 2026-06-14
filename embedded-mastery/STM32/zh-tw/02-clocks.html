@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>時脈樹：HSI/HSE/PLL、RCC 與 SysTick — Embedded Mastery</title>
+<link rel="stylesheet" href="../../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../../assets/styles.css">
+</head>
+<body class="track-stm32" data-course="embedded" data-track="stm32" data-chapter="02-clocks">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">STM32 · 第 02 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">STM32 軌道 · 第 02 章 · 初階→中階</div>
+        <h1>時脈樹：HSI/HSE/PLL、RCC 與 SysTick</h1>
+        <p>這是初學者在 STM32 上最常搞錯的一件事。晶片開機時跑得<em>很慢</em>，每個周邊出生時都是<em>沉睡</em>的，在你搞懂這些 MHz 從哪裡來之前，你寫的任何東西都不會動。我們將從一顆振盪器開始，一層一層建出整棵時脈樹 — 然後用真實數字與一個真實的除錯故事，推導出 168&nbsp;MHz。</p>
+        <div class="meta">
+          <span>⏱ 約 45 分鐘</span><span>🧠 時脈樹</span><span>⚡ RCC 暫存器</span><span>🔧 PLL 數學</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="why-clocks"><span class="sec-no">1</span>晶片為什麼需要時脈</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先把整體畫面建立起來</small></div>
+      <p>MCU 是一張由同步邏輯構成的巨大網格。它內部幾乎每一個正反器（flip-flop）都在<strong>時脈</strong>的邊緣更新 — 時脈就是一道為整顆晶片打拍子的方波。沒有時脈，就沒有指令執行、沒有 UART 位元組被移出、沒有計時器在計數。時脈<em>就是</em>心跳，而在 STM32 上時脈不只一個：那是一整棵由衍生時脈構成的<strong>樹</strong>，每一個都餵給矽片上不同的區域。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話模型</div>
+        <p>在 STM32 上，<strong>每個周邊都跑在一個由單一選定來源逐步衍生而來的時脈上</strong> — 而在你明確地把它的時脈打開之前，那個周邊什麼都不做、讀回來都是零、也不消耗任何電力。</p>
+      </div>
+
+      <p>這裡有一個讓每個從 Arduino 過來的人都措手不及的地方：Arduino Uno 一醒來就是全速 16&nbsp;MHz，每根腳位都已就緒。STM32 <em>不是</em>這樣。重置之後，STM32F4 用它的內部振盪器悠哉地跑在 <strong>16&nbsp;MHz</strong>，PLL 是關的，GPIO 埠是<em>未供時脈</em>的，而你若去戳某個周邊暫存器，它只會用一堆零回瞪你。晶片交給你的是一台緩慢、大部分還是黑暗的機器，並信任你會把它喚醒。這個喚醒過程就是本章的主題。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 開機時你必須做的兩件工作</div>
+        <p><strong>(1) 選擇並拉高系統時脈</strong> — 挑一個來源，把它送過 PLL，再把 CPU 切換到它上面。<strong>(2) 在動每個周邊之前，透過 RCC 開啟它的時脈</strong>。略過第 2 件，周邊在電氣上存在，但功能上是死的。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="clock-sources"><span class="sec-no">2</span>四顆振盪器：HSI、HSE、LSI、LSE</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>原始拍子從哪裡來</small></div>
+      <p>在任何相乘或相除之前，這些 MHz 必須先被<em>產生</em>出來。STM32 給你四個原始時脈來源，沿兩個軸向分類：<strong>內部 vs. 外部</strong>（精度／成本）以及<strong>高速 vs. 低速</strong>（用來跑 CPU vs. 在睡眠時保持計時）。</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>來源</th><th>意義</th><th>典型頻率</th><th>準確度</th><th>用途</th></tr></thead>
+        <tbody>
+          <tr><td><code>HSI</code></td><td>高速內部（High-Speed Internal）</td><td>16 MHz（F4）；8 MHz（F1）</td><td>±1–2%（RC，隨溫度漂移）</td><td>開機預設、快速啟動、後備</td></tr>
+          <tr><td><code>HSE</code></td><td>高速外部（High-Speed External）</td><td>4–26 MHz 石英晶體（常見 8）</td><td>±20–50 ppm（晶體）</td><td>當計時必須精準時作為 PLL 輸入</td></tr>
+          <tr><td><code>LSI</code></td><td>低速內部（Low-Speed Internal）</td><td>約 32 kHz RC</td><td>粗略（±5–10%）</td><td>獨立看門狗（IWDG）、低功耗 RTC</td></tr>
+          <tr><td><code>LSE</code></td><td>低速外部（Low-Speed External）</td><td>32.768 kHz 石英晶體</td><td>±20 ppm</td><td>精準的 RTC／日曆時刻</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 內部＝方便，外部＝精準</div>
+        <p><strong>HSI</strong> 是片上的 RC 振盪器 — 免費、即時、零外部零件，但它是一個類比的 R·C 網路，所以頻率會隨溫度與電壓游移。<strong>HSE</strong> 是你焊上去的石英晶體；石英以機械方式共振，穩定得驚人。LSE 的 <strong>32.768&nbsp;kHz</strong> 這個數字並非隨意 — 它是 $2^{15}$，所以一個 15 位元的計數器剛好每秒溢位一次。對於一個以秒為拍的時鐘來說，這正合適。</p>
+      </div>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>為什麼 USB 逼你用晶體</small></div>
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例 — USB 不會容忍 HSI</div>
+        <p>全速 USB 要求它的 48&nbsp;MHz 時脈落在約 <strong>±0.25%</strong> 之內。HSI 的 ±1–2% RC 漂移直接衝破這個預算，所以主機會丟掉這個裝置，或者它只能間歇性地列舉成功。這就是為什麼幾乎每一塊帶 USB 埠的 STM32 板子都會在晶片旁邊放一顆 8&nbsp;MHz（或 25&nbsp;MHz）晶體：你<em>需要</em> HSE 才能可靠地為 USB 供應時脈。RC 振盪器拿來閃個 LED 沒問題；但對一個有著緊湊頻率容差的協定來說，它不夠格。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="pll-math"><span class="sec-no">3</span>PLL：把 8&nbsp;MHz 變成 168&nbsp;MHz</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>一個頻率倍頻器</small></div>
+      <p>你的晶體跑在 8&nbsp;MHz。你的 CPU 想跑在 168&nbsp;MHz。連接兩者的橋梁就是 <strong>PLL</strong>（鎖相迴路，Phase-Locked Loop）：一個包含<em>壓控振盪器</em>（VCO）的回授電路，晶片會去調整它，直到它分頻後的輸出剛好對上參考訊號。整體效果就是一個乾淨、可程式化的<strong>頻率倍頻器</strong> — 餵進 8&nbsp;MHz，吐出幾乎任何你想要的頻率。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>推導 F4 的公式</small></div>
+      <p>在 STM32F4 上，PLL 串聯了三個整數旋鈕：一個前置除頻器 <span>$M$</span>、一個倍頻器 <span>$N$</span>，以及一個給系統時脈用的後置除頻器 <span>$P$</span>。訊號就按這個順序流動：</p>
+
+      <div class="math-box">
+        $$ f_{\text{VCO,in}} = \frac{f_{\text{in}}}{M}, \qquad f_{\text{VCO}} = f_{\text{VCO,in}} \cdot N, \qquad f_{\text{SYSCLK}} = \frac{f_{\text{VCO}}}{P} $$
+      </div>
+
+      <p>第一階 <span>$M$</span>，把輸入降進 VCO 要求的輸入視窗 <strong>1–2&nbsp;MHz</strong>（資料手冊建議剛好落在 2&nbsp;MHz，但 1&nbsp;MHz 是合法的，ST 自己的範例也這麼用）。第二階 <span>$N$</span>，倍頻到 VCO 輸出，這個輸出必須維持在 <strong>100–432&nbsp;MHz</strong> 之內。第三階 <span>$P \in \{2,4,6,8\}$</span>，再除回核心可以承受的 168&nbsp;MHz。我們把標準的 F4 數值代進去 <span>$f_{\text{in}}=8\,\text{MHz（HSE）},\,M=8,\,N=336,\,P=2$</span>：</p>
+
+      <div class="math-box">
+        $$ f_{\text{VCO,in}} = \frac{8\,\text{MHz}}{8} = 1\,\text{MHz}, \quad f_{\text{VCO}} = 1\,\text{MHz}\times 336 = 336\,\text{MHz}, \quad f_{\text{SYSCLK}} = \frac{336\,\text{MHz}}{2} = 168\,\text{MHz} $$
+      </div>
+
+      <p>兩條限制都過關：VCO 輸入 1&nbsp;MHz 在 [1,&nbsp;2] 內，而 VCO 輸出 336&nbsp;MHz 在 [100,&nbsp;432] 內。還有第四個旋鈕 <span>$Q$</span>，它從同一個 336&nbsp;MHz 的 VCO 取出來，做出 USB／SDIO／RNG 的時脈。我們需要 48&nbsp;MHz，所以：</p>
+
+      <div class="math-box">
+        $$ f_{\text{USB}} = \frac{f_{\text{VCO}}}{Q} = \frac{336\,\text{MHz}}{7} = 48\,\text{MHz} \;\checkmark $$
+      </div>
+
+      <p>那唯一共用的 VCO 正是<em>為什麼</em> ST 選 <span>$N=336$</span> 而不是比方說 168 配 <span>$P=1$</span>：336 可以被 7 整除，所以同一個迴路同時產出乾淨的 168&nbsp;MHz 核心<em>以及</em>規格完美的 48&nbsp;MHz USB。時脈樹是一道約束滿足（constraint-satisfaction）的謎題，而這些就是解開它的魔術數字。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> F1 的版本更簡單 — 只有一個倍頻器</div>
+        <p>較舊的 STM32F1（Blue Pill，「Bluepill」＝STM32F103）沒有 <span>$M/N/P$</span> 的拆分。它把 <span>$\text{HSE}=8\,\text{MHz}$</span> 直接餵進單一個倍頻器 <span>$\times 9$</span>：$\;f_{\text{SYSCLK}} = 8\,\text{MHz}\times 9 = 72\,\text{MHz}$，正是 F1 的上限。一樣的概念（把晶體倍頻上去），只是旋鈕較少。</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    HSE["HSE 8 MHz<br/>（晶體）"] --> MUX{來源<br/>選擇}
+    HSI["HSI 16 MHz<br/>（內部 RC）"] --> MUX
+    MUX --> DM["÷M = 8<br/>→ 1 MHz"]
+    DM --> XN["×N = 336<br/>→ 336 MHz VCO"]
+    XN --> DP["÷P = 2<br/>→ 168 MHz"]
+    XN --> DQ["÷Q = 7<br/>→ 48 MHz USB"]
+    DP --> SYS["SYSCLK<br/>168 MHz"]
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="bus-prescalers"><span class="sec-no">4</span>匯流排除頻器：HCLK、PCLK1、PCLK2 與計時器 ×2 規則</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>不是所有東西都能跑 168 MHz</small></div>
+      <p>核心可以吃 168&nbsp;MHz，但周邊匯流排沒辦法全部跟上 — 而且把一個慢速 UART 用全速供時脈、白白燒電力，根本沒有意義。所以在 SYSCLK 之後，時脈會經過一連串<strong>除頻器</strong>（可程式化的「除以 2 的次方」）扇出，產生各個匯流排時脈：</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>時脈</th><th>匯流排</th><th>來源</th><th>F4 上限</th><th>供給</th></tr></thead>
+        <tbody>
+          <tr><td><code>HCLK</code></td><td>AHB</td><td>SYSCLK ÷ AHB_PSC</td><td>168 MHz</td><td>核心、DMA、記憶體、GPIO</td></tr>
+          <tr><td><code>PCLK1</code></td><td>APB1（低速）</td><td>HCLK ÷ APB1_PSC</td><td>42 MHz</td><td>USART2/3、I²C、SPI2/3、TIM2–7</td></tr>
+          <tr><td><code>PCLK2</code></td><td>APB2（高速）</td><td>HCLK ÷ APB2_PSC</td><td>84 MHz</td><td>USART1/6、SPI1、ADC、TIM1/8/9–11</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p>對於 168&nbsp;MHz 的設定，你會設成 AHB&nbsp;÷1（HCLK&nbsp;=&nbsp;168）、APB1&nbsp;÷4（PCLK1&nbsp;=&nbsp;42）、APB2&nbsp;÷2（PCLK2&nbsp;=&nbsp;84）— 每條匯流排上的最大合法值。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>那條絆倒每個人的規則</small></div>
+      <p>現在來看微妙的那一條。計時器掛在 APB1/APB2 上，但 ST 的矽片玩了一個把戲：<strong>如果某個 APB 除頻器大於 1，那條匯流排上的計時器時脈會被加倍。</strong>正式地說，餵給計時器計數器的時脈是</p>
+
+      <div class="math-box">
+        $$ f_{\text{TIMx}} = \begin{cases} f_{\text{PCLK}} & \text{若 } \text{APB\_PSC} = 1 \\[4pt] 2 \cdot f_{\text{PCLK}} & \text{若 } \text{APB\_PSC} > 1 \end{cases} $$
+      </div>
+
+      <p>所以在 APB1&nbsp;÷4 的情況下：<span>$f_{\text{PCLK1}} = 42\,\text{MHz}$</span>，但 TIM2–7 的計數器其實是用 <span>$2\times 42 = 84\,\text{MHz}$</span> 在計時。在 APB2&nbsp;÷2 的情況下：PCLK2&nbsp;=&nbsp;84&nbsp;MHz，但 TIM1/8 看到的是 <span>$2\times 84 = 168\,\text{MHz}$</span>。忘掉這個 2 倍因子，你從 <span>$f_{\text{PCLK}}$</span> 算出來的每一個 PWM 頻率、每一個 <code>delay_us</code> 都會剛好對一半 — 就是那個經典的「我的伺服機跑兩倍速」的 bug。我們在計時器那一章會大量倚賴這條公式。</p>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="flash-wait-states"><span class="sec-no">5</span>Flash 等待狀態：為什麼快速核心必須等待</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>記憶體跟不上</small></div>
+      <p>跑在 168&nbsp;MHz 有一個物理上的陷阱。CPU 從片上 <strong>Flash</strong> 取出每一條指令，而 Flash 很<em>慢</em> — 它的感測放大器（sense amplifier）大約需要 25–30&nbsp;ns 才能回傳一個字（word）。在 168&nbsp;MHz 下，一個時脈週期只有 <span>$1/168\,\text{MHz} \approx 5.95\,\text{ns}$</span>，遠比 Flash 能回應的時間還短。如果核心每個週期都要資料，它讀到的會是垃圾。</p>
+
+      <p>解法是<strong>等待狀態</strong>（wait states）：Flash 控制器每次取指令時讓 CPU 停頓幾個週期，好讓記憶體有時間回應。速度越高 ⇒ 週期越短 ⇒ 需要<em>越多</em>等待狀態。在 F4（3.3&nbsp;V）上，門檻大約是每約 30&nbsp;MHz 一個等待狀態的區間，而 168&nbsp;MHz 落在 <strong>5 個等待狀態</strong>（<code>FLASH_ACR_LATENCY_5WS</code>）。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱 — 操作順序會弄死開機</div>
+        <p>你必須<strong>先</strong>拉高 Flash 延遲，<em>然後</em>才把 SYSCLK 升到 168&nbsp;MHz。若你在延遲還是 0 的時候先切換時脈，下一條指令的取指就會讀到損毀的 Flash — 核心在你的 <code>main()</code> 跑起來之前就執行了垃圾並當機（或 HardFault）。先把延遲設高，<em>然後</em>再加速。當你要降速回來時，則要在降速<em>之後</em>才降低延遲。</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> ART 加速器把成本藏起來了</div>
+        <p>5 個等待狀態聽起來很殘忍 — 每 6 個週期才取一次指令？實務上 ST 的 <em>ART 加速器</em>（一個放在 Flash 前面的預取＋指令快取）會持續餵飽管線，所以線性的程式碼仍然以接近零等待狀態的吞吐量在跑。等待狀態是真實存在的；只是快取通常會替你把它們攤平。啟用 <code>FLASH_ACR_PRFTEN | ICEN | DCEN</code>，然後就別再操心了。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="rcc-enable"><span class="sec-no">6</span>RCC：每個人都會中一次的 bug</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>周邊預設是被關閘的</small></div>
+      <p>這就是<em>那個</em>成年禮等級的 STM32 bug。你寫了完美的 GPIO 程式碼，要在 D 埠上閃一顆 LED。你燒進去。沒反應。沒有錯誤、沒有警告，除錯器顯示你的程式碼在跑 — 而腳位什麼都不做。無論你寫什麼，去讀 <code>GPIOD-&gt;MODER</code> 回來都是<strong>零</strong>。</p>
+
+      <p>原因是：為了省電，<strong>RCC</strong>（重置與時脈控制，Reset and Clock Control）單元在重置時讓每個周邊的時脈都保持<em>關閘</em>狀態。一個未供時脈的周邊是凍結的 — 它的暫存器甚至不會鎖存（latch）你寫進去的值。在你設定<em>任何</em>周邊之前，你必須在對應的 RCC 暫存器裡設定它的啟用位元。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 牢牢記住這條規則</div>
+        <p>啟用暫存器是以周邊所在的匯流排來命名：GPIO 與 DMA 用 <code>RCC-&gt;AHB1ENR</code>，TIM2–7 / USART2 / I²C 用 <code>RCC-&gt;APB1ENR</code>，USART1 / SPI1 / ADC 用 <code>RCC-&gt;APB2ENR</code>。先設好那個位元，<em>然後</em>才動周邊。絕對不要反過來。</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>逐行細讀</small></div>
+      <div class="codeblock">
+        <div class="code-head">gpio_clock.c <span class="lang">C / STM32 (CMSIS)</span></div>
+<pre><code class="language-c">#include "stm32f4xx.h"   // CMSIS 裝置標頭檔：定義 RCC、GPIOD、位元遮罩
+
+void led_init(void) {
+    // 步驟 1 — 打開 GPIO D 埠的時脈。沒有這一行，
+    // 下面每一次寫入都會被悄悄丟棄，而 MODER 讀回來是 0。
+    RCC-&gt;AHB1ENR |= RCC_AHB1ENR_GPIODEN;   // AHB1ENR 的第 3 位元
+
+    // 在這裡讀回一次，強制啟用在我們動周邊之前生效
+    //（防範 1 個週期的時脈域間隙）。
+    (void)RCC-&gt;AHB1ENR;
+
+    // 步驟 2 — 現在周邊活了，把 PD12 設定為輸出。
+    // MODER 每根腳位 2 位元：01 = 通用輸出。第 12 腳 → 第 25:24 位元。
+    GPIOD-&gt;MODER &amp;= ~(0x3u &lt;&lt; (12 * 2));    // 先清掉這 2 位元欄位
+    GPIOD-&gt;MODER |=  (0x1u &lt;&lt; (12 * 2));    // 01 = 輸出模式
+
+    // 步驟 3 — 驅動它。BSRR 是不可分割的 set/reset 暫存器：
+    // 寫第 12 位元會把 PD12 拉高，沒有讀-修改-寫的競態。
+    GPIOD-&gt;BSRR = (1u &lt;&lt; 12);               // PD12 = HIGH → LED 亮
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱 — 症狀是徹底的沉默</div>
+        <p>忘掉 <code>RCC-&gt;AHB1ENR</code> 那一行<strong>不會產生任何錯誤</strong>。編譯器很開心、連結器很開心、除錯器乾淨地單步走過你的 GPIO 寫入 — 而周邊暫存器就是拒絕改變。如果某個周邊暫存器無論你存什麼進去，讀回來都剛好是它在重置時的值，你的<em>第一</em>嫌疑犯永遠是漏掉的 RCC 時脈啟用位元。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="systick"><span class="sec-no">7</span>SysTick：從 SYSCLK 產生 1&nbsp;ms 的心跳</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>那個永遠都在的計時器</small></div>
+      <p>每一個 Cortex-M 核心都內建一個微小的 24 位元向下計數器，叫做 <strong>SysTick</strong>，它烘焙在 CPU 本身裡（所以在所有 STM32 上都一模一樣）。你載入一個<em>重載值</em>（reload value）；SysTick 以時脈速率從它向下數到零，數到零時觸發一個中斷，重載，然後重複。這是製造週期性「tick」的標準做法 — 也就是 <code>HAL_Delay()</code> 與大多數 RTOS 排程器背後那個 1&nbsp;ms 的拍子。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>計算重載值</small></div>
+      <p>SysTick（在預設下）以完整的處理器時脈 <span>$f_{\text{SYSCLK}}$</span> 計數。要每隔 <span>$T$</span> 秒得到一個中斷，你需要它數 <span>$f_{\text{SYSCLK}}\cdot T$</span> 個 tick。因為計數器在重載前要多花一個週期通過零，所以你寫進去的值會比 tick 數少一：</p>
+
+      <div class="math-box">
+        $$ \text{RELOAD} = f_{\text{SYSCLK}} \cdot T - 1 $$
+      </div>
+
+      <p>對於 <strong>1&nbsp;ms</strong> 的 tick，<span>$T = 10^{-3}\,\text{s}$</span>，所以 $\text{RELOAD} = f_{\text{SYSCLK}}/1000 - 1$。在 72&nbsp;MHz 的 F1 與 168&nbsp;MHz 的 F4 上：</p>
+
+      <div class="math-box">
+        $$ \text{RELOAD}_{72} = \frac{72\times10^{6}}{1000} - 1 = 71{,}999, \qquad \text{RELOAD}_{168} = \frac{168\times10^{6}}{1000} - 1 = 167{,}999 $$
+      </div>
+
+      <p>兩者都裝得進 SysTick 的 24 位元暫存器（上限 <span>$2^{24}-1 = 16{,}777{,}215$</span>），所以無論 STM32 跑多快，1&nbsp;ms 的 tick 都綽綽有餘。CMSIS 的一行式 <code>SysTick_Config(SystemCoreClock / 1000)</code> 會替你做這個減一，也順便啟用中斷。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>用暫存器也用輔助函式</small></div>
+      <div class="codeblock">
+        <div class="code-head">systick.c <span class="lang">C / STM32 (CMSIS)</span></div>
+<pre><code class="language-c">#include "stm32f4xx.h"
+
+volatile uint32_t g_ticks = 0;   // 1 ms 計數器，由 ISR 寫入
+
+// CMSIS 的一行式：載入 reload、清掉計數值、選時脈來源、
+// 啟用計數器＋中斷。SystemCoreClock 存著你真正的 SYSCLK。
+void systick_init_1ms(void) {
+    SysTick_Config(SystemCoreClock / 1000u);   // 例如 168000000/1000 = 168000
+}                                              //   → RELOAD = 168000 - 1 = 167999
+
+// NVIC 在每次 SysTick 數到零時（每 1 ms）呼叫的處理常式。
+void SysTick_Handler(void) {
+    g_ticks++;
+}
+
+// 建立在這個 tick 上的非阻塞毫秒延遲。
+void delay_ms(uint32_t ms) {
+    uint32_t start = g_ticks;
+    while ((g_ticks - start) &lt; ms) {
+        __WFI();   // 睡到下一個中斷 — 比忙等（busy-wait）省電
+    }
+}
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例 — 那個撐起整個產品的 tick</div>
+        <p>那個 <code>g_ticks</code> 計數器是真實韌體的脊椎。FreeRTOS 用 SysTick 當它的排程器 tick 來對任務做時間分片；裸機（bare-metal）程式用它在不阻塞的情況下排程「每 10&nbsp;ms 做一次這件事」的工作；通訊堆疊用它來做逾時與重送。一個 24 位元的計數器，一路從你的 8&nbsp;MHz 晶體經過 PLL 衍生下來，成了整個裝置對<em>時間</em>的感知。時脈樹搞錯，產品裡的每一個逾時都會以同一個倍率錯掉。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="bringup"><span class="sec-no">8</span>全部組起來：喚醒序列</h2>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>這字面上就是 SystemInit()</small></div>
+      <p>現在每一塊都嵌進一套有序的儀式，它在 <code>main()</code> 之前執行。順序不是可有可無的 — 每一步都依賴前一步，搞錯（尤其是 Flash 延遲）會讓晶片當機。</p>
+
+      <div class="mermaid">
+flowchart TB
+    A([重置：HSI 16 MHz、PLL 關閉]) --> B["啟用 HSE<br/>等待 HSERDY"]
+    B --> C["設定 Flash 延遲 = 5 WS<br/>＋啟用 ART 快取"]
+    C --> D["設定 AHB÷1、APB1÷4、APB2÷2<br/>（匯流排除頻器）"]
+    D --> E["設定 PLL：<br/>M=8 N=336 P=2 Q=7、src=HSE"]
+    E --> F["啟用 PLL<br/>等待 PLLRDY"]
+    F --> G["把 SYSCLK 切到 PLL<br/>等待 SWS=PLL"]
+    G --> H["SysTick_Config(SYSCLK/1000)<br/>1 ms tick"]
+    H --> I([main 以 168 MHz 執行])
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 為什麼每個「等待就緒」都重要</div>
+        <p>振盪器與 PLL 都需要真實的時間去<em>穩定</em>（HSE 啟動是毫秒級；PLL 鎖定是微秒級）。<code>HSERDY</code> / <code>PLLRDY</code> 旗標就是硬體在告訴你「我現在穩了」。在某個來源的就緒旗標還沒設起來之前就切換到它，你就是讓核心跑在一個搖晃、半鎖定的訊號上 — 那是間歇性、令人抓狂、海森堡（heisenbug）等級的失敗。永遠要輪詢就緒位元。</p>
+      </div>
+
+      <p>在真實專案裡你幾乎不會手寫這段 — STM32CubeMX 會從一張圖形化的時脈樹圖產生 <code>SystemClock_Config()</code>，而 CMSIS 也附了一個 <code>SystemInit()</code>。但現在你可以<em>讀懂</em>那些產生出來的程式碼、看出數字什麼時候錯了，並在某天 USB 因為有人把來源留在 HSI 而無法列舉時把它修好。</p>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>⑤ 換你了</h2>
+      <div class="layer"><span class="step">⑤</span> 練習 <small>你來寫、你來決定</small></div>
+      <p>三道檢查。點一個答案、打一個數字，或揭開一道程式挑戰。你的進度會存在這台裝置上，並顯示在首頁。</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="stm02-rcc-symptom">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">你寫程式去設定 <code>GPIOD-&gt;MODER</code>，但每次讀那個暫存器都回傳 <strong>0</strong>，LED 永遠不亮。編譯器與除錯器都沒顯示任何錯誤。最有可能的原因是什麼？</div>
+        <ul class="ex-options">
+          <li data-correct="false">晶體（HSE）啟動失敗，所以 SYSCLK 是 0</li>
+          <li data-correct="true">你忘了 <code>RCC-&gt;AHB1ENR |= RCC_AHB1ENR_GPIODEN</code> — D 埠未供時脈，所以它的暫存器不會鎖存</li>
+          <li data-correct="false">PD12 需要一個外部上拉電阻才能讀回你寫進去的值</li>
+          <li data-correct="false">對目前的時脈速度而言，Flash 等待狀態太低了</li>
+        </ul>
+        <div class="ex-explain">這就是<em>那個</em>經典的 STM32 bug。在重置時 RCC 把每個周邊時脈都關閘以省電；一個未供時脈的周邊是凍結的，它的暫存器會忽略寫入（讀回重置值，通常是 0）。在動周邊<strong>之前</strong>，先在對應的 RCC <code>xENR</code> 暫存器啟用時脈。一個壞掉的 HSE 會弄死整顆晶片，而不只是 D 埠；上拉電阻不影響輸出寫入；錯誤的等待狀態損毀的是程式取指，不是 GPIO 讀取。</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="stm02-systick-reload" data-answer="71999" data-tol="2">
+        <div class="ex-head"><span class="badge">Q2</span> 算出來</div>
+        <div class="ex-q">一顆 STM32F1 的 SYSCLK 跑在 <strong>72&nbsp;MHz</strong>。SysTick 以完整的處理器時脈計數。什麼樣的 <strong>RELOAD</strong> 值能剛好每 <strong>1&nbsp;ms</strong> 觸發一次中斷？（回想一下 $\text{RELOAD} = f_{\text{SYSCLK}}\cdot T - 1$。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="重載值"><span class="ex-unit">ticks</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$\text{RELOAD} = \dfrac{72\times10^{6}}{1000} - 1 = 72{,}000 - 1 = 71{,}999$。減一是為了計數器要通過零。在 168&nbsp;MHz 下，同樣的 1&nbsp;ms tick 需要 $168{,}000 - 1 = 167{,}999$。兩者都輕鬆裝進 SysTick 的 24 位元（$\le 16{,}777{,}215$）重載暫存器裡。</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="stm02-clock-bringup">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰 — 把 SYSCLK 拉到 168&nbsp;MHz</div>
+        <div class="ex-q">寫出暫存器層級的序列，把一顆 STM32F4 從它重置時的 HSI 透過 PLL 切換到 <strong>用 8&nbsp;MHz HSE 跑 168&nbsp;MHz</strong>（<code>M=8, N=336, P=2, Q=7</code>），然後啟動一個 1&nbsp;ms 的 SysTick。把<em>順序</em>弄對：哪一步必須在切換時脈之前、為什麼？設定 AHB÷1、APB1÷4、APB2÷2。</div>
+        <details class="ex-acc">
+          <summary>提示</summary>
+          <div class="acc-body">順序就是一切：<strong>(1)</strong> 啟用 HSE 並輪詢 <code>RCC_CR_HSERDY</code>。<strong>(2)</strong> 在加速<em>之前</em>把 Flash 延遲拉到 5 WS，否則第一次 168&nbsp;MHz 的取指會讀到垃圾。<strong>(3)</strong> 在 <code>RCC-&gt;CFGR</code> 裡設好匯流排除頻器。<strong>(4)</strong> 用 M/N/P/Q 與 HSE 作為來源把 <code>RCC-&gt;PLLCFGR</code> 寫好。<strong>(5)</strong> 啟用 PLL、輪詢 <code>PLLRDY</code>。<strong>(6)</strong> 選 PLL 作為 SYSCLK 並輪詢 <code>SWS</code>。<strong>(7)</strong> <code>SysTick_Config(168000000/1000)</code>。注意 <code>P=2</code> 在 PLLCFGR 的 P 欄位裡編碼為 <code>0b00</code>。</div>
+        </details>
+        <details class="ex-acc">
+          <summary>顯示一種解答</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">clock_168.c <span class="lang">C / STM32F4 (CMSIS)</span></div>
+<pre><code class="language-c">#include "stm32f4xx.h"
+
+void clock_config_168mhz(void) {
+    // (1) 啟動 HSE（8 MHz 晶體）並等到它穩定。
+    RCC-&gt;CR |= RCC_CR_HSEON;
+    while (!(RCC-&gt;CR &amp; RCC_CR_HSERDY)) { }
+
+    // (2) Flash：5 個等待狀態＋預取與快取，在加速之前先設好。
+    FLASH-&gt;ACR = FLASH_ACR_LATENCY_5WS | FLASH_ACR_PRFTEN
+               | FLASH_ACR_ICEN        | FLASH_ACR_DCEN;
+
+    // (3) 匯流排除頻器：AHB /1（HCLK=168）、APB1 /4（42）、APB2 /2（84）。
+    RCC-&gt;CFGR = RCC_CFGR_HPRE_DIV1 | RCC_CFGR_PPRE1_DIV4
+              | RCC_CFGR_PPRE2_DIV2;
+
+    // (4) PLL：M=8、N=336、P=2（欄位=0）、Q=7、來源 = HSE。
+    RCC-&gt;PLLCFGR = (8u   &lt;&lt; RCC_PLLCFGR_PLLM_Pos)   // /M = 8  → 1 MHz
+                 | (336u &lt;&lt; RCC_PLLCFGR_PLLN_Pos)   // xN = 336 → 336 MHz VCO
+                 | (0u   &lt;&lt; RCC_PLLCFGR_PLLP_Pos)   // /P: 00 = ÷2 → 168 MHz
+                 | (7u   &lt;&lt; RCC_PLLCFGR_PLLQ_Pos)   // /Q = 7  → 48 MHz USB
+                 | RCC_PLLCFGR_PLLSRC_HSE;          // PLL 輸入 = HSE
+
+    // (5) 打開 PLL 並等待鎖定。
+    RCC-&gt;CR |= RCC_CR_PLLON;
+    while (!(RCC-&gt;CR &amp; RCC_CR_PLLRDY)) { }
+
+    // (6) 把 SYSCLK 切到 PLL 並確認切換完成。
+    RCC-&gt;CFGR |= RCC_CFGR_SW_PLL;
+    while ((RCC-&gt;CFGR &amp; RCC_CFGR_SWS) != RCC_CFGR_SWS_PLL) { }
+
+    SystemCoreClock = 168000000u;   // 告訴 CMSIS 新的速率
+
+    // (7) 1 ms SysTick：RELOAD = 168000000/1000 - 1 = 167999。
+    SysTick_Config(SystemCoreClock / 1000u);
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">最關鍵的細節是步驟&nbsp;2 要在步驟&nbsp;6 之前：在還慢的時候先拉高 Flash 延遲，<em>然後</em>才加速。把它們倒過來，第一條在 168&nbsp;MHz 取出的指令就會回傳損毀內容，核心在 <code>main()</code> 之前就 HardFault。這基本上就是 CubeMX 的 <code>SystemClock_Config()</code> 產出的東西 — 你現在可以讀懂並稽核它了。</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> 本章回顧</div>
+        <p>你現在能解釋為什麼 STM32 在 HSI 上開機很慢、在計時必須精準時為什麼選 HSE（以及為什麼 USB <em>非用它不可</em>），並能從頭到尾推導出一個系統時脈：<span>$8\to{\div}M\to{\times}N\to{\div}P = 168\,\text{MHz}$</span>，再用 <span>$\div Q$</span> 給出 48&nbsp;MHz 的 USB。你懂 HCLK/PCLK1/PCLK2 與計時器 ×2 規則、為什麼快速核心需要 Flash 等待狀態（以及要<em>先</em>設好它們）、那個會讓周邊沉默的 RCC 時脈啟用 bug，以及如何把 SYSCLK 變成一個 1&nbsp;ms 的 SysTick 拍子（$\text{RELOAD}=f/1000-1$）。下一章我們要來花這份時脈預算：在暫存器層級操作 GPIO，又快又不可分割。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="回到頂端">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../../../assets/vendor/highlight.min.js"></script>
+<script src="../../../assets/katex/katex.min.js"></script>
+<script src="../../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../../assets/vendor/mermaid.min.js"></script>
+<script src="../../../assets/app.js"></script>
+</body>
+</html>

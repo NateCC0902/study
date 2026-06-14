@@ -73,6 +73,9 @@ flowchart LR
 
       <p>The set of points where $z = 0$ (equivalently $\sigma(z) = 0.5$) is the <strong>decision boundary</strong>. Because $z$ is linear in $x$, that boundary is a straight line (in 2D), a plane (in 3D), or a hyperplane in general. Logistic regression is a <strong>linear classifier</strong> — the <em>nonlinearity is only in how it reports confidence</em>, not in the shape of the boundary.</p>
 
+      <div class="sim"><div class="sim-title"><span>🧪</span> Logistic decision boundary</div><canvas id="demo-logistic"></canvas></div>
+      <p>Tune w₁, w₂, b; watch the boundary tilt and the accuracy / cross-entropy update.</p>
+
       <!-- ============================================================ §2 -->
       <h2 id="the-math"><span class="sec-no">2</span>The Math</h2>
 
@@ -412,5 +415,7 @@ print(f"train acc: {train_acc:.2f}   test acc: {test_acc:.2f}")
 <script src="../assets/katex/contrib/auto-render.min.js"></script>
 <script src="../assets/vendor/mermaid.min.js"></script>
 <script src="../assets/app.js"></script>
+<script src="../assets/ml-demos.js"></script>
+<script>EM.mlDemo.logistic("demo-logistic");</script>
 </body>
 </html>

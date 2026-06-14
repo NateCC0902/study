@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>類比訊號：ADC、DMA 串流、DAC 與過取樣 — Embedded Mastery</title>
+<link rel="stylesheet" href="../../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../../assets/styles.css">
+</head>
+<body class="track-stm32" data-course="embedded" data-track="stm32" data-chapter="06-adc-dac">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">STM32 · 第 06 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">STM32 學習軌 · 第 06 章 · 進階</div>
+        <h1>類比訊號：ADC、DMA 串流、DAC 與過取樣</h1>
+        <p>在 Arduino 上你呼叫 <code>analogRead()</code>，一次取得一個通道的 10 位元數值，每一次轉換都要 CPU 全程盯著。STM32 的 ADC 是同樣的概念再加強：12 位元、多通道，能夠自行觸發轉換並透過 <strong>DMA</strong> 直接把結果倒進 RAM，而 CPU 同時跑你的控制迴圈。我們會從矽晶層級一步步把這台機器建起來——並用過取樣從 12 位元的轉換器擠出 14 個有效位元。</p>
+        <div class="meta">
+          <span>⏱ 約 50 分鐘</span><span>🧠 取樣理論</span><span>⚡ DMA 串流</span><span>🔧 HAL + 暫存器</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="adc-intuition"><span class="sec-no">1</span>同樣的概念，規模放大</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先建立整體畫面</small></div>
+      <p><strong>ADC</strong>（類比數位轉換器，analog-to-digital converter）就是一台會用整數回答的電壓表。餵給它一個介於 0 與參考電壓 <span>$V_{ref}$</span> 之間的電壓，它就回傳一個整數，這個整數和該電壓落在範圍中的位置成正比。這正是 Arduino 的 <code>analogRead()</code> 在做的事。STM32 改變了三件事，每一件都很重要：</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話模型</div>
+        <p>STM32 的 ADC 是一台<strong>有可程式排程與輸送帶的高速 12 位元電壓表</strong>：它能依序轉換一串通道清單、跟著計時器的節拍進行，並把每一筆結果交給 DMA，所以 CPU 永遠不必去問「你轉換好了沒？」</p>
+      </div>
+
+      <p>相較於經典 AVR ADC 的三項升級：</p>
+      <ul>
+        <li><strong>解析度。</strong>12 位元而非 10 位元——4096 個層級而非 1024 個。電壓階梯更細緻。</li>
+        <li><strong>吞吐量。</strong>每秒數百萬次取樣，而不是數萬次。逐次逼近核心可被時脈推到數十 MHz。</li>
+        <li><strong>自主性。</strong>一整個通道<em>序列</em>可以背靠背連續轉換，由計時器觸發，並由 DMA 把結果串流到 RAM 緩衝區。每筆取樣耗用零 CPU。</li>
+      </ul>
+
+      <p>最後這一點正是整個重點。在 Arduino 上，以 10 kHz 取樣 4 個感測器表示 CPU 每秒被卡在 <code>analogRead()</code> 裡 40,000 次。在 STM32 上，你只要設定一次，感測器就會在你背後把緩衝區填滿。我們會在 §4 抵達那裡。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 你實際上在建構的東西</div>
+        <p>一條管線：<strong>類比腳位 → 取樣保持（sample-and-hold） → SAR 轉換器 → 資料暫存器 → DMA → RAM 緩衝區</strong>。CPU 設定管線的前端、讀取管線的後端。中間的一切都是硬體。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="resolution-math"><span class="sec-no">2</span>解析度：把電壓轉成計數值</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>把它推導出來</small></div>
+      <p>一個 12 位元轉換器把輸入範圍 <span>$[0, V_{ref}]$</span> 分成 <span>$2^{12} = 4096$</span> 個相等的階。它能分辨的最小電壓差——一個計數值——稱為 <strong>LSB</strong>（最低有效位元，least-significant bit）：</p>
+
+      <div class="math-box">
+        $$ \text{LSB} = \frac{V_{ref}}{2^{n}} = \frac{V_{ref}}{4096} $$
+      </div>
+
+      <p>以典型的 <span>$V_{ref} = 3.3\,\text{V}$</span> 來算：</p>
+
+      <div class="math-box">
+        $$ \text{LSB} = \frac{3.3\,\text{V}}{4096} \approx 0.806\,\text{mV} $$
+      </div>
+
+      <p>要反向操作——從一個原始 ADC 計數值回推電壓——注意編碼範圍從 <span>$0$</span>（對應 0 V）到 <span>$4095$</span>（對應滿刻度，僅略低於 <span>$V_{ref}$</span>）。轉換器回報的是滿刻度的<em>比例</em>，所以：</p>
+
+      <div class="math-box">
+        $$ V = \frac{\text{adc}}{4095}\, V_{ref} $$
+      </div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 為什麼是 4095 而不是 4096？</div>
+        <p>編碼是 <strong>0 … 4095</strong>——那是 4096 個相異數值，但<em>最大</em>的編碼是 4095。滿刻度（編碼 4095）對應於比 <span>$V_{ref}$</span> 低一個 LSB 的電壓。所以我們除以最大編碼 4095，把編碼映射回電壓。若改除以 4096，會在滿刻度處引入一個 LSB 的微小系統性偏差；做快速估算時幾乎無關緊要，但做校準量測時，請用 4095。</p>
+      </div>
+
+      <p>實作範例：ADC 回傳 <code>adc = 2048</code>，也就是中點。那麼</p>
+      <div class="math-box">
+        $$ V = \frac{2048}{4095}\times 3.3\,\text{V} \approx 1.65\,\text{V} $$
+      </div>
+      <p>——恰好是 <span>$V_{ref}$</span> 的一半，正如你會從中點編碼預期的那樣。和舊的 10 位元 AVR 比較：那裡 <span>$\text{LSB} = 5\,\text{V}/1024 \approx 4.9\,\text{mV}$</span>——比 STM32 的 0.806 mV 粗六倍。12 位元為你買到了真正的精度。</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="timing-and-modes"><span class="sec-no">3</span>轉換時序與 ADC 時脈</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>一筆取樣要花多久</small></div>
+      <p>SAR（逐次逼近，successive-approximation）ADC 的運作就像二分搜尋：它先猜最高有效位元、比較、保留或丟棄它，接著下一個位元，依此類推——每個位元做一次比較。在這一切之前，它必須先<strong>取樣</strong>：把輸入連到一個內部電容，讓它充電到訊源電壓。高阻抗的感測器會讓這個電容充電很慢，所以取樣時間是可程式的。</p>
+
+      <p>在 STM32F4 上，總轉換時間（以 ADC 時脈週期計）為：</p>
+
+      <div class="math-box">
+        $$ T_{conv} = \frac{T_{sampling} + 12.5}{f_{ADC}} $$
+      </div>
+
+      <p>這裡 <span>$T_{sampling}$</span> 是你選擇的取樣時間（以 ADC 週期計；F4 提供 3、15、28、56、84、112、144 或 480 個週期），而固定的 <span>$12.5$</span> 個週期是 12 位元結果的逐次逼近階段（12 個位元 + 0.5 個週期的額外開銷）。分母 <span>$f_{ADC}$</span> 是 ADC 自己的時脈。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> ADC 時脈有一個硬上限</div>
+        <p>在 F4 上，ADC 由 <strong>APB2</strong> 經過 <code>ADCPRE</code> 預除器（÷2、÷4、÷6、÷8）提供時脈。得到的 <span>$f_{ADC}$</span> 不可超過資料手冊的最大值——在 F4 系列上通常是 <strong>約 36 MHz</strong>。超頻它，轉換會悄悄地失去準確度。永遠選一個讓 <span>$f_{ADC}$</span> 保持在最大值以下的預除器。</p>
+      </div>
+
+      <p>實作範例：APB2 為 84 MHz，預除器 ÷4 得到 <span>$f_{ADC} = 21\,\text{MHz}$</span>（安全地低於 36 MHz）。搭配 15 週期的取樣時間：</p>
+      <div class="math-box">
+        $$ T_{conv} = \frac{15 + 12.5}{21\times10^{6}\,\text{Hz}} = \frac{27.5}{21\times10^{6}} \approx 1.31\,\mu\text{s} \;\Rightarrow\; \approx 763\,\text{kSPS} $$
+      </div>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>排程轉換的四種方式</small></div>
+      <p>ADC 不只是轉換一次就停下。它有四種<strong>模式</strong>，挑對其中一種就已經是設計的一半：</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>模式</th><th>它做什麼</th><th>何時使用</th></tr></thead>
+        <tbody>
+          <tr><td><strong>單次（Single）</strong></td><td>一個通道、一次轉換，然後停止。</td><td>偶爾的單點讀取（開機時量電池電壓）。</td></tr>
+          <tr><td><strong>連續（Continuous）</strong></td><td>一個通道，轉換 → 重啟 → 轉換，永不停止。</td><td>盡可能快地串流單一訊號。</td></tr>
+          <tr><td><strong>掃描（Scan）</strong></td><td>走過一個通道<em>序列</em>一次（或連續地走）。</td><td>把好幾個感測器當作一組來讀取。</td></tr>
+          <tr><td><strong>注入（Injected）</strong></td><td>一個會搶占常規序列的高優先序列。</td><td>一筆緊急讀取（馬達電流）打斷一個緩慢的掃描。</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p><strong>掃描 + 連續 + DMA</strong> 正是那個能把 ADC 變成 §1 輸送帶的組合：它一遍又一遍地走過你的通道清單，而 DMA 接住每一筆結果。那是接下來的內容。</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="adc-dma"><span class="sec-no">4</span>超能力：ADC + DMA 串流</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>輸送帶</small></div>
+      <p><strong>DMA</strong>（直接記憶體存取，Direct Memory Access）是一個微小的專用搬運器，能在周邊與 RAM 之間搬移資料<em>而不需要 CPU</em>。把 ADC 的資料暫存器接上一個 DMA 通道，每一筆完成的轉換就會被自動搬進你的緩衝區。把 DMA 設為<strong>環形（circular）</strong>模式，它在緩衝區填滿時會繞回開頭——一個 ADC 持續填、你持續讀的無盡環形緩衝。</p>
+
+      <div class="mermaid">
+flowchart LR
+    PIN["類比腳位<br/>PA0 · PA1 · PA4"] --> ADC["ADC1<br/>掃描 + 連續"]
+    ADC -->|每筆結果| DMA["DMA2 Stream0<br/>環形"]
+    DMA -->|寫入| BUF["RAM 緩衝區<br/>uint16_t[N]"]
+    BUF -.->|CPU 隨意時讀取| CPU(["控制迴圈"])
+    ADC -. 每筆取樣耗用零 CPU .-> CPU
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 為什麼這就是整個重點</div>
+        <p>沒有 DMA，每一筆轉換都是一次輪詢或一次中斷——CPU 停下來去取一個數字，每秒上千次。有了 DMA，CPU <em>只設定一次</em>這條鏈，接著 ADC 與 DMA 就作為一個封閉迴圈自行運轉。只有當 <em>CPU 自己</em>想要新讀數時，才去碰緩衝區。這就是你如何能在以數百 kSPS 取樣感測器的同時，還跑著 PID、通訊與使用者介面。</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>每一行都讀過</small></div>
+      <p>這是一份貼近實務的 HAL 設定：三個通道（PA0、PA1、PA4）連續掃描，以環形方式串流進一個緩衝區。DMA 一完成一輪，ADC 就立刻重啟掃描。</p>
+
+      <div class="codeblock">
+        <div class="code-head">adc_dma.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">#define NUM_CH   3
+#define NUM_AVG  16                 // 選用：保留多個掃描結果
+volatile uint16_t adc_buf[NUM_CH]; // DMA 寫到這裡，依通道順序排列
+
+extern ADC_HandleTypeDef hadc1;    // 來自 CubeMX / 你的初始化
+
+void adc_dma_start(void) {
+  // 啟動整條鏈。HAL 會設定好 DMA stream 與 ADC，
+  // 然後 ADC 轉換就直接串流進 adc_buf，耗用零 CPU。
+  // 型別轉換：HAL 要 uint32_t*，但我們的資料是 16 位元半字組（在 CubeMX 中設定）。
+  HAL_ADC_Start_DMA(&amp;hadc1, (uint32_t *)adc_buf, NUM_CH);
+}
+
+// 由 HAL 在 DMA 傳輸完成 ISR 中呼叫，每完整掃描一輪呼叫一次。
+// 因為 DMA 是環形（CIRCULAR）的，轉換永不停止——這只是通知我們。
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc) {
+  if (hadc->Instance == ADC1) {
+    // adc_buf 現在每個通道各有一筆新取樣。依需要轉換。
+    //（在此讀取是安全的；DMA 此刻位於兩輪之間。）
+    float v0 = (adc_buf[0] / 4095.0f) * 3.3f;   // PA0 → 電壓
+    (void)v0;                                    // ... 使用它
+  }
+}
+</code></pre>
+      </div>
+
+      <p>CubeMX 產生的對應底層設定值得看過一次，因為<em>策略</em>就住在這裡——掃描、連續、DMA 環形全都編碼成暫存器欄位：</p>
+
+      <div class="codeblock">
+        <div class="code-head">adc_init.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">void MX_ADC1_Init(void) {
+  hadc1.Instance = ADC1;
+  hadc1.Init.ClockPrescaler   = ADC_CLOCK_SYNC_PCLK_DIV4; // f_ADC = APB2/4
+  hadc1.Init.Resolution       = ADC_RESOLUTION_12B;       // 12 位元 → 0..4095
+  hadc1.Init.ScanConvMode     = ENABLE;     // 走過通道序列
+  hadc1.Init.ContinuousConvMode = ENABLE;   // 永遠重啟掃描
+  hadc1.Init.NbrOfConversion  = 3;          // 清單中有三個通道
+  hadc1.Init.DMAContinuousRequests = ENABLE;// 讓 DMA 請求持續發出
+  hadc1.Init.EOCSelection     = ADC_EOC_SINGLE_CONV;
+  HAL_ADC_Init(&amp;hadc1);
+
+  ADC_ChannelConfTypeDef sc = {0};
+  sc.SamplingTime = ADC_SAMPLETIME_15CYCLES;
+  sc.Channel = ADC_CHANNEL_0; sc.Rank = 1; HAL_ADC_ConfigChannel(&amp;hadc1, &amp;sc);
+  sc.Channel = ADC_CHANNEL_1; sc.Rank = 2; HAL_ADC_ConfigChannel(&amp;hadc1, &amp;sc);
+  sc.Channel = ADC_CHANNEL_4; sc.Rank = 3; HAL_ADC_ConfigChannel(&amp;hadc1, &amp;sc);
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——緩衝區必須與序列對應</div>
+        <p>DMA 是依照 <strong>rank（順位）順序</strong>寫入結果，而不是腳位順序。<code>Rank</code> 欄位決定每個通道落在哪個槽位：rank 1 → <code>adc_buf[0]</code>、rank 2 → <code>adc_buf[1]</code>，依此類推。順位設錯，你以為的「PA4 讀數」就會悄悄變成 PA1。另外：要把緩衝區標成 <code>volatile</code>——DMA 會在編譯器看不到的情況下更動它，少了 <code>volatile</code>，最佳化器可能快取一個過時的數值。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="dac"><span class="sec-no">5</span>反向操作：DAC</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>數字變成電壓</small></div>
+      <p><strong>DAC</strong>（數位類比轉換器，digital-to-analog converter）是 ADC 反過來跑：寫入一個數字，得到一個電壓。許多 STM32 系列（F4、L4 等等）內建一或兩個 12 位元 DAC。把一個 12 位元編碼寫進資料暫存器，輸出腳位就會維持一個穩定的類比電壓——非常適合用來產生波形、音訊、控制偏移量，或作為外部電路的參考電壓。</p>
+
+      <p>這個映射正好對應 ADC 的。編碼 0 給出約 0 V；最大編碼 4095 給出接近 <span>$V_{ref}$</span> 的滿刻度：</p>
+
+      <div class="math-box">
+        $$ V_{out} = \frac{\text{val}}{4095}\, V_{ref} $$
+      </div>
+
+      <p>所以要在腳位上放出 1.0 V（<span>$V_{ref} = 3.3\,\text{V}$</span>），解出編碼：<span>$\text{val} = \dfrac{1.0}{3.3}\times 4095 \approx 1241$</span>。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>設定一個輸出電壓</small></div>
+      <div class="codeblock">
+        <div class="code-head">dac_out.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">extern DAC_HandleTypeDef hdac;
+
+void dac_set_volts(float volts) {
+  // 夾限到合法範圍，再把 volts 映射成 12 位元編碼。
+  if (volts &lt; 0.0f)  volts = 0.0f;
+  if (volts &gt; 3.3f)  volts = 3.3f;
+  uint32_t code = (uint32_t)((volts / 3.3f) * 4095.0f + 0.5f); // 四捨五入
+
+  HAL_DAC_SetValue(&amp;hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, code);
+  HAL_DAC_Start(&amp;hdac, DAC_CHANNEL_1);
+}
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> DAC + DMA + 計時器 = 一台波形產生器</div>
+        <p>真正的訣竅：先在 RAM 中算好一張正弦波表，然後讓一個<strong>計時器</strong>觸發 DAC，再讓 <strong>DMA</strong> 在每一個節拍餵給它表中的下一筆值。CPU 只寫一次表，硬體就永遠播放它——腳位上一條乾淨的類比正弦波，零 CPU 負載。和 ADC 是同一套輸送帶模式，只是往外流。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="oversampling"><span class="sec-no">6</span>過取樣：買到額外的位元</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>把雜訊平均掉</small></div>
+      <p>你的 12 位元讀數並非完美穩定——最後一兩個位元會因熱雜訊與量化雜訊而抖動。那個抖動很惱人，但它也是一份禮物：如果雜訊大致是隨機的、而且至少有一個 LSB 那麼寬，<strong>平均許多筆取樣</strong>就能還原出<em>低於</em>一個 LSB 的資訊。平均得夠多，你就真的能解析得比 12 位元更細。這就是<strong>過取樣（oversampling）</strong>。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>推導位元增益</small></div>
+      <p>平均 <span>$N$</span> 筆獨立取樣，會把雜訊的標準差降低為原本的 <span>$\sqrt{N}$</span> 分之一：</p>
+
+      <div class="math-box">
+        $$ \sigma_{avg} = \frac{\sigma}{\sqrt{N}} $$
+      </div>
+
+      <p>每多一個<em>位元</em>的解析度，就把有效階距減半——也就是需要雜訊底降低 2 倍。既然平均把雜訊降低 <span>$\sqrt{N}$</span> 倍，要增益 <span>$n$</span> 個位元就需要 <span>$\sqrt{N} = 2^{n}$</span>，所以 <span>$N = 4^{n}$</span>。乾淨俐落的法則：</p>
+
+      <div class="math-box">
+        $$ \Delta\text{ENOB} = \frac{1}{2}\log_{2} N = \log_{4} N \quad\Longrightarrow\quad N = 4^{\,n}\ \text{筆取樣}\ \to\ +n\ \text{位元} $$
+      </div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 取捨對照表</div>
+        <p>每多一個有效位元，代價是 4 倍的取樣數（以及 4 倍的時間）：</p>
+        <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>平均的取樣數 $N$</th><th>額外位元 $n$</th><th>有效解析度</th><th>吞吐量代價</th></tr></thead>
+          <tbody>
+            <tr><td>$4^1 = 4$</td><td>+1</td><td>13 位元</td><td>÷4</td></tr>
+            <tr><td>$4^2 = 16$</td><td>+2</td><td>14 位元</td><td>÷16</td></tr>
+            <tr><td>$4^3 = 64$</td><td>+3</td><td>15 位元</td><td>÷64</td></tr>
+            <tr><td>$4^4 = 256$</td><td>+4</td><td>16 位元</td><td>÷256</td></tr>
+          </tbody>
+        </table>
+        </div>
+      </div>
+
+      <p>所以平均 16 筆取樣，就把一個 12 位元 ADC 變成有效的 14 位元——<span>$\text{ENOB} = 12 + \log_4 16 = 12 + 2 = 14$</span> 位元。代價在於吞吐量：每一筆可用讀數你花掉了 16 次轉換，所以輸出速率掉了 16 倍。這就是那個永恆的嵌入式取捨——<strong>解析度 vs. 速度</strong>——而現在你能為它寫出具體數字了。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——過取樣需要雜訊才能運作</div>
+        <p>如果訊號<em>完全</em>安靜（雜訊 &lt; 1 LSB），平均只會每次都回傳同一個編碼——沒有額外位元，因為平均沒有東西可以內插。過取樣只有在訊號上至少騎著約 1 LSB 的隨機抖動（dither）時，才能買到解析度。現實世界的熱雜訊通常會提供它；但在實驗台上完美的訊源上，你可能需要刻意加入抖動。</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 較新的系列免費替你做這件事</div>
+        <p>STM32L4/G4/H7 的 ADC 內建一個<strong>硬體過取樣器</strong>：設定一個過取樣比率與一個右移量，ADC 就會把 <span>$N$</span> 次轉換加總並把結果右移——不需要 CPU 平均、不需要額外韌體。在 F4 上你得用軟體做（把 DMA 緩衝區加總、右移）。不論哪種做法，背後發生的就是上面那套數學。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="analog-watchdog"><span class="sec-no">7</span>類比看門狗與一個真實系統</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>一個硬體警報</small></div>
+      <p>有時候你要的不是數值——你要的是在某個值離開安全帶的那一瞬間就知道。用軟體去輪詢這件事既浪費週期又增加延遲。<strong>類比看門狗（analog watchdog）</strong>是替你做這件事的硬體：設定一個低門檻與一個高門檻，當某次轉換落到 <span>$[V_{low}, V_{high}]$</span> 之外的那一刻，ADC 就會觸發中斷。不需輪詢、延遲趨近於零。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 門檻是 ADC 編碼，不是電壓</div>
+        <p>你把看門狗的上下限設成原始編碼。要在 <span>$V_{ref}=3.3$</span>V 下對高於 2.0 V 觸發警報：<span>$\text{HT} = \dfrac{2.0}{3.3}\times 4095 \approx 2482$</span>。把你的物理上下限轉成編碼的方式，就跟你把讀數轉回電壓的方式一樣——它是 §2 公式的逆運算。</p>
+      </div>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>這會出貨到產品裡</small></div>
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——一台永不為 ADC 卡住的馬達控制器</div>
+        <p>一塊無刷馬達板需要持續讀取匯流排電壓、板溫與一個油門可變電阻——同時還跑著一個 20 kHz 的控制迴圈。設計是這樣：ADC1 以<strong>掃描 + 連續</strong>模式把全部三個通道走進一個三字組的環形 DMA 緩衝區。控制迴圈隨時想讀就讀 <code>adc_buf[]</code>；數值永遠是新的，而且沒有一個 CPU 週期花在等待轉換上。匯流排電壓通道上裝了一個<strong>類比看門狗</strong>，一旦供電降到某個安全編碼以下，就立刻把馬達故障跳脫（fault-trip）——一道硬體安全聯鎖，比任何軟體檢查都更快、更可靠。這個一模一樣的模式，存在於無數出貨的驅動器、無人機與電源供應器裡。</p>
+      </div>
+
+      <p>注意到你學過的每一塊都拼在一起了：12 位元解析度設定精度、轉換時序預算設定掃描迴圈跑多快、掃描模式挑選通道、環形 DMA 把 CPU 從迴圈裡移除，而看門狗加上一張硬體安全網。這就是一個完整的類比前端。</p>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>⑤ 換你上場</h2>
+      <div class="layer"><span class="step">⑤</span> 練習 <small>由你計算與決定</small></div>
+      <p>三道檢核。點一個答案、輸入一個數字，或展開一道程式挑戰。你的進度會儲存在這台裝置上，並顯示在首頁。</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="stm06-why-dma">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢核</div>
+        <div class="ex-q">你正在跑一個控制迴圈，同時以高速率取樣四個感測器。為什麼要把 ADC 與<strong>環形模式的 DMA</strong> 配對，而不是在中斷裡讀取每一筆轉換？</div>
+        <ul class="ex-options">
+          <li data-correct="false">DMA 讓每一筆個別轉換在物理上比 SAR 核心能跑的速度更快。</li>
+          <li data-correct="true">DMA 把每一筆結果搬進 RAM 緩衝區，每筆取樣耗用零 CPU，所以 CPU 得以自由地跑控制迴圈，只在想要新讀數時才去碰緩衝區。</li>
+          <li data-correct="false">DMA 把 ADC 的解析度從 12 位元提升到 16 位元。</li>
+          <li data-correct="false">沒有 DMA，ADC 根本無法做多通道掃描模式。</li>
+        </ul>
+        <div class="ex-explain">DMA 並不會加快轉換器本身——SAR 時序由 <span>$T_{conv}$</span> 固定。它移除的是<strong>每筆取樣的 CPU 成本</strong>：每一筆完成的轉換都由 DMA 引擎複製到 RAM，而環形模式表示它永遠循環、不必重新武裝（re-arm）。CPU 設定整條鏈一次，然後就不理它，依自己的步調讀緩衝區。這就是你如何能連續取樣、卻仍留有 CPU 給其他一切。</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="stm06-code-to-volts" data-answer="1.65" data-tol="0.03">
+        <div class="ex-head"><span class="badge">Q2</span> 算出來</div>
+        <div class="ex-q">一個 12 位元 ADC，<span>$V_{ref} = 3.3\,\text{V}$</span>，回傳編碼 <code>adc = 2048</code>。這對應到多少輸入電壓？（使用 $V = \dfrac{\text{adc}}{4095}\,V_{ref}$。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="伏特"><span class="ex-unit">V</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$V = \dfrac{2048}{4095}\times 3.3 \approx 1.65\,\text{V}$——是 $V_{ref}$ 的一半，正如中點編碼所預期。（附帶一提：這裡一個 LSB 是 $3.3/4096 \approx 0.806\,\text{mV}$，是這個轉換器能解析的最細階距。）</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="stm06-adc-dma-config">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰——設定 ADC + DMA（環形）</div>
+        <div class="ex-q">勾勒出 HAL 設定，把<strong>兩個</strong>通道（PA0 與 PA1）連續串流進一個環形 RAM 緩衝區，然後啟動它。指出讓它能夠 (a) 掃描兩個通道、(b) 永遠重啟、(c) 讓 DMA 持續循環的每一項設定。並正確地標記緩衝區，讓最佳化器不會咬你一口。</div>
+        <details class="ex-acc">
+          <summary>提示</summary>
+          <div class="acc-body">三個 <code>Init</code> 旗標扛起重任：<code>ScanConvMode = ENABLE</code>、<code>ContinuousConvMode = ENABLE</code>，以及 <code>DMAContinuousRequests = ENABLE</code>。設定 <code>NbrOfConversion = 2</code>，並給每個通道一個 <code>Rank</code>。DMA stream 本身必須設定成<strong>環形</strong>（在 CubeMX 中把 DMA 請求設成 Circular 模式時就會這樣做）。用 <code>HAL_ADC_Start_DMA(&amp;hadc1, (uint32_t*)buf, 2)</code> 啟動。並把緩衝區宣告為 <code>volatile</code>。</div>
+        </details>
+        <details class="ex-acc">
+          <summary>顯示一個解答</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">adc2ch_dma.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">volatile uint16_t buf[2];          // DMA 寫到這裡；volatile 是必要的
+
+void MX_ADC1_Init(void) {
+  hadc1.Instance = ADC1;
+  hadc1.Init.ClockPrescaler   = ADC_CLOCK_SYNC_PCLK_DIV4; // 讓 f_ADC &lt;= 36 MHz
+  hadc1.Init.Resolution       = ADC_RESOLUTION_12B;
+  hadc1.Init.ScanConvMode     = ENABLE;     // (a) 走過 2 通道清單
+  hadc1.Init.ContinuousConvMode = ENABLE;   // (b) 永遠重啟掃描
+  hadc1.Init.DMAContinuousRequests = ENABLE;// (c) 讓 DMA 請求持續流動
+  hadc1.Init.NbrOfConversion  = 2;          // 序列中有兩個順位
+  hadc1.Init.EOCSelection     = ADC_EOC_SINGLE_CONV;
+  HAL_ADC_Init(&amp;hadc1);
+
+  ADC_ChannelConfTypeDef sc = {0};
+  sc.SamplingTime = ADC_SAMPLETIME_15CYCLES;
+  sc.Channel = ADC_CHANNEL_0; sc.Rank = 1; HAL_ADC_ConfigChannel(&amp;hadc1, &amp;sc); // PA0 → buf[0]
+  sc.Channel = ADC_CHANNEL_1; sc.Rank = 2; HAL_ADC_ConfigChannel(&amp;hadc1, &amp;sc); // PA1 → buf[1]
+}
+
+void start(void) {
+  // DMA stream 在 CubeMX 中設成環形（CIRCULAR），所以這永遠不必
+  // 重新武裝：轉換無止盡地串流進 buf[]，耗用零 CPU。
+  HAL_ADC_Start_DMA(&amp;hadc1, (uint32_t *)buf, 2);
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">那三個 <code>ENABLE</code> 就是掃描／連續／DMA 三件套；<code>Rank</code> 把每個腳位映射到它的緩衝區槽位；環形 DMA（一個 stream 設定，不是 ADC 欄位）讓它永久持續；而 <code>volatile</code> 阻止編譯器快取過時的緩衝區讀取。漏掉其中任何一項，串流就會停滯、錯序或讀到垃圾——這正是四個經典的 ADC-DMA 臭蟲。</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> 本章回顧</div>
+        <p>你現在能在 ADC 編碼與電壓之間互換（$V = \tfrac{\text{adc}}{4095}V_{ref}$，3.3 V 下 LSB $\approx 0.806$ mV）、用 $T_{conv} = (T_{sampling}+12.5)/f_{ADC}$ 編列轉換時間預算並同時尊重約 36 MHz 的 F4 ADC 時脈上限、在單次／連續／掃描／注入模式之間做選擇，以及——重頭戲——用 <code>HAL_ADC_Start_DMA</code> 把多個通道串流進一個環形 RAM 緩衝區，讓 CPU 每筆取樣花掉零週期。你能驅動一個 DAC（$V_{out} = \tfrac{\text{val}}{4095}V_{ref}$）、用過取樣以吞吐量換解析度（$N = 4^n$ 筆取樣 → $+n$ 個有效位元，雜訊降低 $\sqrt{N}$ 倍），並武裝一個類比看門狗作為硬體安全警報。接下來我們會讓一個計時器來主導轉換<em>何時</em>觸發，並把 ADC 同步到一個 PWM 邊緣，以做精確的電流感測。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="回到頂端">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../../../assets/vendor/highlight.min.js"></script>
+<script src="../../../assets/katex/katex.min.js"></script>
+<script src="../../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../../assets/vendor/mermaid.min.js"></script>
+<script src="../../../assets/app.js"></script>
+</body>
+</html>

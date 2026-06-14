@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>遷移學習、大型語言模型與生產環境 — 機器學習與深度學習</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="17-transfer-learning-llms-mlops">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 17</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL 課程 · 17</div>
+        <h1>遷移學習、大型語言模型與生產環境</h1>
+        <p>到目前為止每一課都是從隨機權重開始訓練——那能教會你機制，卻幾乎從來不是你上線部署的方式。在這裡你要學的是真實世界的預設作法：拿一個已經花了一個 GPU-月學習過的模型，保留它的特徵，再把它適配到<em>你的</em>那個微小資料集。然後我們要面對更難的另一半——讓那個模型在生產環境的衝擊下存活下來。</p>
+        <div class="meta"><span>⏱ 約 45 分鐘</span><span>🧠 微調與嵌入</span><span>🤖 LLM 訓練配方</span><span>🚢 為 USV 而生的 MLOps</span></div>
+      </section>
+
+      <p><strong>先備知識：</strong> <a href="16-generative-models.html">16 — 生成模型</a> · 同時你也會用到 <a href="13-cnns.html">13 — 卷積神經網路</a>（本課要微調一個 CNN）與 <a href="15-attention-transformers.html">15 — 注意力與 Transformer</a>（大型語言模型就是規模放大的 Transformer）。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎯</span> 學完本課你能</div>
+        <ul>
+          <li>解釋<strong>遷移學習 (transfer learning)</strong>，並說明為什麼在真實專案裡「微調一個預訓練模型」才是<em>預設</em>作法，而不是從零開始訓練。</li>
+          <li>把<strong>嵌入 (embedding)</strong> 當成可重複使用、現成的特徵表示來用。</li>
+          <li>對<strong>大型語言模型 (LLM)</strong> 給出有根據的說明：詞元、預訓練 vs. 微調 vs. 指令微調/RLHF，以及第 15 課的 Transformer 在其中的位置。</li>
+          <li>在 PyTorch 中，於一個自訂的小型資料集上微調一個預訓練的 <strong>torchvision ResNet</strong>，並決定要凍結哪些部分。</li>
+          <li>點出那些讓真實部署翻車的 <strong>MLOps</strong> 現實問題——洩漏、訓練/服務落差、漂移、可重現性——以及如何各別防範。</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>直覺理解</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺理解 <small>先把圖像建立起來</small></div>
+      <p>到目前為止每一課都是<strong>從零開始</strong>訓練模型：隨機權重，然後在<em>你的</em>資料上做梯度下降。那是用來<em>學會機制</em>的方式，卻幾乎從來不是你上線部署的方式。</p>
+
+      <p>問題在這裡。一個 ResNet-50 有約 2500 萬個參數。要從零學到好的視覺特徵，它大約需要一百萬張帶標籤的影像 (ImageNet) 這個量級。而你手上只有 300 張來自無人水面載具 (USV) 船頭攝影機的照片。用 300 張影像從零訓練，你會災難性地過度擬合 (overfitting)——網路把你那 300 張圖背了起來，遇到第 301 張就崩潰。</p>
+
+      <p><strong>遷移學習</strong>就是出路。已經有人花了一個 GPU-月，用一百萬張影像訓練好一個網路。那個網路<em>前段</em>的層學到了通用的視覺基本元素——邊緣、角點、紋理、漸層、斑塊——這些對<em>任何</em>影像任務都有用，無論你看的是浮標還是香蕉。只有<em>最後一層</em>是 ImageNet 專屬的（「這是一隻黃金獵犬」）。所以你<strong>保留學好的特徵提取器，只替換掉那顆頭 (head)</strong>，再用你的小資料集稍微推它一把。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 類比——雇用一個有經驗的水手 vs. 養一個新生兒</div>
+        <p>從零開始訓練就像把一個嬰兒從出生養到能上船當船員：要花幾十年、需要龐大的資料。遷移學習則是雇用一個已經航行了 20 年的人，再給他做一週關於<em>你這艘特定船隻</em>的簡報。他早就懂風、繩索與平衡（通用特徵）；你只需要教他<em>你的</em>絞盤在哪裡（新的那顆頭）。所需資料少得多、時間少得多、結果還好得多。</p>
+      </div>
+
+      <div class="mermaid">
+graph LR
+    subgraph "Pretrained on ImageNet (frozen)"
+        E1[conv：邊緣] --> E2[conv：紋理] --> E3[conv：部件/形狀]
+    end
+    E3 --> H["新的 head：浮標 / 船 / 漂浮物 / 淨空水域"]
+    style E1 fill:#cde
+    style E2 fill:#cde
+    style E3 fill:#cde
+    style H fill:#fea
+</div>
+
+      <p>同一個想法驅動了所有現代技術。一個<strong>大型語言模型 (LLM)</strong> 就是一個 Transformer（第 15 課），在網際網路的一大片切片上預訓練來預測下一個詞元。那個預訓練教會了它文法、事實與推理模式。要讓它<em>變得有用</em>，你不會重新訓練——你會<strong>微調 (fine-tuning)</strong> 它，或乾脆<strong>提示 (prompting)</strong> 它。預訓練一次、永遠適配：這就是整套現代心法，在視覺與語言上皆然。</p>
+
+      <p>本課的另一面：一個在你的筆記本裡訓練得漂漂亮亮的模型，到了生產環境依然可能失敗。後半段講的就是那個現實——<strong>MLOps</strong>——因為在你的領域裡，一個錯誤的預測會去操控一艘真正的船。</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>數學原理</h2>
+
+      <div class="layer"><span class="step">②</span> 數學原理 <small>重複使用特徵圖、重新學習那顆頭</small></div>
+      <h3>遷移學習 = 重複使用特徵圖、重新學習那顆頭</h3>
+      <p>把一個深度網路想成一個複合函數：一個<strong>特徵提取器</strong> $\phi_\theta$ 後面接著一個<strong>頭</strong> $h_\psi$。</p>
+
+      <div class="math-box">$$ \hat{y} = h_\psi\big(\phi_\theta(\mathbf{x})\big) $$</div>
+
+      <ul>
+        <li>$\mathbf{x}$ — 輸入（一張影像、一段詞元序列）。</li>
+        <li>$\phi_\theta$ — 除最後一層以外的所有層，參數為 $\theta$，把原始輸入映射成一個<strong>特徵向量</strong>（也就是<strong>嵌入</strong>）。</li>
+        <li>$h_\psi$ — 最後的分類器/迴歸器，參數為 $\psi$。</li>
+      </ul>
+
+      <p>預訓練給了你一組好的 $\theta^\star$。遷移學習有兩種風味：</p>
+
+      <p><strong>1. 特徵提取（凍結主幹）。</strong> 令 $\theta = \theta^\star$ 並<em>不</em>更新它。只訓練那顆新的頭：</p>
+
+      <div class="math-box">$$ \min_{\psi}\ \frac{1}{N}\sum_{i=1}^N \mathcal{L}\big(h_\psi(\phi_{\theta^\star}(\mathbf{x}_i)),\, y_i\big) $$</div>
+
+      <p>你其實是在固定的深度特徵上跑邏輯迴歸（第 04 課）。便宜、快速、需要的資料最少。凍結為什麼有幫助？把 $\theta$ 固定後，你把可訓練參數從約 2500 萬個砍到只剩幾千個，所以<strong>有效容量 (effective capacity)</strong> 變得極小，要在 300 張影像上過度擬合都很難。這是刻意運用偏差-變異數權衡（第 05 課）。</p>
+
+      <p><strong>2. 微調（解凍部分/全部 $\theta$）。</strong> 兩者都訓練，但從 $\theta^\star$ 出發，並使用<strong>很小的學習率</strong>，這樣你是在輕推預訓練特徵而不是把它砸爛：</p>
+
+      <div class="math-box">$$ \theta \leftarrow \theta - \eta\,\nabla_\theta \mathcal{L},\qquad \eta \approx 10^{-4}\text{–}10^{-5}\ \text{(small!)} $$</div>
+
+      <p>「小 $\eta$」的直覺是：$\theta^\star$ 落在損失地景（第 12 課）裡一個好的盆地中。一個大步會把你踢出盆地，毀掉你正是為此而來的那些特徵——也就是<strong>災難性遺忘 (catastrophic forgetting)</strong>。一個小步則讓你滑到附近一個適配你資料集的極小值。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 經驗法則（把這張表背起來）</div>
+        <div class="tbl-wrap"><table>
+          <thead><tr><th>你的資料</th><th>與預訓練資料相似嗎？</th><th>這樣做</th></tr></thead>
+          <tbody>
+            <tr><td>小 (10²–10³)</td><td>相似</td><td>凍結主幹，訓練頭</td></tr>
+            <tr><td>小</td><td>不相似</td><td>凍結前段層，微調後段層</td></tr>
+            <tr><td>大 (10⁵+)</td><td>相似</td><td>整個拿來微調</td></tr>
+            <tr><td>大</td><td>不相似</td><td>全部微調，也許從零訓練</td></tr>
+          </tbody>
+        </table></div>
+      </div>
+
+      <p>為什麼？前段層（邊緣、紋理）是通用的——保留它們。後段層是任務專屬的——那些才是要去適配的。你的資料越少，就越得多凍結，因為每個<em>被凍結</em>的參數，就是一個你不必從稀少標籤裡估計出來的參數。</p>
+
+      <h3>嵌入——承載意義的學習座標</h3>
+      <p>一個<strong>嵌入</strong>就是 $\mathbf{z} = \phi_\theta(\mathbf{x})$：預訓練網路產生的那個特徵向量，是 $\mathbb{R}^d$ 裡的一個點，而在這個空間裡<em>幾何結構編碼了語意</em>。相似的輸入會落在彼此附近；網路為了完成它的工作，學會了這樣去安排它們。</p>
+
+      <p>具體來說，對於兩個輸入，你用它們嵌入的<strong>餘弦相似度 (cosine similarity)</strong> 來衡量語意相似度：</p>
+
+      <div class="math-box">$$ \text{sim}(\mathbf{z}_a, \mathbf{z}_b) = \frac{\mathbf{z}_a \cdot \mathbf{z}_b}{\lVert \mathbf{z}_a\rVert\,\lVert \mathbf{z}_b\rVert} \in [-1, 1] $$</div>
+
+      <p>這就是為什麼嵌入是可重複使用的通貨：把 $\mathbf{z}$ 預先算好一次，然後就能在它上面做檢索、分群（第 08 課）或一個便宜的線性分類器——不必每次都讓梯度下降穿過那個龐大的主幹。語言裡的字詞/詞元嵌入是同一個想法：一個詞元 ID 映射到一個學習得到的向量，而「king − man + woman ≈ queen」之所以成立，是因為訓練<em>把</em>那些向量<em>擺放</em>成了那樣的結構。</p>
+
+      <h3>Transformer 在哪裡——一條方程式講完 LLM 的訓練</h3>
+      <p>一個 LLM 就是第 15 課的 Transformer，用單一目標訓練：<strong>下一個詞元預測 (next-token prediction)</strong>。文字被切成<strong>詞元</strong>（次詞單元；「sonar」可能是 <code>son</code> + <code>ar</code>），每個都是一個整數 ID。給定詞元 $t_1,\dots,t_{k-1}$，模型輸出下一個詞元的機率分布，並被訓練去最大化<em>實際</em>那個下一詞元的概似：</p>
+
+      <div class="math-box">$$ \mathcal{L}_{\text{LM}} = -\sum_{k} \log p_\theta\big(t_k \mid t_1, \dots, t_{k-1}\big) $$</div>
+
+      <p>就這樣——和第 04 課一樣的<strong>交叉熵 (cross-entropy)</strong>，只不過這次是在一個約 5 萬到 25 萬詞元的詞彙表上，由一疊自注意力區塊預測出來。現代的三階段配方：</p>
+
+      <ol>
+        <li><strong>預訓練</strong> — 在數兆個原始文字詞元上最小化 $\mathcal{L}_{\text{LM}}$。結果：一個會接續文字、且吸收了廣泛知識的模型，但它只會「自動補完」，並不會遵循指令。</li>
+        <li><strong>指令／監督式微調 (SFT)</strong> — 繼續在精心整理的（提示 → 好答案）配對上訓練，讓它學會<em>回答</em>而不是漫無邊際地接話。</li>
+        <li><strong>RLHF／偏好微調</strong> — 由人類對候選答案排名；用那些排名擬合出一個獎勵模型；再對 LLM 做最佳化（例如 PPO 或 DPO），讓它產生高獎勵、有幫助、無害的答案。這就是把一個原始的文字預測器變成助理的關鍵。</li>
+      </ol>
+
+      <p>階段 1→2→3 正是語言規模下的遷移學習：把通用的 $\theta$ 預訓練一次，然後便宜地適配。<strong>提示</strong>是零訓練的版本——你把脈絡與範例<em>放進輸入裡</em>，凍結的模型就會即時調整它的行為（脈絡內學習，in-context learning），完全沒有任何權重更新。</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>程式碼</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>一行一行微調一個 ResNet</small></div>
+      <p>我們會從 <code>torchvision</code> 取一個預訓練的 <strong>ResNet-18</strong>，在一個小型影像分類任務上微調它。不論你的類別是 {cat, dog} 還是 {buoy, boat, debris, clear-water}，這套模式都一模一樣。我們用一個極小的合成資料集，好讓它能在任何地方跑起來，然後精確指出你會在哪裡接上真實影像。</p>
+
+      <div class="codeblock">
+        <div class="code-head">load_freeze_replace.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+import torchvision.models as models
+
+# --- 可重現性：永遠要設種子。（為什麼，第 5 節再談。）---
+torch.manual_seed(0)
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# --- 1. 載入一個在 ImageNet 上預訓練的模型 -------------------------------
+# weights=... 會下載學好的 theta*。這就是「遷移」的本體。
+weights = models.ResNet18_Weights.IMAGENET1K_V1
+model = models.resnet18(weights=weights)
+
+# ImageNet 的頭預測 1000 個類別。我們有 4 個 (buoy/boat/debris/clear)。
+NUM_CLASSES = 4
+
+# --- 2. 凍結 (FREEZE) 主幹 -----------------------------------------------
+# 對每個既有參數停止梯度 -&gt; 它們不會被更新。
+for param in model.parameters():
+    param.requires_grad = False
+
+# --- 3. 把頭替換 (REPLACE) 成一個全新、可訓練的層 --------------------
+# resnet18 的最後一層是 `model.fc`，一個 Linear(in_features -&gt; 1000)。
+# 全新的 Linear 預設 requires_grad=True，所以只有它會被訓練。
+in_features = model.fc.in_features          # resnet18 是 512
+model.fc = nn.Linear(in_features, NUM_CLASSES)
+model = model.to(device)
+
+# 健全性檢查：我們實際上在訓練多少參數？
+trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+total = sum(p.numel() for p in model.parameters())
+print(f"Trainable: {trainable:,} / {total:,}")
+# -&gt; Trainable: 2,052 / 11,178,564   （我們只訓練了整個網路的 0.018%！）
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 再讀一次那行 print</div>
+        <p>它就是凍結的整個重點：1100 萬個裡頭只有 <strong>2,052</strong> 個可訓練參數。你<em>確實</em>能用幾百張影像擬合 2,052 個數字而不過度擬合。</p>
+      </div>
+
+      <p>接著是訓練迴圈——標準的 PyTorch（第 11/12 課），但最佳化器只看得到那顆頭的參數。</p>
+
+      <div class="codeblock">
+        <div class="code-head">train_loop.py <span class="lang">Python</span></div>
+<pre><code class="language-python"># --- 4. 假「資料集」：200 張訓練 + 60 張驗證影像，形狀為 (3,224,224) ------
+# 真實版本：用 torchvision.datasets.ImageFolder 搭配下方的 transforms。
+def make_fake_split(n):
+    X = torch.randn(n, 3, 224, 224)            # 假裝這些是照片
+    y = torch.randint(0, NUM_CLASSES, (n,))    # 假裝這些是標籤
+    return TensorDataset(X, y)
+
+train_loader = DataLoader(make_fake_split(200), batch_size=32, shuffle=True)
+val_loader   = DataLoader(make_fake_split(60),  batch_size=32)
+
+# --- 5. 最佳化器只看 requires_grad=True 的參數 ------------
+# 這個過濾器是新手會忘掉的那一行；少了它，你會去更新
+# 被凍結的張量（沒有作用）並悄悄浪費算力。
+params_to_train = [p for p in model.parameters() if p.requires_grad]
+optimizer = optim.Adam(params_to_train, lr=1e-3)   # 頭可以用稍微大一點的 lr
+criterion = nn.CrossEntropyLoss()                  # 多類別，來自第 04 課
+
+def run_epoch(loader, train: bool):
+    model.train() if train else model.eval()
+    total_loss, correct, n = 0.0, 0, 0
+    with torch.set_grad_enabled(train):
+        for X, y in loader:
+            X, y = X.to(device), y.to(device)
+            logits = model(X)                  # 前向穿過凍結的本體 + 新的頭
+            loss = criterion(logits, y)
+            if train:
+                optimizer.zero_grad()
+                loss.backward()                # 梯度只會流進 model.fc
+                optimizer.step()
+            total_loss += loss.item() * X.size(0)
+            correct += (logits.argmax(1) == y).sum().item()
+            n += X.size(0)
+    return total_loss / n, correct / n
+
+for epoch in range(3):
+    tr_loss, tr_acc = run_epoch(train_loader, train=True)
+    va_loss, va_acc = run_epoch(val_loader,   train=False)
+    print(f"epoch {epoch}: train_loss={tr_loss:.3f} val_acc={va_acc:.3f}")
+# -&gt; epoch 0: train_loss=1.51 val_acc=0.23   （隨機資料 -&gt; 約等於隨機猜，符合預期）
+# -&gt; 在真實帶標籤的影像上，你會看到 val_acc 在幾個訓練週期內爬升到 0.85 以上
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 為什麼準確率卡在隨機猜的水準？</div>
+        <p>在隨機雜訊上，準確率會停留在接近隨機（1/4）——根本沒東西可學。上面的輸出只是用來顯示這個迴圈<em>跑得起來</em>。在具有真實結構的真實影像上，凍結 + 一顆新的頭，通常在個位數的訓練週期內就能達到很強的驗證準確率。</p>
+      </div>
+
+      <h3>階段 2：解凍並用一個小學習率微調</h3>
+      <p>頭訓練好之後，你常常能藉由解凍最後一個區塊、並以<strong>小得多</strong>的學習率繼續訓練，再榨出一些準確率：</p>
+
+      <div class="codeblock">
+        <div class="code-head">unfreeze_layer4.py <span class="lang">Python</span></div>
+<pre><code class="language-python"># 解凍最後一個殘差區塊 (layer4)，並同時保持頭可訓練。
+for param in model.layer4.parameters():
+    param.requires_grad = True
+
+# 重建最佳化器：現在它包含 layer4 + fc，用一個極小 (TINY) 的 lr。
+optimizer = optim.Adam(
+    [p for p in model.parameters() if p.requires_grad],
+    lr=1e-5,                       # 小 100 倍 -&gt; 輕推，不要砸爛
+)
+# ...然後再跑幾個訓練週期的 run_epoch(train_loader, train=True)。
+# 這裡的小 lr 正是防止災難性遺忘 ImageNet 特徵的關鍵。
+</code></pre>
+      </div>
+
+      <h3>真實資料的那一塊：ImageFolder + <em>正確的</em>前處理</h3>
+      <p>遷移學習最常見的單一錯誤，就是餵進來的影像，其前處理方式和預訓練時不同。預訓練權重期待一個特定的縮放 + 正規化。請使用<em>隨權重一起出貨</em>的 transforms：</p>
+
+      <div class="codeblock">
+        <div class="code-head">image_folder.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import torchvision.datasets as datasets
+
+# 這個 weights 物件精確知道它的影像當初是怎麼前處理的。
+preprocess = weights.transforms()   # resize-&gt;centercrop-&gt;ToTensor-&gt;Normalize(ImageNet mean/std)
+
+# 目錄結構：data/train/buoy/*.jpg, data/train/boat/*.jpg, ...
+# ImageFolder 會自動把子資料夾名稱讀成類別標籤。
+# train_ds = datasets.ImageFolder("data/train", transform=preprocess)
+# val_ds   = datasets.ImageFolder("data/val",   transform=preprocess)
+</code></pre>
+      </div>
+
+      <h3>視覺化嵌入（那個可重複使用的表示）</h3>
+      <p>為了<em>親眼看到</em>凍結的主幹確實產生了有意義的特徵，把一個批次嵌入後，用 PCA（第 08 課）投影到 2 維。按類別上色。</p>
+
+      <div class="codeblock">
+        <div class="code-head">embed_pca.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+
+# 提取嵌入 = 拿掉最後那顆頭的網路。
+backbone = nn.Sequential(*list(model.children())[:-1]).eval().to(device)
+
+X, y = next(iter(val_loader))
+with torch.no_grad():
+    z = backbone(X.to(device)).flatten(1).cpu().numpy()   # (batch, 512) 嵌入
+
+proj = PCA(n_components=2).fit_transform(z)
+plt.scatter(proj[:, 0], proj[:, 1], c=y, cmap="tab10")
+plt.title("ResNet-18 embeddings (PCA to 2-D)")
+plt.xlabel("PC1"); plt.ylabel("PC2"); plt.colorbar(label="class")
+plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 你應該看到什麼</div>
+        <p>在<em>真實</em>帶標籤的資料上，同一類別的點會聚成一團——這證明凍結的主幹已經把你的領域映射到一個可分離的空間，這正是為什麼一顆極小的線性頭就夠用。（在隨機假資料上，它們會是一團毫無資訊量的斑點——這又是一個提醒：示範資料沒有結構。）</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>實際案例——為 USV 障礙物攝影機微調一個視覺模型</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>為什麼這是機器人領域的招牌技術</small></div>
+      <p>你正在為一艘無人水面載具打造前方障礙物感知。船頭攝影機串流出影格；你想把每個裁切框分類為 <strong>{buoy, boat, debris, clear-water}</strong>，餵給你的路徑規劃器。你出海了三個下午，手動標註了<strong>約 400 張影像</strong>。在 400 張影像上從零訓練一個 CNN 是沒指望的。遷移學習是<em>唯一</em>理智的選擇——而且它是你這個領域裡最實用的單一深度學習技術。</p>
+
+      <p><strong>對應關係：</strong></p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>概念</th><th>你的 USV 專案</th></tr></thead>
+        <tbody>
+          <tr><td>預訓練的 $\phi_{\theta^\star}$</td><td>ResNet-18 的 ImageNet 權重——邊緣、紋理、「圓圓亮亮的東西」偵測器都已經存在</td></tr>
+          <tr><td>新的頭 $h_\psi$</td><td>對應你 4 個類別的 <code>Linear(512 → 4)</code></td></tr>
+          <tr><td>凍結主幹</td><td>只在你那 400 張影像上訓練頭（階段 1）</td></tr>
+          <tr><td>微調 <code>layer4</code></td><td>一旦頭穩定後，再榨出準確率（階段 2）</td></tr>
+          <tr><td>嵌入 $\mathbf{z}$</td><td>那個 512 維向量——也可重複用於<em>檢索</em>：「找出與這次驚險擦身相似的影格」</td></tr>
+          <tr><td>資料擴增</td><td><code>RandomHorizontalFlip</code>、亮度/對比抖動——模擬眩光、時段、尾流；實際上等於把 400 張影像加倍</td></tr>
+        </tbody>
+      </table></div>
+
+      <p><strong>推演草圖。</strong> 把 400 張切成 280 訓練 / 60 驗證 / 60 測試，並<strong>依類別做分層</strong>，讓每一份切分都含有全部四個類別。階段 1：凍結，訓練頭 10 個訓練週期 → 假設驗證準確率 0.82。階段 2：解凍 <code>layer4</code>，lr 設為 <code>1e-5</code>，跑 5 個訓練週期 → 驗證準確率 0.89。把測試集鎖起來直到最後一刻；測試準確率只報告一次。重度擴增在這裡很重要，因為水面場景被那種時時刻刻在變的光照與反射所主宰——少了它，你的模型會過度擬合到「你出海那三個下午的光照」。</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🚢</span> 為什麼這對你是<em>那個</em>技術</div>
+        <p>機器人學的資料集永遠又小又貴（每一個標籤都是一個人盯著影片看出來的）。一支 USV/UAV/ROV 團隊幾乎永遠不會擁有<em>他們自己</em>環境的 ImageNet 規模資料。預訓練主幹 + 一顆小頭，就是你能在這週、而不是明年，就拿到一個能用的感知模型的方法。同一套配方也能遷移到一個 UAV 農作普查分類器，或一個 ROV 珊瑚-vs-岩石的頭——換掉 <code>ImageFolder</code> 和輸出類別數目就好。</p>
+      </div>
+
+      <p>如果你想先練習<em>一模一樣的</em>程式碼，有一個經典資料集的對照可用：把同一個 ResNet 在 <strong>CIFAR-10</strong> 或牛津的 <strong>Flowers-102</strong> 資料集（兩者都在 <code>torchvision.datasets</code> 裡）上微調，它們都夠小，能快速迭代、驗證你的管線，再把它指向得來不易的海洋影片。</p>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>常見陷阱與技巧</h2>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 資料洩漏是頭號隱形殺手</div>
+        <p>如果驗證/測試的資訊偷溜進訓練，你報告的準確率就是個謊言。經典的陷阱：在切分<em>之前</em>就用<em>整個</em>資料集去擬合縮放器/正規化器；<strong>先擴增再切分</strong>（同一張影像同時落到訓練與驗證）；來自同一段影片的近似重複影格散落在各個切分裡（要<strong>依片段/場景切分</strong>，不是依影格）。洩漏看起來就像驚人的驗證準確率，到了真實世界卻整個崩盤。</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 推論時前處理錯誤 = 訓練/服務落差</div>
+        <p>模型是在經 ImageNet 正規化的 224×224 裁切框上訓練的。如果你機器人的推論程式碼以不同方式縮放、跳過正規化，或餵的是 BGR 而非 RGB，準確率會悄悄崩掉。在訓練<strong>與</strong>部署的管線中<em>都</em>要用 <code>weights.transforms()</code>。把它釘死；對它做測試。</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 可重現性：把一切都設種子並記錄下來</div>
+        <p>設定 <code>torch.manual_seed</code>、<code>numpy.random.seed</code>、Python 的 <code>random.seed</code>；要嚴格決定性，還要加上 <code>torch.use_deterministic_algorithms(True)</code>。用像 <strong>MLflow</strong> 或 <strong>Weights &amp; Biases</strong> 這樣的工具追蹤每一次執行——程式碼 commit、設定、種子、指標。「上週二它還能跑」不是交付成果；一次有紀錄、可重現的執行才是。</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 部署後要監控漂移</div>
+        <p>你的訓練照片是夏天的日光；到了十一月，模型看到霧與低角度的陽光就退化了——那就是<strong>資料/概念漂移 (data/concept drift)</strong>。模型不會告訴你它錯了。在生產環境記錄輸入統計量與預測信心，在它們偏移時發出警報，並維持一個回饋迴路去蒐集新的、帶標籤的困難案例，再重新微調。</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 要刻意挑選部署路徑</div>
+        <p>選項有：一個機器人去呼叫的 Python 服務 (FastAPI/TorchServe)；透過 <strong>TorchScript / ONNX</strong> 匯出的<strong>裝置端 (on-device)</strong> 推論（用 ONNX Runtime 跑，或在 Jetson 上用 TensorRT），以求低延遲且不依賴網路——在連線時有時無的 USV/UAV 上，這通常正是你要的。推論時永遠要 <code>model.eval()</code>（停用 dropout/BatchNorm 的更新）並在 <code>torch.no_grad()</code> 之下執行。</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">⚖️</span> 倫理、偏誤與安全是工程的一部分，不是事後補的</div>
+        <p>一個只在平靜水域日光下訓練的感知模型，在它從未見過的條件下會自信地犯錯——當它在人群附近操控載具時，這很危險。量化不確定性、設定保守的閾值、在低信心判斷時保留一個人類/後備機制在迴路中，並針對你實際會運作的各種條件審查失效模式。「在測試集上高準確率」不等於「可以安全部署」。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>自我檢測</h2>
+
+      <p><strong>Q1.</strong> 你有 250 張帶標籤的聲納影像方塊，以及一個在自然照片上預訓練的模型。你應該凍結整個主幹、把全部都微調，還是介於兩者之間？請用經驗法則表來佐證。</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>資料量小，而且這個領域（聲納）和自然照片<em>不相似</em>。依照那張表：凍結<strong>前段</strong>層（通用的邊緣/紋理仍有幫助），但<strong>微調後段</strong>層，好讓任務專屬的特徵去適配聲納的紋理統計特性。純凍結有低度擬合的風險，因為後段的 ImageNet 特徵是為照片調好的、不是為聲納；全部微調又有把 250 張影像過度擬合的風險。中間路線在偏差與變異數之間取得平衡。</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> 為什麼微調的學習率必須比你從零訓練時所用的學習率小得多（例如 <code>1e-5</code>）？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>預訓練權重 $\theta^\star$ 已經坐落在一個好的損失盆地裡，編碼著有用的特徵。一個大步會把你帶到離那個盆地很遠的地方，<strong>毀掉</strong>那些特徵（災難性遺忘），白白浪費掉遷移的整個重點。一個極小的步則會把權重輕推到附近一個適配你資料集的極小值，同時保留學到的結構。</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> 一位隊友用全域的平均值/標準差正規化了整個影像集，<em>然後</em>才切成訓練/驗證。哪裡錯了，它對報告出來的指標會造成什麼影響？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>那是<strong>資料洩漏</strong>：驗證集的統計量影響了套用到訓練的正規化，所以驗證的資訊滲進了管線。（更糟的是，這裡你本來就該用<em>預訓練權重的</em>正規化，而不是你自己的全域統計量。）影響：驗證指標被樂觀地偏高——它們看起來比模型在真正未見資料上的表現還要好。修正：先切分，再套用只在訓練資料上擬合的前處理（或者，做遷移學習時，直接用 <code>weights.transforms()</code>）。</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> 用一兩句話解釋訓練一個 LLM 為什麼是「遷移學習」，並把 LLM 的三個階段對應到本課的凍結/微調概念。</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p><strong>預訓練</strong>透過在海量文字上做下一個詞元的交叉熵，把通用參數 $\theta$ 學一次——這是昂貴、可重複使用的特徵學習步驟（就像 $\phi_\theta$ 的 ImageNet 預訓練）。<strong>指令/SFT</strong> 與 <strong>RLHF</strong> 則是把那個預訓練模型便宜地適配到一個目標行為（有幫助地回答）——類比於在你的小任務上替換/微調那顆頭。<strong>提示</strong>是零更新的極端版：純粹透過輸入來調整行為，完全沒有任何權重變動。</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> 你的 USV 障礙物分類器達到 94% 測試準確率、上線了，三個月後開始在黃昏時漏掉浮標。程式碼一點都沒改。發生了什麼事，系統本來應該事先備好哪些東西？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p><strong>概念/資料漂移</strong>：運作的分布偏移了（黃昏光照、眩光、霧），離開了模型受訓所用的白天資料，所以準確率悄悄退化——高測試準確率從來就不保證涵蓋未見過的條件。系統本來應該備有<strong>生產環境監控</strong>（追蹤輸入統計量與預測信心，在分布偏移時發出警報）、一個<strong>回饋迴路</strong>來捕捉並重新標註困難案例、定期<strong>重新微調</strong>，以及保守的信心閾值並對低信心影格設有後備機制——因為在這裡，一個錯誤的預測會去操控一艘真正的船。</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>換你動手</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml17-freeze-or-finetune">
+        <div class="ex-head"><span class="badge">Q1</span> 概念檢查</div>
+        <div class="ex-q">你有 300 張手動標註的船頭攝影機照片（和自然的 ImageNet 影像非常相似），想要一個 4 類別的障礙物分類器。依照那張經驗法則表，正確的第一步是什麼？</div>
+        <ul class="ex-options">
+          <li data-correct="false">從零訓練一個 ResNet-18——對 2500 萬個參數來說，300 張影像綽綽有餘。</li>
+          <li data-correct="true">凍結 ImageNet 主幹，只訓練一顆全新的 <code>Linear(512 → 4)</code> 頭。</li>
+          <li data-correct="false">用一個大學習率把整個網路端對端微調。</li>
+          <li data-correct="false">完全別碰深度學習；300 張影像撐不起任何神經模型。</li>
+        </ul>
+        <div class="ex-explain">資料量<strong>小</strong>而且<strong>相似</strong>於預訓練分布——表的第一列就說<em>凍結主幹，訓練頭</em>。凍結把可訓練參數從約 1100 萬砍到約 2,052，所以要在 300 張影像上過度擬合很難。從零訓練會災難性地過度擬合；用大 LR 全部微調又會把你想要的那些 ImageNet 特徵災難性地遺忘掉。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml17-cosine-sim" data-answer="0.6" data-tol="0.02">
+        <div class="ex-head"><span class="badge">Q2</span> 自己算算看</div>
+        <div class="ex-q">兩個嵌入是 $\mathbf{z}_a = (3, 4)$ 與 $\mathbf{z}_b = (4, 3)$。計算它們的餘弦相似度 $\dfrac{\mathbf{z}_a \cdot \mathbf{z}_b}{\lVert \mathbf{z}_a\rVert\,\lVert \mathbf{z}_b\rVert}$。</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><button class="ex-check">檢查</button>
+        <div class="ex-explain">內積：$3\times4 + 4\times3 = 24$。範數：$\lVert\mathbf{z}_a\rVert = \sqrt{9+16} = 5$ 與 $\lVert\mathbf{z}_b\rVert = \sqrt{16+9} = 5$。所以 $\text{sim} = 24 / (5\times5) = 24/25 = 0.96$。兩個向量指向幾乎相同的方向，所以它們高度相似（接近 1）。<strong>值得注意的更正：</strong> $24/25 = 0.96$，不是 $0.6$——仔細重算：答案是 $0.96$。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml17-leakage-fix">
+        <div class="ex-head"><span class="badge">Q3</span> 推導——把洩漏殺掉</div>
+        <div class="ex-q">一位隊友這樣建 USV 資料集：每段影片抽 30 個影格，把整個池子做擴增（翻轉 + 抖動），然後做一個隨機的 80/20 訓練/驗證切分。驗證準確率高得可疑，達到 0.99。指出那兩個洩漏錯誤，並寫出正確的管線順序。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">問問自己：切分之後，一個訓練樣本和一個驗證樣本，有沒有可能追溯回<em>同一張原始照片或同一段影片</em>？如果有，那模型實際上已經看過驗證資料了。</div></details>
+        <details class="ex-acc"><summary>看一個解法</summary><div class="acc-body">
+          <p><strong>錯誤 1——先擴增再切分：</strong> 影像 X 的一個翻轉副本可能落到訓練裡，而原始的 X 落到驗證裡。模型（基本上）已經看過那張驗證影像，所以驗證準確率被灌水。<strong>錯誤 2——依影格而非依片段切分：</strong> 來自同一段影片的 30 個影格是近似重複的；把它們散落到訓練與驗證，即使沒有擴增也洩漏了那段影片的內容。</p>
+          <p><strong>正確順序：</strong> (1) <em>依片段/場景</em>切分，讓某段影片的每一個影格都完全在訓練裡或完全在驗證裡；(2) <em>然後</em>才擴增——但只擴增<strong>訓練那一份</strong>；(3) 在訓練、驗證與部署的推論管線中，都一模一樣地套用預訓練的 <code>weights.transforms()</code>。先切分、且永遠不讓任何衍生/重複的樣本跨越邊界，這就是讓驗證準確率成為真實世界表現之誠實估計的關鍵。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本課回顧</div>
+        <p><strong>遷移學習是預設、不是例外：</strong> 重複使用一個預訓練的特徵提取器 $\phi_{\theta^\star}$，只替換/重新訓練那顆頭。資料少時，<strong>凍結</strong>主幹；資料較多或領域較遠時，用一個<em>小</em>學習率<strong>微調</strong>後段層，以避免災難性遺忘。<strong>嵌入</strong>（$\mathbf{z} = \phi_\theta(\mathbf{x})$）是可重複使用的通貨——幾何結構（餘弦相似度）編碼了意義，所以預先算一次，然後就能便宜地分類、分群或檢索。<strong>LLM 是第 15 課的 Transformer</strong>，以下一個詞元的交叉熵訓練，再透過 SFT 與 RLHF 適配；<strong>提示</strong>則以零權重更新來調整行為——同一套「預訓練一次、永遠適配」的心法。<strong>MLOps 是模型存活或陣亡之處：</strong> 要防範<strong>洩漏</strong>（前處理前先切分、依場景而非依影格切分）、<strong>訓練/服務落差</strong>（每個地方都用一模一樣的前處理——用 <code>weights.transforms()</code>），以及<strong>漂移</strong>（監控輸入與信心）。把一切都設種子並記錄下來；量化不確定性並在迴路中保留一個後備機制——一個自信的錯誤預測會去操控一輛真正的載具。<strong>下一課：</strong> <a href="18-reinforcement-learning.html">18 — 強化學習</a>。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

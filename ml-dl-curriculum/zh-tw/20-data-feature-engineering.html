@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>資料與特徵工程 — 機器學習與深度學習</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="20-data-feature-engineering">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 20</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL 課程 · 20 · 應用 ML</div>
+        <h1>資料與特徵工程</h1>
+        <p>在這一課之前的每一課，都假設有一個乾淨的矩陣 $X$ 和一個乾淨的標籤向量 $y$ 落到你手上。真實資料從不是這樣。它帶著破洞、文字標籤、不相稱的尺度、200:1 的類別比例，還有一個在 14:32 默默死掉的感測器。這一課就是應用 ML 中那不起眼的 80%：填補、編碼、縮放與重新平衡——而且要在不犯下<strong>資料洩漏 (data leakage)</strong> 這條大忌的前提下完成這一切。</p>
+        <div class="meta"><span>⏱ 約 45 分鐘</span><span>🧩 需要第 05–06 課</span><span>🐍 scikit-learn + pandas</span><span>∑ 先切分，再只用訓練集擬合</span></div>
+      </section>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🧭</span> 第 8 部分 · 第 20 課 · 程式技術棧：scikit-learn (+ pandas)</div>
+        <p><strong>先備知識：</strong> <a href="05-overfitting-evaluation.html">05 — 過度擬合、正則化與評估</a>。有幫助的：<a href="06-knn-trees-ensembles.html">06 — k-NN、決策樹與集成</a>。</p>
+        <p><strong>學完本課你能：</strong></p>
+        <ul>
+          <li>用正確的<strong>填補 (imputation)</strong> 策略處理<strong>缺失資料 (missing data)</strong>，並說明為何「丟掉資料列」通常是錯誤的直覺反應。</li>
+          <li>正確地編碼<strong>類別型 (categorical)</strong> 特徵——獨熱 (one-hot) vs 序數 (ordinal) vs 目標編碼——並辨識每一種在什麼情況下會悄悄地讓你的模型出問題。</li>
+          <li>診斷<strong>類別不平衡 (class imbalance)</strong>，看清為何準確率會說謊，並在 <code>class_weight</code>、重新取樣與 <strong>SMOTE</strong> 之間做選擇。</li>
+          <li>揪出<strong>資料洩漏 (data leakage)</strong> ——最致命的錯誤——並用 scikit-learn 的 <code>Pipeline</code> + <code>ColumnTransformer</code> 殲滅它，讓每一個轉換都在每個 CV 折 (fold) 內重新擬合。</li>
+          <li>為一份雜亂的真實感測器資料集建立一條完整、無洩漏的前處理管線 (pipeline)，並在切分時間序列時不洩漏未來資訊。</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>直覺理解</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺理解 <small>沒人會拍照的那 80%</small></div>
+      <p>你在第 02–19 課學到的一切，都假設有一個乾淨的矩陣 $X$ 和一個乾淨的標籤向量 $y$ 直接送到你手上。真實資料從不會這樣抵達。它帶著破洞、文字標籤、天差地遠的尺度、200:1 的類別比例，還有一個在 14:32 默默停止回報的感測器。<strong>真實 ML 中那 80%、沒人會為它拍照放上研討會投影片的部分，就是把那個矩陣整理好</strong>——而且要在不作弊的前提下做到。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 類比——下鍋前的備料</div>
+        <p>一道好食譜（你的模型）如果蔬菜沒洗、一半的份量缺漏，鹽用噸量、番紅花卻用毫克量，那它就毫無用處。特徵工程就是 <em>mise en place</em>（備料）：洗淨（填補）、切成可用的形狀（編碼），並把所有東西帶到可比較的尺度。這一步做錯，沒有任何模型——不管是隨機森林還是 Transformer——救得了你。</p>
+      </div>
+
+      <p>但還有一個更微妙的陷阱，而它正是這一課存在的全部理由。當你「洗淨並切配」時，你會計算統計量：用來填補的某欄平均、用來縮放的最小/最大值、用來獨熱的類別集合。<strong>如果你用測試資料來計算那些統計量，你就已經偷看了答案。</strong> 你的離線分數會很漂亮，但你的模型在現場會臉朝下摔倒。這就是<strong>資料洩漏</strong>，而避免它是應用 ML 中槓桿最大的單一習慣。</p>
+
+      <div class="mermaid">
+flowchart LR
+    R["原始資料<br/>破洞、文字、尺度、不平衡"] --> S{"先切分"}
+    S -->|train| F["擬合轉換<br/>填補 · 編碼 · 縮放"]
+    S -->|test| A["套用（僅做轉換）<br/>使用訓練集統計量"]
+    F --> M["模型"]
+    A --> M
+    style S fill:#1f6f3f,color:#fff
+</div>
+
+      <p>那張圖裡的順序——<strong>先切分，再只用訓練集擬合</strong>——是鐵律。打破它，下游的一切都是謊言。</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>數學原理</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>哪一個統計量、又是在哪些列上</small></div>
+      <p>這裡沒有太多繁重的數學；紀律藏在 <em>你計算哪一個統計量、又是在哪些列上計算</em>。但有幾條公式釘住了這些選擇。</p>
+
+      <h3>填補就是用一個估計值來填洞</h3>
+      <p>一個缺失值就是一個未知的 $x_{ij}$。最簡單而有原則的填法，是用<strong>該欄已觀測值的某個常數摘要</strong>。令 $\mathcal{O}_j$ 為特徵 $j$ 有被觀測到的列的集合：</p>
+      <div class="math-box">$$ \hat{x}_{ij} = \frac{1}{|\mathcal{O}_j|}\sum_{k \in \mathcal{O}_j} x_{kj} \quad(\text{mean}), \qquad \hat{x}_{ij} = \operatorname{median}_{k \in \mathcal{O}_j} x_{kj}, \qquad \hat{x}_{ij} = \operatorname{mode}_{k \in \mathcal{O}_j} x_{kj}\ (\text{most frequent}). $$</div>
+      <ul>
+        <li><strong>平均</strong>是最小平方意義下最佳的常數（它最小化 $\sum (x_{kj}-c)^2$），但它會被離群值 (outlier) 拉著跑。</li>
+        <li><strong>中位數</strong>最小化 $\sum |x_{kj}-c|$ ——對一個卡住、不斷回報 9999 的聲納 (sonar) 具有穩健性。</li>
+        <li><strong>眾數 / 最高頻</strong>是你用在類別型上的（你沒辦法對「calm」和「rough」取平均）。</li>
+      </ul>
+      <p>關鍵的但書：<strong>$\mathcal{O}_j$ 必須只包含訓練集的列。</strong> 你用來填補的那個平均，是一個從資料中學來的參數，就跟一個權重 (weight) 一模一樣。從測試集學它，你就洩漏了。</p>
+
+      <h3>為什麼會有缺失值？（這會改變一切）</h3>
+      <p>標準的分類法：</p>
+      <ul>
+        <li><strong>MCAR</strong>（完全隨機缺失，Missing Completely At Random）：缺失與任何事都獨立——一個宇宙射線造成的位元翻轉。在這裡丟掉資料列是無偏的，只是浪費。</li>
+        <li><strong>MAR</strong>（隨機缺失，Missing At Random）：缺失與否取決於<em>已觀測</em>的特徵——深度感測器只在淺水時失靈，而你記錄了深度。可以從其他欄填補出來。</li>
+        <li><strong>MNAR</strong>（非隨機缺失，Missing Not At Random）：缺失與否取決於<em>未觀測值本身</em>——熱敏電阻<em>因為</em>太熱才故障，所以那些高溫讀數恰恰就是缺失的那些。這是最危險的情況；丟掉或天真地填補都會讓模型產生偏差。</li>
+      </ul>
+      <p>這個分類法之所以重要，是因為<strong>只有在 MCAR 下丟掉資料列才是安全的</strong>，而這對感測器來說很少成立。通常你應該填補<em>並加上一個「曾經缺失」的旗標欄</em>，這樣模型才能學到「缺失本身就帶有資訊」（一顆故障的熱敏電阻就是一個故障訊號！）。</p>
+
+      <h3>獨熱編碼及其維度成本</h3>
+      <p>一個有 $K$ 個相異層級的類別型特徵，會變成 $K$ 個（或 $K-1$ 個）二元欄位：</p>
+      <div class="math-box">$$ \text{level } c \;\mapsto\; \mathbf{e}_c \in \{0,1\}^{K}, \qquad (\mathbf{e}_c)_m = \mathbb{1}[m = c]. $$</div>
+      <p>代價是：一個有 $K=10{,}000$ 個唯一船舶 ID 的特徵，會爆炸成 10,000 個稀疏欄位。<strong>獨熱編碼是正確的，但對高基數特徵很昂貴</strong>，而且它<em>不施加任何順序</em>——這對無序的類別來說恰恰正確。</p>
+
+      <h3>序數編碼——只給真正的順序使用</h3>
+      <p>把每個層級對應到一個整數：</p>
+      <div class="math-box">$$ \{\text{calm, moderate, rough, severe}\} \mapsto \{0,1,2,3\}. $$</div>
+      <p>只有<strong>當且僅當</strong>順序是真實的、而且在意義上大致等距時，這才沒問題。把它套用到無序類別上（$\{\text{sonar, lidar, camera}\} \to \{0,1,2\}$），你就等於告訴模型「camera $-$ sonar $=2$，而且 lidar 夾在它們<em>中間</em>」，這是一個線性模型或基於距離的模型會乖乖照辦的胡說八道。</p>
+
+      <h3>目標 / 平均編碼——強大，且是洩漏陷阱</h3>
+      <p>把每個類別替換成<strong>該類別目標的平均值</strong>：</p>
+      <div class="math-box">$$ \text{enc}(c) = \frac{\sum_{i:\,x_i = c} y_i}{\#\{i : x_i = c\}} \quad\text{(often smoothed toward the global mean).} $$</div>
+      <p>這把高基數類別壓縮成一個帶有資訊的數字——對樹模型和 GBM 很棒。但它用到了 $y$，所以如果你在所有列上計算它（包括你稍後要預測的那些列），<strong>每一列的編碼都會洩漏自己的標籤。</strong> 它必須只在訓練折上擬合，最好用折外 (out-of-fold) 計算。</p>
+
+      <h3>縮放回顧與穩健縮放</h3>
+      <p>來自<a href="05-overfitting-evaluation.html">第 05 課</a>：標準化</p>
+      <div class="math-box">$$ z_{ij} = \frac{x_{ij} - \mu_j}{\sigma_j}, \qquad \mu_j,\ \sigma_j \text{ from the TRAINING column}. $$</div>
+      <p>縮放對<strong>基於距離與基於梯度</strong>的方法很重要（k-NN、SVM、k-平均、線性/邏輯迴歸、神經網路），對<strong>軸對齊的樹分裂則完全沒影響</strong>（一棵樹的分裂閾值具有尺度不變性）。當離群值主導時，$\mu$ 和 $\sigma$ 會被汙染；<strong>穩健縮放 (robust scaling)</strong> 改用順序統計量：</p>
+      <div class="math-box">$$ z_{ij} = \frac{x_{ij} - \operatorname{median}_j}{\text{IQR}_j}, \qquad \text{IQR}_j = Q_{75,j} - Q_{25,j}. $$</div>
+      <p>中位數與 IQR 會忽略極端尾端，所以一個卡在最大值的感測器讀數，不再會把整欄的其餘部分壓成靠近零的一條細縫。</p>
+
+      <h3>類別不平衡：為何準確率會說謊（呼應第 05 課）</h3>
+      <p>如果正類（故障）的比率是 $p$，那麼「永遠預測負類」的分類器分數為</p>
+      <div class="math-box">$$ \text{Accuracy}_{\text{trivial}} = 1 - p. $$</div>
+      <p>在 $p = 0.01$ 時那就是 <strong>99% 準確率，卻抓到零個故障</strong>——正是第 05 課裡漏水偵測器的陷阱。修正的方法有兩面：(1) 使用<strong>精確率 / 召回率 / F1 / PR-AUC</strong>，以及 (2) 重新平衡<em>學習訊號</em>，讓罕見事件算數。乾淨的槓桿是一個<strong>成本加權損失</strong>：把每個類別的權重設為與其頻率成反比，</p>
+      <div class="math-box">$$ w_c = \frac{N}{K \cdot N_c}, $$</div>
+      <p>其中 $N$ 是總樣本數，$K$ 是類別數，$N_c$ 是類別 $c$ 的計數。這正是 <code>class_weight="balanced"</code> 所計算的。每一個罕見類別的錯誤，現在的代價就等同於 $N_{\text{neg}}/N_{\text{pos}}$ 個多數類別的錯誤。</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>程式碼</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>讓洩漏可被測量</small></div>
+
+      <h3>3.1 洩漏的做法 vs 正確的做法（整堂課濃縮成一個實驗）</h3>
+      <p>讓我們把洩漏變成<em>可測量的</em>。我們在切分前對全部資料擬合一個縮放器（錯誤），對照在管線內每折重新擬合（正確），然後比較交叉驗證分數。</p>
+
+      <div class="codeblock">
+        <div class="code-head">leaky_vs_clean.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.datasets import make_classification
+from sklearn.model_selection import cross_val_score, StratifiedKFold
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+
+rng = np.random.default_rng(0)
+
+# 一個規模適中的資料集；當 n 相對於特徵數很小時，洩漏最明顯。
+X, y = make_classification(n_samples=200, n_features=40, n_informative=5,
+                           n_redundant=0, random_state=0)
+
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
+
+# --- 錯誤：先在「完整」資料集上縮放，「然後才」交叉驗證 ---
+# 縮放器已經「看過」每一折的平均/標準差，包括那一折被保留作驗證的部分。
+X_leaked = StandardScaler().fit_transform(X)          # 擬合用到「所有」列 -&gt; 洩漏
+leaky = cross_val_score(LogisticRegression(max_iter=1000),
+                        X_leaked, y, cv=cv, scoring="roc_auc")
+
+# --- 正確：縮放住在管線「內部」，只在每個訓練折上重新擬合 ---
+clean_pipe = Pipeline([
+    ("scale", StandardScaler()),                      # 擬合在每折發生
+    ("clf", LogisticRegression(max_iter=1000)),
+])
+clean = cross_val_score(clean_pipe, X, y, cv=cv, scoring="roc_auc")
+
+print(f"Leaky  CV ROC-AUC: {leaky.mean():.3f}")
+print(f"Clean  CV ROC-AUC: {clean.mean():.3f}")
+# -&gt; Leaky  CV ROC-AUC: 0.869
+# -&gt; Clean  CV ROC-AUC: 0.868
+</code></pre>
+      </div>
+
+      <p>你應該看到：洩漏的那個數字<strong>樂觀地偏高</strong>（這裡只高了一點點）。用普通的 <code>StandardScaler</code> 時差距很小——全域的平均/標準差在不同折之間幾乎不動——但它是<em>真實存在的，而且永遠朝錯誤的方向</em>。把縮放器換成填補器、一個在所有類別上擬合的獨熱編碼器、一個特徵選擇器，或 SMOTE，這道髮絲般的裂縫就會炸開成 0.05–0.20 的範圍——一個離線看起來可部署、實際上卻不行的模型。規則是機械式的：<strong>任何帶有 <code>.fit()</code> 的步驟都屬於 <code>Pipeline</code> 內部</strong>，絕不放在 <code>cross_val_score</code>/<code>train_test_split</code> 之前。</p>
+
+      <h3>3.2 ColumnTransformer：不同欄位型別、不同的食譜</h3>
+      <p>真實的表格會混雜數值與類別欄位，它們需要不同的處理。<code>ColumnTransformer</code> 把每個子集導向它自己的子管線，而整個東西仍然只有一個 <code>.fit()</code>，所以它能乾淨地巢狀嵌入 CV。</p>
+
+      <div class="codeblock">
+        <div class="code-head">column_transformer.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import OneHotEncoder
+
+# 建立一個小小的混合型別資料框，帶有刻意製造的破洞和一個類別欄。
+df = pd.DataFrame({
+    "depth_m":      [12.0, np.nan, 31.5, 8.2, np.nan, 44.0, 19.1, 27.7],
+    "thruster_amp": [3.1, 3.4, np.nan, 2.9, 5.8, 3.0, 3.2, np.nan],
+    "sea_state":    ["calm", "calm", "rough", None, "moderate", "rough", "calm", "moderate"],
+})
+y_demo = np.array([0, 0, 1, 0, 1, 1, 0, 1])
+
+numeric_cols     = ["depth_m", "thruster_amp"]
+categorical_cols = ["sea_state"]
+
+# 數值分支：中位數填補（對卡住的感測器具穩健性），然後標準化。
+numeric_tf = Pipeline([
+    ("impute", SimpleImputer(strategy="median")),
+    ("scale",  StandardScaler()),
+])
+
+# 類別分支：用最高頻填補缺失，然後獨熱。
+# handle_unknown="ignore" =&gt; 訓練時沒見過的類別會變成全零，
+# 而不是在上線時崩潰。這是你針對訓練/上線偏移的保險。
+categorical_tf = Pipeline([
+    ("impute", SimpleImputer(strategy="most_frequent")),
+    ("onehot", OneHotEncoder(handle_unknown="ignore")),
+])
+
+pre = ColumnTransformer([
+    ("num", numeric_tf, numeric_cols),
+    ("cat", categorical_tf, categorical_cols),
+])
+
+out = pre.fit_transform(df)
+print("Transformed shape:", out.shape)              # 2 個數值 + 3 個 sea_state 獨熱欄
+print("Output feature names:", list(pre.get_feature_names_out()))
+# -&gt; Transformed shape: (8, 5)
+# -&gt; Output feature names: ['num__depth_m', 'num__thruster_amp',
+#       'cat__sea_state_calm', 'cat__sea_state_moderate', 'cat__sea_state_rough']
+</code></pre>
+      </div>
+
+      <p>這裡的每一個統計量——中位數填補值、標準化的平均/標準差、<em>已知 sea-state 的集合</em>——都是從 <code>fit</code> 所看到的那些列學來的。把這個物件交給交叉驗證，每一折都會在它自己的訓練列上重新學習它們。這就是「靠結構設計來防洩漏」；你不可能忘記去做。</p>
+
+      <h3>3.3 完整的無洩漏分類器</h3>
+      <p>現在把前處理器黏到一個模型上，並誠實地評估它。</p>
+
+      <div class="codeblock">
+        <div class="code-head">full_pipeline.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from sklearn.ensemble import RandomForestClassifier
+
+full = Pipeline([
+    ("pre", pre),                                   # 填補 + 縮放 + 獨熱
+    ("clf", RandomForestClassifier(
+        n_estimators=200, class_weight="balanced",  # 為罕見類別做成本加權
+        random_state=0)),
+])
+
+# cross_val_score 在每折複製一份 `full`，並只在訓練列上呼叫 .fit()，
+# 所以每一個填補器平均 / 縮放器標準差 / 類別集合都會在每折重新擬合。乾淨。
+scores = cross_val_score(full, df, y_demo,
+                         cv=StratifiedKFold(n_splits=4, shuffle=True, random_state=0),
+                         scoring="roc_auc")
+print(f"Honest CV ROC-AUC: {scores.mean():.3f}")
+# -&gt; Honest CV ROC-AUC: ~1.0  （玩具般的 8 列資料；重點是接線方式，不是這個數字）
+</code></pre>
+      </div>
+
+      <p>注意 <code>class_weight="balanced"</code> 正在做 §2 裡的不平衡修正——不需要重新取樣套件、沒有洩漏風險，而且它住在管線內部。</p>
+
+      <h3>3.4 視覺化為何縮放重要（以及在有離群值時，穩健縮放勝過標準縮放）</h3>
+
+      <div class="codeblock">
+        <div class="code-head">scaling_with_outliers.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import matplotlib.pyplot as plt
+from sklearn.preprocessing import RobustScaler
+
+# 一個乾淨、近似高斯的感測器欄位，然後注入 3 個卡在最大值的讀數。
+col = rng.normal(20.0, 2.0, 200)
+col[:3] = 200.0                                      # 感測器故障：卡在高值
+
+z_std    = StandardScaler().fit_transform(col.reshape(-1, 1)).ravel()
+z_robust = RobustScaler().fit_transform(col.reshape(-1, 1)).ravel()
+
+fig, ax = plt.subplots(1, 2, figsize=(11, 4))
+ax[0].hist(z_std,    bins=40); ax[0].set_title("StandardScaler\n(outliers crush the bulk)")
+ax[1].hist(z_robust, bins=40); ax[1].set_title("RobustScaler\n(median/IQR ignore the tail)")
+for a in ax: a.set_xlabel("scaled value")
+plt.tight_layout(); plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 你應該看到什麼</div>
+        <p>在 <code>StandardScaler</code> 之下，那三個離群值把 $\sigma$ 膨脹得如此嚴重，以致 197 個正常點全擠在靠近零的一個細尖峰裡——毫無有用的分散度。在 <code>RobustScaler</code> 之下，正常的主體保持了健康的分散度，而離群值就乾脆地坐在遠處它們該待的地方。每當你無法信任尾端時（也就是用原始感測器時幾乎總是如此），就使用穩健縮放。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>實際案例 — 為 ROV 故障偵測打造一條無洩漏管線</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>雜亂的 ROV 日誌 → 誠實的分數</small></div>
+      <p><strong>情境設定。</strong> 你正在記錄一台執行管線檢查的遙控潛水器 (ROV)。每一列是一個 1 Hz 的快照；你想在載具被困住之前<strong>標記出推進器故障</strong>。原始表格是教科書級的一團亂：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>欄位</th><th>型別</th><th>問題</th></tr></thead>
+        <tbody>
+          <tr><td><code>thruster_current_a</code></td><td>數值</td><td>匯流排電壓驟降時掉資料（缺失）</td></tr>
+          <tr><td><code>motor_temp_c</code></td><td>數值</td><td>熱敏電阻<em>在高溫時</em>故障 → MNAR 缺失</td></tr>
+          <tr><td><code>depth_m</code>、<code>pitch_deg</code>、<code>roll_deg</code></td><td>數值</td><td>沒問題，但尺度各異</td></tr>
+          <tr><td><code>sea_state</code></td><td>類別</td><td><code>{calm, moderate, rough, severe}</code> ——<strong>真正有序</strong></td></tr>
+          <tr><td><code>sensor_pack</code></td><td>類別</td><td><code>{A, B, C}</code> 可替換硬體——<strong>無序</strong></td></tr>
+          <tr><td><code>fault</code></td><td>標籤</td><td>只有 <strong>2%</strong> 為正——嚴重不平衡</td></tr>
+        </tbody>
+      </table></div>
+
+      <p>這正是本課範圍裡的三重組合：缺失的感測器通道、一個類別型的 sea-state，以及罕見的正類。以下是組裝過程。</p>
+
+      <div class="codeblock">
+        <div class="code-head">rov_fault_pipeline.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import RobustScaler, OneHotEncoder, OrdinalEncoder
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import cross_validate, StratifiedKFold
+
+# --- 合成一份真實、雜亂、不平衡的 ROV 日誌 -------------------------
+rng = np.random.default_rng(42)
+n = 4000
+fault = (rng.random(n) &lt; 0.02).astype(int)           # 2% 為正類
+
+df = pd.DataFrame({
+    "thruster_current_a": rng.normal(8, 1.2, n) + 4.0 * fault,   # 故障會抽取更多電流
+    "motor_temp_c":       rng.normal(35, 5, n) + 18.0 * fault,   # 故障會發熱
+    "depth_m":            rng.uniform(0, 120, n),
+    "pitch_deg":          rng.normal(0, 3, n),
+    "roll_deg":           rng.normal(0, 3, n),
+    "sea_state":          rng.choice(["calm", "moderate", "rough", "severe"],
+                                     size=n, p=[0.5, 0.3, 0.15, 0.05]),
+    "sensor_pack":        rng.choice(["A", "B", "C"], size=n),
+})
+# 注入缺失：隨機的匯流排掉資料 + MNAR 的高溫熱敏電阻故障。
+df.loc[rng.random(n) &lt; 0.10, "thruster_current_a"] = np.nan          # ~10% MCAR
+hot = df["motor_temp_c"] &gt; 55                                        # 最熱的那些…
+df.loc[hot &amp; (rng.random(n) &lt; 0.6), "motor_temp_c"] = np.nan         # …傾向掉資料（MNAR）
+
+X, y = df, fault
+
+# --- 依欄位型別前處理 -----------------------------------------------
+numeric_cols  = ["thruster_current_a", "motor_temp_c", "depth_m", "pitch_deg", "roll_deg"]
+ordinal_cols  = ["sea_state"]      # 真正有序 -&gt; 以明確的排序做序數編碼
+nominal_cols  = ["sensor_pack"]    # 無序     -&gt; 獨熱
+
+# add_indicator=True 會附加一個「曾經缺失」旗標：一顆故障的熱敏電阻「就是」一個故障訊號。
+numeric_tf = Pipeline([
+    ("impute", SimpleImputer(strategy="median", add_indicator=True)),
+    ("scale",  RobustScaler()),                       # 穩健：感測器有離群值
+])
+
+ordinal_tf = Pipeline([
+    ("impute", SimpleImputer(strategy="most_frequent")),
+    ("ord",    OrdinalEncoder(categories=[["calm", "moderate", "rough", "severe"]],
+                              handle_unknown="use_encoded_value", unknown_value=-1)),
+])
+
+nominal_tf = Pipeline([
+    ("impute", SimpleImputer(strategy="most_frequent")),
+    ("onehot", OneHotEncoder(handle_unknown="ignore")),  # 沒見過的 pack -&gt; 上線時全零
+])
+
+pre = ColumnTransformer([
+    ("num", numeric_tf, numeric_cols),
+    ("ord", ordinal_tf, ordinal_cols),
+    ("nom", nominal_tf, nominal_cols),
+])
+
+clf = Pipeline([
+    ("pre", pre),
+    ("rf",  RandomForestClassifier(n_estimators=300,
+                                   class_weight="balanced_subsample",  # 罕見類別成本加權
+                                   random_state=0, n_jobs=-1)),
+])
+
+# --- 誠實的評估：分層折、無洩漏、不平衡感知的指標
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
+res = cross_validate(clf, X, y, cv=cv,
+                     scoring=["roc_auc", "average_precision", "recall"])
+print(f"ROC-AUC : {res['test_roc_auc'].mean():.3f}")
+print(f"PR-AUC  : {res['test_average_precision'].mean():.3f}")  # 在這裡該信任的就是這個
+print(f"Recall  : {res['test_recall'].mean():.3f}")
+# -&gt; ROC-AUC : ~0.998
+# -&gt; PR-AUC  : ~0.96   &lt;-- 在 2% 為正的資料上，PR-AUC 才是誠實的分數
+# -&gt; Recall  : ~0.74   &lt;-- 我們實際抓到的真實故障比例（調整門檻可以拉高它）
+</code></pre>
+      </div>
+
+      <p>每個選擇的理由：用<strong>中位數 + 缺失指示</strong>，是因為在 MNAR 下丟掉資料列會扔掉最熱的那些馬達——而那恰恰就是故障；用<strong>穩健縮放</strong>，是因為原始感測器尾端很髒；對 <code>sea_state</code> 用<strong>序數</strong>，是因為它的順序在物理上真實存在，而且我們<em>明確地</em>告訴編碼器這個排序（絕不要相信字母順序的預設值）；對 <code>sensor_pack</code> 用<strong>獨熱</strong>，是因為這些硬體 pack 沒有順序；用 <strong><code>balanced_subsample</code></strong>，這樣那 2% 的故障才不會被淹沒；並以 <strong>PR-AUC + 召回率</strong>作為頭條指標，因為——如同第 05 課所反覆強調的——對一個從不預測故障的模型來說，準確率會顯示約 98%。</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🧪</span> 想用 SMOTE？ <small>選用——需要 <code>pip install imbalanced-learn</code></small></div>
+        <p><strong>SMOTE</strong>（合成少數類別過取樣，Synthetic Minority Over-sampling）不是複製少數類別的資料列；它<em>發明</em>新的列，方法是在一個故障樣本與它的某個 $k$ 最近鄰故障樣本之間做內插：$x_{\text{new}} = x_i + \lambda (x_{\text{nbr}} - x_i)$，其中 $\lambda \sim U(0,1)$。它必須<strong>只在訓練折上執行</strong>，所以要用 <code>imblearn</code> 的管線，而不是 sklearn 的，因為它必須<em>在切分之後</em>重新取樣：<code>from imblearn.pipeline import Pipeline as ImbPipeline; ImbPipeline([("pre", pre), ("smote", SMOTE()), ("rf", clf_step)])</code>。在完整資料集上重新取樣，你就把測試點的合成鄰居洩漏進了訓練——一個經典、會灌水分數的錯誤。</p>
+      </div>
+
+      <h3>時間序列的故障：依時間順序切分，永遠不要洗牌</h3>
+      <p>ROV 日誌是一個<em>時間序列</em>。如果你設 <code>shuffle=True</code>，一個 14:35 的列會落進訓練集，而 14:34 卻坐在測試集裡——你等於是在用未來預測過去。請使用時間感知的切分，讓訓練永遠先於測試：</p>
+
+      <div class="codeblock">
+        <div class="code-head">time_series_split.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from sklearn.model_selection import TimeSeriesSplit, cross_val_score
+tscv = TimeSeriesSplit(n_splits=5)          # 第 k 折在 [0..t] 上訓練，在 (t..t+Δ] 上測試
+ts_scores = cross_val_score(clf, X, y, cv=tscv, scoring="average_precision")
+print(f"Time-series PR-AUC: {ts_scores.mean():.3f}")
+# -&gt; Time-series PR-AUC: ~0.95  （我們的合成特徵在時間上是穩態的，所以分數維持得很高）
+</code></pre>
+      </div>
+
+      <p>在這份玩具資料上，分數幾乎不動，因為我們的特徵在時間上是 i.i.d. 的。<strong>在真實日誌中它幾乎總是會掉</strong>——而那個下降正是重點。連續的 1 Hz 樣本高度自相關，所以洗牌會把一列 14:34 的近乎雙胞胎丟進訓練集，而你卻在「預測」14:35：模型其實是在半背誦它本質上已經見過的列。依時間順序的切分禁止這件事，模擬了部署情境（用過去訓練、預測未來），所以它的數字才是預測現場表現的那一個。當 <code>TimeSeriesSplit</code> 的分數遠低於洗牌的 CV 時，是那個洗牌分數在說謊。</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🌊</span> 已擬合的管線才是交付物</div>
+        <p>當這個模型出貨到 ROV 時，你不會在即時串流上重新推導中位數填補值或縮放器統計量——你會用 <code>joblib.dump</code> 存下<em>那個確切已擬合的管線</em>，並在上線時載入同一個物件。填補器的平均、那些 IQR、已知的類別集合、sea-state 的排序：全部都從訓練凍結下來。從即時資料重新推導其中任何一個，都只是穿著部署外衣的洩漏。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>常見陷阱與技巧</h2>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 要分清楚的七個陷阱</div>
+        <ul>
+          <li><strong>最致命的錯誤：在切分前就對完整資料集擬合任何轉換。</strong> 縮放器、填補器、編碼器、PCA、特徵選擇器、SMOTE——只要它有 <code>.fit()</code>，它就會學參數，而從測試列學它們就是洩漏。把每一個都放進 <code>Pipeline</code>，讓 <code>cross_val_score</code>/<code>GridSearchCV</code> 在每折重新擬合。這個單一習慣就能預防大多數「離線很棒、上線很慘」的災難。</li>
+          <li><strong>丟掉有缺失值的資料列通常是錯的。</strong> 它只有在 MCAR 下才會優雅地失敗，而感測器很少滿足 MCAR；在 MNAR 下（<code>dropna()</code>）它會系統性地刪掉那些帶資訊的案例。改用填補並加上一個缺失指示。</li>
+          <li><strong>對無序類別做序數編碼會注入一個假的順序。</strong> <code>{sonar, lidar, camera} → {0,1,2}</code> 告訴模型 camera 是 lidar 的「兩倍」。對名目特徵用獨熱；序數保留給真正有排名的，而且要明確傳入排序——不要相信預設（往往是字母順序）的順序。</li>
+          <li><strong>目標 / 平均編碼除非以折外方式進行，否則會洩漏。</strong> 它用到了 $y$，所以在所有列上計算它，會讓每一列偷看自己的標籤。把它朝全域平均做平滑，並在 CV 折內計算它，或使用一個會做折外編碼的函式庫。</li>
+          <li><strong>留意獨熱的維度。</strong> 高基數的 ID（船舶、港口、MMSI）會讓欄位數與記憶體爆炸。對那些 ID，考慮把罕見層級歸成「other」、做雜湊，或對它們做目標編碼。</li>
+          <li><strong>訓練/上線偏移在進到正式環境前都是無聲的。</strong> 永遠設定 <code>OneHotEncoder(handle_unknown="ignore")</code>，這樣一個沒見過的類別才不會讓推論崩潰；保存<em>已擬合的管線</em>（例如 <code>joblib.dump</code>），並在上線時載入同一個物件——絕不要從即時資料重新推導縮放統計量。</li>
+          <li><strong>對樹模型而言縮放是無作用的</strong>（隨機森林、梯度提升），但對 k-NN、SVM、線性/邏輯、k-平均與神經網路則是必須的。它從不會傷害一棵樹，所以把它留在共用的管線裡是沒問題的。</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>自我檢測</h2>
+
+      <p><strong>Q1.</strong> 一位隊友在整個資料集上跑 <code>StandardScaler().fit_transform(X)</code>，<em>然後才</em>做 <code>train_test_split</code>。他們回報 0.97 的 AUC。為什麼那個數字不可信？修正的方法是什麼？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>這個縮放器是從<strong>所有</strong>列計算每個特徵的平均與標準差，包括測試集，所以測試集的統計量洩漏進了訓練——模型已經間接「看過」測試分布。回報的 0.97 是樂觀地被灌水了。修正：先切分，或（更好）把縮放器放進 <code>Pipeline</code>，這樣 <code>cross_val_score</code>/<code>train_test_split</code> 才會只在訓練列上重新擬合它。每一個 <code>.fit()</code> 步驟都必須住在管線內部。</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> 你有一個 <code>sea_state ∈ {calm, moderate, rough, severe}</code> 欄位和一個 <code>sensor_pack ∈ {A, B, C}</code> 欄位。每一個該用哪種編碼，為什麼？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p><code>sea_state</code> 用<strong>序數</strong>——它有一個真實、單調的順序（calm &lt; moderate &lt; rough &lt; severe），所以整數 0–3 帶有真正的資訊；要明確傳入排序，這樣編碼器才不會按字母順序排。<code>sensor_pack</code> 用<strong>獨熱</strong>——A/B/C 是可互換、沒有順序的硬體，所以序數編碼會憑空發明一個假的「B 夾在 A 和 C 之間」的關係。</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> 你的故障偵測器在一份 2% 為故障的日誌上回報 98% 準確率。你該出貨嗎？你該改看什麼？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>不該。一個<em>永遠預測「無故障」</em>的模型會得到 98% 分數，卻抓到零個故障（呼應第 05 課）。在不平衡資料上準確率毫無意義。要看<strong>召回率</strong>（抓到的真實故障比例）、<strong>精確率</strong>，與 <strong>PR-AUC</strong>（平均精確度），並用 <code>class_weight="balanced"</code>、重新取樣或 SMOTE 來重新平衡學習訊號。</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> 為什麼 SMOTE 必須只套用在訓練折上，而絕不能在訓練/測試切分之前？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>SMOTE 透過在真實少數類別樣本與它們的最近鄰之間做內插，來建立合成的少數類別點。如果你在切分之前跑它，那些從<em>測試</em>樣本（或它們附近）衍生出來的合成點會跑進訓練集——模型實質上是在它被評估的那些點的內插上做訓練。那就是洩漏，而且它會灌水分數。請使用 <code>imblearn.pipeline.Pipeline</code>，這樣重新取樣才會在每折內、切分之後發生。</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> 你的感測器日誌是一個時間序列。用 <code>shuffle=True</code> 的交叉驗證給出 PR-AUC 0.90；<code>TimeSeriesSplit</code> 給出 0.62。你該回報哪一個，這道差距又是為什麼？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>回報 <code>TimeSeriesSplit</code> 的 <strong>0.62</strong>。洗牌讓模型用未來的列來預測過去的列——這在部署時不可能，所以 0.90 是來自時間自相關的洩漏。依時間順序的切分模擬了現實（用過去訓練、預測未來），所以它誠實地估計了現場表現。這道差距，就是洗牌對你說的那個謊有多大。</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>換你試試</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml20-leakage">
+        <div class="ex-head"><span class="badge">Q1</span> 洩漏藏在哪裡？</div>
+        <div class="ex-q">你正在一份雜亂的感測器表格上建立一個故障分類器。下面哪一個程序是<strong>無洩漏的</strong>？</div>
+        <ul class="ex-options">
+          <li data-correct="false">在完整的資料框上跑 <code>SimpleImputer</code> 和 <code>StandardScaler</code>，然後 <code>train_test_split</code>，再擬合模型。</li>
+          <li data-correct="false">對整個資料集套用 SMOTE 來平衡類別，然後再交叉驗證模型。</li>
+          <li data-correct="true">把填補 + 縮放 + 編碼 + 模型包進一個 <code>Pipeline</code>，並把它交給 <code>cross_val_score</code>，這樣每一個轉換都只在每個訓練折上重新擬合。</li>
+          <li data-correct="false">在所有列上一次性計算某個類別的目標 / 平均編碼，然後才切分並訓練。</li>
+        </ul>
+        <div class="ex-explain">只有管線那個選項是乾淨的。在完整資料框上填補/縮放會從測試列學到平均與標準差；對完整資料集做 SMOTE 會把測試點的合成鄰居種進訓練；全資料集的目標編碼會讓每一列偷看自己的標籤。規則是機械式的：<strong>任何帶有 <code>.fit()</code> 的東西都進到 <code>Pipeline</code> 內部</strong>，這樣 <code>cross_val_score</code> 才會在每折只用訓練列重新擬合它。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml20-class-weight" data-answer="50.0" data-tol="0.5">
+        <div class="ex-head"><span class="badge">Q2</span> 計算罕見類別的權重</div>
+        <div class="ex-q">一個二元問題（$K=2$）有 $N = 5000$ 個樣本，其中只有 $N_{\text{pos}} = 50$ 個正類（故障）。用 $w_c = \dfrac{N}{K \cdot N_c}$（<code>class_weight="balanced"</code> 所計算的），<strong>正</strong>類別會得到什麼權重？四捨五入到小數點後 1 位。</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">×</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">代入：$w_{\text{pos}} = \dfrac{N}{K \cdot N_{\text{pos}}} = \dfrac{5000}{2 \cdot 50} = \dfrac{5000}{100} = 50.0$。（負類得到 $w_{\text{neg}} = \dfrac{5000}{2 \cdot 4950} \approx 0.505$。）所以每一個故障錯誤的代價大約是一個多數類別錯誤的 $50/0.505 \approx 99\times$——這恰恰就是 $N_{\text{neg}}/N_{\text{pos}} = 4950/50 = 99$。確切答案是 <strong>50.0</strong>。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml20-mnar-thermistor">
+        <div class="ex-head"><span class="badge">Q3</span> 在高溫時故障的熱敏電阻</div>
+        <div class="ex-q">一顆馬達溫度的熱敏電阻傾向<em>恰恰在馬達過熱時</em>掉資料（讀數因為太熱而缺失）。你的故障與過熱相關。(a) 這是哪一種缺失型別？(b) 為什麼 <code>dropna()</code> 在這裡會主動造成傷害？(c) 哪一種兩段式的填補策略能修正它，而第二段為什麼重要？</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">問問缺失是否取決於<em>未觀測值本身</em>。然後問：如果你刪掉缺失的那些列，你刪的是哪些列——隨機的，還是故障的那些？</div></details>
+        <details class="ex-acc"><summary>顯示一種解答</summary><div class="acc-body">
+          <p><strong>(a) MNAR</strong>（非隨機缺失，Missing Not At Random）：值之所以缺失，是<em>因為</em>未觀測值本身——讀數恰恰在溫度高時消失。這是最危險的類別。</p>
+          <p><strong>(b)</strong> <code>dropna()</code> 會刪掉那些熱敏電阻熱到足以故障的列——但那些恰恰就是過熱、與故障相關的列。你會系統性地刪掉你的正類，把模型偏向「無故障」，並在你最需要抓到的那些案例上大幅削弱召回率。</p>
+          <p><strong>(c)</strong> 填補（中位數就很好且穩健），<strong>並加上一個「曾經缺失」的指示欄</strong>（<code>SimpleImputer(add_indicator=True)</code>）。指示欄才是重要的那一部分：在 MNAR 下，<em>值曾經缺失這件事本身</em>就是一個強烈的故障訊號。只填洞會把那個訊號扔掉；旗標讓模型能學到「熱敏電阻掉資料 → 很可能故障」。填補讓那列仍然可用；旗標則保留了它曾經缺失過的資訊。</p>
+        </div></details>
+      </div>
+
+      <!-- ============================================================ recap -->
+      <h2 id="recap-next"><span class="sec-no">8</span>回顧與下一步</h2>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本課回顧</div>
+        <ul>
+          <li><strong>資料準備佔了真實 ML 的 80%，而洩漏是最致命的錯誤。</strong> 先切分；把每一個轉換——縮放器、填補器、編碼器、SMOTE——只在訓練列上擬合。一條 <code>Pipeline</code> + <code>ColumnTransformer</code> 會在每個 CV 折內自動強制執行這件事。</li>
+          <li><strong>要填補，不要丟掉。</strong> 中位數很穩健，類別型用最高頻，並加上一個缺失指示，因為缺失本身就可能是訊號（尤其在 MNAR 的感測器故障下）。</li>
+          <li><strong>依類別型別來編碼：</strong> 無序的用獨熱（留意維度）、序數<em>只</em>給真正的順序、目標 / 平均編碼很強大但只能以折外方式計算。</li>
+          <li><strong>不平衡會讓準確率說謊。</strong> 用 <code>class_weight</code>、重新取樣或 SMOTE，並以召回率 / 精確率 / PR-AUC 來判斷——絕不要用原始準確率。</li>
+          <li><strong>尊重時間。</strong> 使用 <code>TimeSeriesSplit</code>、保存已擬合的管線，並餵給上線環境同一個物件，以避免訓練/上線偏移。</li>
+        </ul>
+        <p>有了一條乾淨、無洩漏的管線在手，最後一個槓桿就是把模型的<em>設定</em>選好——而且不要讓你的調參過度擬合到驗證集：<a href="21-hyperparameter-optimization.html">21 — 超參數最佳化</a>。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂部">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

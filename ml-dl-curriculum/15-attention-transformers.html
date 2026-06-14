@@ -225,6 +225,9 @@ plt.show()
         <p>A 4×4 grid where each <em>row</em> is a probability distribution (brightnesses in a row sum to 1). A bright cell at $(i,j)$ means "token $i$ pulls strongly from token $j$." With random weights it looks fairly uniform; after training on a real task, rows develop sharp peaks — that's the model deciding <em>who attends to whom</em>.</p>
       </div>
 
+      <div class="sim"><div class="sim-title"><span>🧪</span> Self-attention weights</div><canvas id="demo-attention"></canvas></div>
+      <p>Pick a query token and temperature; the bars are the softmax attention distribution over the sequence.</p>
+
       <h3 id="code-self-attention">3c. A reusable self-attention module (with optional causal mask)</h3>
       <div class="codeblock">
         <div class="code-head">self_attention.py <span class="lang">Python</span></div>
@@ -442,5 +445,7 @@ print("block output shape:", block(batch).shape)
 <script src="../assets/katex/contrib/auto-render.min.js"></script>
 <script src="../assets/vendor/mermaid.min.js"></script>
 <script src="../assets/app.js"></script>
+<script src="../assets/ml-demos.js"></script>
+<script>EM.mlDemo.attention("demo-attention");</script>
 </body>
 </html>

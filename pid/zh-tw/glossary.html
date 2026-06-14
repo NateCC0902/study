@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>PID 詞彙表 — USV 的 PID 控制</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-pid" data-course="pid" data-track="main" data-chapter="glossary">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> PID&nbsp;·&nbsp;USV</a>
+  <span class="spacer"></span>
+  <span class="track-pill">PID · 第 G 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">PID 課程 · 詞彙表 · 參考</div>
+        <h1>PID 詞彙表</h1>
+        <p>這門課所倚賴的每一個術語，都以控制工程師實際使用的方式來定義 — 附上單位、我們這艘船的數字，以及指向該術語會「咬人」的那一章。當某個詞開始讓你覺得不踏實時就翻一翻；目標是讓這些詞沒有一個還停留在模糊地帶。</p>
+        <div class="meta"><span>📖 參考</span><span>🧭 USV／Nomoto</span><span>∑ PID</span><span>📐 全程附單位</span></div>
+      </section>
+
+      <p>這一頁是一張查找表，不是一段故事。術語的分組依照課程的展開順序：先是受控體（plant），接著是三個項，然後是各種失效模式與其修法，再來是整定（tuning），最後是部署。凡是符號帶有<em>單位</em>者都會標出 — 從物理意義去讀懂一個增益的單位，是整定裡最能去除神祕感的單一動作。數字皆引自從頭到尾使用的那一艘船：$K=0.6$、$T=2.5$ s、舵 $\pm 35°$、變化率限制 $25$ °/s、水流 $\equiv 4°$ 卡住的舵、迴圈 $20$ Hz（$dt=0.05$ s）。</p>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="the-plant"><span class="sec-no">1</span>受控體：船及其模型</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>你在操控什麼</small></div>
+      <p>「受控體」就是被控制的那個東西。對我們而言它是一艘靠舵轉向的船，而貫穿整門課的核心事實是這個：<strong>舵設定的是轉向速率，不是航向。</strong>下游的一切都是這件事的後果。</p>
+
+      <div class="math-box">$$ T\,\dot r + r = K\,(\delta + d), \qquad \dot\psi = r $$</div>
+
+      <p>這就是 Nomoto 模型：從舵到偏航角速度（yaw rate）的一個一階（first-order）延遲，再從偏航角速度到航向的一個積分。令 $\dot r = 0$，穩態轉向速率就是 $r_\infty = K(\delta + d)$ — 除非淨舵為零，否則船會永遠轉下去。</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語</th><th>意義</th></tr></thead>
+        <tbody>
+          <tr><td><strong>受控體（plant）</strong></td><td>被控制的系統。這裡指 USV 的轉向動態 — 舵進、航向出。控制器的工作，是讓受控體在自身延遲與擾動之下仍照你的意思動。</td></tr>
+          <tr><td><strong>USV</strong></td><td>無人水面載具（unmanned surface vessel）— 我們要維持在某個航向上的自主船。它代表任何靠轉向速率轉彎的東西：四旋翼的偏航、汽車的航向、戰車的砲塔。</td></tr>
+          <tr><td><strong>Nomoto 模型</strong></td><td>標準的一階船舶轉向模型，$T\dot r + r = K\delta$。是仍表現得像一艘真實船的最簡單方程式：偏航角速度透過一個時間常數落後於舵。</td></tr>
+          <tr><td><strong>$K$ — 轉向增益（turning gain）</strong></td><td>每單位舵對應的穩態偏航角速度，單位 $\frac{\text{rad/s}}{\text{rad}}$。我們這艘船：$K=0.6$，所以 10° 舵會產生約 $\sim 6$ °/s 的穩態轉向。</td></tr>
+          <tr><td><strong>$T$ — 時間常數（time constant）</strong></td><td>船體（hull）響應有多遲鈍，單位為秒。我們這艘船：$T=2.5$ s。經過一個 $T$ 後，偏航角速度達到最終值的 $\sim 63\%$；經過 $3T$ 後則達 $\sim 95\%$。</td></tr>
+          <tr><td><strong>舵角 $\delta$（rudder angle）</strong></td><td>你實際下達的控制輸入（rad 或度）。不是航向 — 舵命令的是轉向。</td></tr>
+          <tr><td><strong>偏航角速度 $r$（yaw rate）</strong></td><td>船轉得有多快，$\dot\psi$，單位 rad/s（或 °/s）。舵透過 $K$ 與 $T$ 直接控制它。</td></tr>
+          <tr><td><strong>航向 $\psi$（heading）</strong></td><td>船首（bow）指向哪個方向，單位 rad（或度）。它是偏航角速度的積分，$\psi=\int r\,dt$ — 這正是為什麼固定的舵會讓航向永遠斜坡上升。</td></tr>
+          <tr><td><strong>擾動 $d$（disturbance）</strong></td><td>來自外部的推力 — 水流或風 — 建模為作用在舵上的一個固定偏移量，在我們這艘船上是 $\equiv 4°$ 卡住的舵。它的作用恰如一個控制器必須抵消掉的偏置。</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="mermaid">
+flowchart LR
+    D["舵 δ"] -->|"增益 K、延遲 T"| R["偏航角速度 r"]
+    R -->|"∫ dt"| P["航向 ψ"]
+    W["水流／風 d"] --> R
+</div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 撐起其他所有術語的那個事實</div>
+        <p>舵 → 速率，速率 →（積分後）航向。船會帶著動量<em>衝進</em>你所指的方向，而且它的反應是慢半拍的。延遲＋累積＝超調（overshoot）。這份詞彙表大部分內容，都是用來對抗這一句話的詞彙。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-three-terms"><span class="sec-no">2</span>三個項：P、I、D 以及它們各自讀作什麼</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>控制律及其單位</small></div>
+      <p>我們在微控制器上每個 $dt$ 跑一次的離散控制律，誤差為 $e = \psi_\text{set} - \psi$：</p>
+      <div class="math-box">$$ u_n = k_p\,e_n + k_i \underbrace{\textstyle\sum_k e_k\,dt}_{\text{積分}} + k_d \underbrace{\frac{e_n - e_{n-1}}{dt}}_{\text{微分}}, \qquad u \leftarrow \mathrm{clamp}(u,\,-\delta_\max,\,+\delta_\max) $$</div>
+
+      <p>每個增益都有單位，而從物理意義去讀懂它們，能讓整定不再那麼玄：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語</th><th>意義</th></tr></thead>
+        <tbody>
+          <tr><td><strong>設定值 $\psi_\text{set}$（setpoint）</strong></td><td>你想要船維持的航向。控制器追逐的那個參考值。</td></tr>
+          <tr><td><strong>誤差 $e$（error）</strong></td><td>$e = \psi_\text{set} - \psi$，單位 rad。進入 PID 前一律先做角度纏繞（見 §3）。零誤差是目標；符號告訴你該往哪邊轉。</td></tr>
+          <tr><td><strong>$k_p$ — 比例增益（proportional gain）</strong></td><td>單位 $\frac{\text{rad 舵}}{\text{rad 誤差}}$（無因次）。讀作「我偏差每一度，要打多少舵」。$k_p$ 越大＝響應越快、偏差越小、振鈴越多 — 一直到它再也停不下來為止。</td></tr>
+          <tr><td><strong>$k_i$ — 積分增益（integral gain）</strong></td><td>單位 $\frac{\text{rad 舵}}{\text{rad}\cdot\text{s}}$（即 $1/\text{s}$）。「我對<em>持續存在</em>的誤差施壓的力道有多猛」。它應該是迴圈裡最慢的東西 — 它是一份記憶，而 $k_i$ 太大就意味著從短記憶裡就跳結論。</td></tr>
+          <tr><td><strong>$k_d$ — 微分增益（derivative gain）</strong></td><td>單位 $\frac{\text{rad 舵}}{\text{rad/s}}$（即秒）。「擺動每秒一度，要打多少舵」。它只對<em>變化</em>起作用；一旦上了航向且穩定下來，$D=0$。</td></tr>
+          <tr><td><strong>P 項</strong>（$k_p e$）</td><td>彈簧（spring）。力與你偏差多遠成正比。強勁、即時，但在誤差為零時它輸出零舵 — 所以它撐不住擾動。</td></tr>
+          <tr><td><strong>I 項</strong>（$k_i \textstyle\sum e\,dt$）</td><td>配平片（trim tab）。累積遲遲不消的誤差，並把舵爬升到任何能抵消擾動的穩態值。在我們這艘船上，它會學會水流所需的 $-4°$ 配平，然後在誤差為零時維持住。</td></tr>
+          <tr><td><strong>D 項</strong>（$k_d \,\dot e$）</td><td>阻尼器（damper）。對抗快速變化，所以它替接近過程剎車，並消滅超調。誤差快速縮小時它為負 — 那個抵消<em>就是</em>阻尼。</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="codeblock">
+        <div class="code-head">控制步驟（每 dt） <span class="lang">pseudocode</span></div>
+<pre><code class="language-python">error      = wrap(setpoint - heading)        # rad，永遠先纏繞（見 §3）
+integral  += error * dt                       # rad·s，跨呼叫持續保留
+derivative = (error - prev_error) / dt        # rad/s
+
+u = kp*error + ki*integral + kd*derivative    # 舵的 rad 數
+u = clamp(u, -RUDDER_MAX, +RUDDER_MAX)
+prev_error = error
+</code></pre>
+      </div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 在漂亮的接近過程中，P 與 D 互相抵消</div>
+        <p>操船途中（航向 60°、設定值 90°、$k_p=2$、$k_d=3$）：$P=+1.047$ rad 往裡推，但船首已經以 $\sim 20$ °/s 收斂，所以 $D=-1.047$ rad 往回拉。它們<em>恰好互相抵消</em>，控制器幾乎是在滑行 — 再用力推只會超調得更兇。那個抵消正是 D 存在的全部意義。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="failure-modes"><span class="sec-no">3</span>失效模式與其修法</h2>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>每個人都會遇到的 bug</small></div>
+      <p>這些是天真的 PID 在真實船上出包的幾種有名字的方式 — 以及每一種的標準修法。它們每一個，都是 §1 那兩個事實與真實致動器、感測器相撞之後的後果。</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語</th><th>意義</th></tr></thead>
+        <tbody>
+          <tr><td><strong>穩態偏差（steady-state offset）</strong></td><td>純 P 控制器最終停留下來的那截殘餘誤差。要維持航向對抗水流，舵必須維持在 $-4°$，但 $u=k_p e$ 只能靠讓 $e_\text{ss} = -4°/k_p \ne 0$ 來做到這件事。P 是靠維持錯誤來保持航向的。由 I 修正。</td></tr>
+          <tr><td><strong>超調（overshoot）</strong></td><td>在穩定下來之前先衝過設定值。成因是帶著動量衝進目標再加上延遲。由 D 馴服（並且別把 P 操過頭）。</td></tr>
+          <tr><td><strong>整定時間（settle time）</strong></td><td>船要花多久才會待在設定值附近一個小區間之內。整定時你拿來跟超調與抖動互相權衡的那個量。</td></tr>
+          <tr><td><strong>積分飽和（積分捲繞，windup）</strong></td><td>當舵飽和時，I 項持續累積它根本無從施展的誤差。在一次 0°→180° 的轉向裡，舵被釘在 $+35°$ 約 $\sim 9$ s；積分能存下 $\sim 13$ rad $\approx 750°$ 的命令舵角。船於是永遠在繞圈圈。由抗積分飽和修正。</td></tr>
+          <tr><td><strong>抗積分飽和（anti-windup）</strong></td><td>任何能在飽和期間阻止積分膨脹的方案。三種標準形式：<strong>箝位（clamp）</strong>（把積分封頂，讓 $k_i\cdot\text{integral}$ 無法超過舵的極限）、<strong>條件積分（conditional integration）</strong>（在已飽和的取樣點上不要積分）、<strong>反算法（back-calculation）</strong>（每一步從積分中減去 $(u_\text{unclamped}-u_\text{clamped})\cdot k$ — 業界標準，最平滑）。</td></tr>
+          <tr><td><strong>飽和（saturation）</strong></td><td>致動器（actuator）撞上它的物理極限，$\pm 35°$ 舵。命令可以要求更多；舵就是給不出來。它是積分飽和的根本成因。</td></tr>
+          <tr><td><strong>微分衝擊（derivative kick）</strong></td><td>當<em>設定值</em>階躍時，誤差在一個取樣點內就跳一截，所以 $\dot e$ 暴衝。一次 10° 的設定值階躍會給出 $10°/0.05\,\text{s} = 200$ °/s 的假微分 $\approx 600°$ 的舵 — 一個沒用又把伺服機猛甩的尖峰。船並沒有突然開始擺動；是你的設定值移動了。</td></tr>
+          <tr><td><strong>對量測值微分（derivative-on-measurement）</strong></td><td>衝擊的修法：對 $\psi$ 微分，而不是對 $e$。當設定值固定時 $\dot e = -\dot\psi$，所以它是同一個阻尼訊號 — 但它會忽略設定值的跳動。翻一個符號就好：<code>d = -(meas - prev_meas)/dt</code>。</td></tr>
+          <tr><td><strong>低通濾波器（low-pass filter）</strong></td><td>替微分對抗感測器雜訊做平滑。雜訊的微分非常大（$\sigma=0.5°$ 雜訊 → $\sim 14$ °/s 的垃圾 $\to \times k_d \approx 42°$ 的舵抖動）。濾波器 $d_f \leftarrow \alpha\,d_f + (1-\alpha)\,d_\text{raw}$（$\alpha\approx0.85$）把它砍掉，代價是替 D 加一點延遲。</td></tr>
+          <tr><td><strong>角度纏繞（angle wrapping）</strong></td><td>把一個角度誤差映射進 $(-\pi,\pi]$，好讓船走近路轉。航向 350°、設定值 10° 其實只差 20°，但天真的相減卻給出 $-340°$ —「轉遠路」，在碼頭邊就是撞船。<code>wrap(a) = (a+π) % (2π) − π</code>，套用在每一個誤差上。</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="codeblock">
+        <div class="code-head">三種修法，用程式碼寫 <span class="lang">Python</span></div>
+<pre><code class="language-python">import math
+
+def wrap(angle):                                  # → (-pi, pi]，走近路
+    return (angle + math.pi) % (2 * math.pi) - math.pi
+
+# 對量測值微分（消除設定值階躍時的微分衝擊）
+derivative = -(measurement - prev_measurement) / dt
+
+# 對微分做低通濾波（消除雜訊放大）
+d_filtered = alpha * d_filtered + (1 - alpha) * d_raw   # alpha ≈ 0.85
+
+# 抗積分飽和，箝位形式：把積分封頂，讓 ki*integral
+# 永遠無法命令出超過舵所能給出的量
+integral = max(-RUDDER_MAX / ki, min(RUDDER_MAX / ki, integral))
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 那兩個在出事之前都看不見的東西</div>
+        <p>角度纏繞與一份陳舊的積分，都會通過每一個剛好沒觸發到它們的測試 — 然後在船第一次跨過正北、或閒置後重新接管時撞船。每一個誤差都要纏繞；重新接管時要 <code>reset()</code> 控制器。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="tuning"><span class="sec-no">4</span>整定：增益、極限與配方</h2>
+
+      <div class="layer"><span class="step">⑤</span> 實作 <small>如何挑增益</small></div>
+      <p>整定是一門挑選 $k_p, k_i, k_d$ 的藝術，目標是又快、又平滑、又沒有偏差的響應。底下的詞彙就是配方所用的語言。</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語</th><th>意義</th></tr></thead>
+        <tbody>
+          <tr><td><strong>臨界增益 $K_u$（ultimate gain）</strong></td><td>讓閉迴路以等幅振盪的那個 $k_p$（純 P，$k_i=k_d=0$）。在我們這艘船上 $K_u \approx 5$。它是 Ziegler–Nichols 的參考基準點。</td></tr>
+          <tr><td><strong>臨界週期 $T_u$（ultimate period）</strong></td><td>在 $K_u$ 處那個持續振盪的週期。在我們這艘船上 $T_u \approx 9$ s。它餵給 ZN 公式。</td></tr>
+          <tr><td><strong>Ziegler–Nichols</strong></td><td>一條經典整定法則，從 $K_u$ 與 $T_u$ 算出增益：$k_p=0.6K_u$、$k_i=1.2K_u/T_u$、$k_d=0.075K_uT_u$。由我們的 $K_u=5,\,T_u=9$ 算出 $k_p=3.0,\,k_i=0.67,\,k_d=3.4$。它以快速的擾動抑制（disturbance rejection）為目標，並容忍超調 — 是一個火力很猛、可以從這裡往保守方向退調（de-tune）的起點。</td></tr>
+          <tr><td><strong>相位延遲（phase lag）</strong></td><td>命令與效果之間的延遲：伺服機變化率、感測器濾波延遲、通訊延遲時間（latency）、船體動態。高增益下的相位延遲，就是引發振盪的萬用配方。延遲越多 → 可用的 $k_p$ 越低。它正是<em>為什麼</em>「把 $k_p$ 拉到它開始振盪」這招行得通的原因 — 即使單看理想的 Nomoto 受控體永遠不會振盪。</td></tr>
+          <tr><td><strong>變化率限制（slew rate）</strong></td><td>致動器能移動的最快速度，我們的伺服機是 $25$ °/s — 所以從一頭打到另一頭要 $\sim 2.8$ s。在高增益下，命令在兩端之間翻動的速度比舵跟得上的還快，把一個方波命令變成落在後面的鋸齒波：這就是相位延遲的具體現身。</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 配方，照順序來</div>
+        <p>（1）$k_i=0,\,k_d=0$；把 $k_p$ 拉到出現持續振盪（$\approx K_u=5$），然後砍半到 $k_p \approx 2\text{–}2.5$。（2）把 $k_d$ 拉到超調消失（$\approx 3$）。（3）加上能在合理時間內消除偏差的最小 $k_i$（$0.2$，約在 $\sim 30$ s 內把水流配平掉）。結果：<strong>$k_p=2,\ k_i=0.2,\ k_d=3$</strong>。實地的順序一模一樣：P → D → I，從低開始。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="deployment"><span class="sec-no">5</span>部署：從模擬到一艘真正的 USV</h2>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>在水上</small></div>
+      <p>上硬體時數學不變；變的是管路接法。這些是當控制器離開模擬器、在一個 ROS 2 節點裡跑起來時，你會遇到的術語。</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>在模擬器裡</th><th>在船上（ROS 2）</th></tr></thead>
+        <tbody>
+          <tr><td><code>psi</code>（航向）</td><td>來自 IMU／<code>/odometry/filtered</code> 的偏航 — 在上游已由 EKF 或互補濾波器（complementary filter）融合好了。</td></tr>
+          <tr><td><code>wrap(sp - psi)</code></td><td>一樣的纏繞，在你的節點裡每一週期、對每一個誤差都做。</td></tr>
+          <tr><td><code>DT = 0.05</code></td><td>計時器回呼（timer callback）約 $\sim 20\text{–}50$ Hz — 但要用<em>量測到的</em> $dt$，不是標稱值。</td></tr>
+          <tr><td>舵 $\delta$</td><td>一具舵伺服機，或差動推力（differential thrust）：<code>left = base + u</code>、<code>right = base - u</code>。</td></tr>
+          <tr><td><code>RUDDER_MAX</code></td><td>你真實的致動器極限 — 在軟體裡也要箝位，並搭配抗積分飽和。</td></tr>
+          <tr><td>水流擾動 $d$</td><td>真實的水流與風 — 配平掉它，是 I 項的常設工作。</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 任何自主航行測試前的兩條不可妥協的鐵律</div>
+        <p>要有一個硬體緊急斷電開關（kill switch），且已接好、測試過。而且每次控制器重新接管時都要 <code>reset()</code> PID — 一份五分鐘前留下的陳舊積分，就是一個正等著把船甩向碼頭的積分飽和 bug。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="quick-check"><span class="sec-no">6</span>快速檢查</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="pidG-which-term">
+        <div class="ex-head"><span class="badge">Q1</span> 把症狀對到藥方</div>
+        <div class="ex-q">一艘調成 PD 的船在穩定水流中維持在 92°，而不是命令的 90°，而且永遠補不上最後那 2°。哪一個詞彙表術語點出了問題，又是哪一個能修好它？</div>
+        <ul class="ex-options">
+          <li data-correct="false">微分衝擊；由對量測值微分修正。</li>
+          <li data-correct="true">穩態偏差；由加上積分（I）項修正。</li>
+          <li data-correct="false">積分飽和；由箝位積分修正。</li>
+          <li data-correct="false">角度纏繞；由纏繞誤差修正。</li>
+        </ul>
+        <div class="ex-explain">一個 P（或 PD）控制器輸出 $k_p e$，所以要維持抵消水流所需的 $-4°$ 舵，它就必須保持一個非零的誤差：$e_\text{ss} = -4°/k_p$。那就是<strong>穩態偏差</strong>。D 只對變化起作用，在穩態時歸零，所以幫不上忙。積分會把舵爬升到配平值，並讓誤差回到零 — 這正是 I 存在的<em>目的</em>。（積分飽和與衝擊是 I 側與設定值階躍的問題；纏繞是走近路的問題 — 都不符合這個症狀。）</div>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章回顧</div>
+        <p>這一頁是你的查找索引：<strong>受控體</strong>（Nomoto、$K$、$T$、$\psi$、$r$、$d$）、帶單位的<strong>三個項</strong>、各種<strong>失效模式</strong>（偏差、超調、積分飽和、微分衝擊、雜訊、纏繞）及其修法（抗積分飽和、對量測值微分、低通、纏繞），以及<strong>整定</strong>（$K_u$、$T_u$、Ziegler–Nichols、相位延遲、變化率限制）。當某個術語在章節中途變得模糊時，回到這裡。然後回到它咬你的那個案例 — 各章正是這些定義真正派上用場的地方。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+<script src="../../assets/pid-sim.js"></script>
+</body>
+</html>

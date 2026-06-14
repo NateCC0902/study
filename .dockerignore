@@ -1,9 +1,13 @@
 # keep the build context (and image) lean
 .git
+.serena
 .DS_Store
 **/.DS_Store
-_AUTHORING_GUIDE.md
+docs
+deploy/validate.mjs
+embedded-mastery/_AUTHORING_GUIDE.md
 README.md
 docker-compose.yml
 Dockerfile
 .dockerignore
+start-jupyter.sh

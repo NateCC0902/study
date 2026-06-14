@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>物件偵測與分割 — 機器學習與深度學習</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="19-detection-segmentation">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 19</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL 課程 · 19</div>
+        <h1>物件偵測與分割</h1>
+        <p>分類器告訴你一艘船<em>存在</em>；路徑規劃器需要知道它<strong>在哪裡</strong>、<strong>多大</strong>、以及<strong>離船首多遠</strong>。我們從一個標籤一路攀升到邊界框、再到逐像素的遮罩——並建立起讓感知能夠真正供控制使用的 IoU／錨框／NMS／mAP 機制。</p>
+        <div class="meta"><span>⏱ 約 40 分鐘</span><span>🧠 IoU · 錨框 · NMS · mAP</span><span>🐍 torchvision</span><span>🪢 U-Net</span></div>
+      </section>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 第 7 部分 · 第 19 課 · 程式技術棧：PyTorch（torchvision 預訓練模型）</div>
+        <p><strong>先備知識：</strong> <a href="13-cnns.html">13 — 卷積神經網路</a>（你必須熟悉卷積堆疊、特徵圖 (feature map)、以及形狀運算）。有幫助的背景：<a href="12-training-deep-nets.html">12 — 訓練深度網路</a>（損失頭、訓練穩定性）以及 <a href="17-transfer-learning-llms-mlops.html">17 — 遷移學習、LLM 與 MLOps</a>（使用預訓練骨幹網路）。</p>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎯</span> 學完本課你能</div>
+        <ul>
+          <li>解釋從<strong>分類</strong>（「影像裡有什麼」）躍進到<strong>偵測</strong>（「是什麼<em>以及在哪裡</em>，以邊界框表示」）與<strong>分割</strong>（「哪些像素」）。</li>
+          <li>定義 <strong>IoU</strong>、<strong>錨框 (anchor box)</strong>、<strong>NMS</strong> 與 <strong>mAP</strong>，並說明<em>為什麼</em>路徑規劃器各需要它們。</li>
+          <li>對比<strong>兩階段</strong> (Faster R-CNN) 與<strong>單階段</strong> (YOLO/SSD) 偵測器，並推理速度／準確率的權衡。</li>
+          <li>在真實影像上執行一個<strong>預訓練的 torchvision 偵測器</strong>，依分數過濾、套用 <strong>NMS</strong>、並繪製邊界框。</li>
+          <li>追蹤<strong>編碼器–解碼器 / U-Net</strong> 的形狀，包含<strong>轉置卷積 (transposed convolution)</strong> 與<strong>跳躍連接 (skip connection)</strong>，走過一次小型前向傳播。</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>直覺理解</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺理解 <small>先建立全貌</small></div>
+      <p>你在第 13 課做的 CNN 分類器回答一個問題：<em>「這張影像是什麼？」</em> → <code>"boat"</code>。這對路徑規劃器幾乎毫無用處。規劃器不在乎畫面裡某處<em>存在</em>一艘船；它需要知道船<strong>在哪裡</strong>、<strong>多大</strong>、以及<strong>離船首多遠</strong>——這樣才能決定是要維持航向還是讓道。分類把整個場景壓縮成一個標籤，但供控制使用的感知必須保留<strong>空間結構</strong>。</p>
+
+      <p>這裡有三項層層遞進的任務，差別完全在於<em>答案的空間解析度</em>：</p>
+      <ul>
+        <li><strong>分類 (classification)</strong> — 整張影像一個標籤。（第 13 課。）</li>
+        <li><strong>物件偵測 (object detection)</strong> — 一組<strong>邊界框 (bounding box)</strong>，每個都帶有類別標籤與信心分數。「船位於像素 (x=410, y=300, w=120, h=80)，分數 0.94。」這告訴規劃器離散障礙物及其佔據範圍。</li>
+        <li><strong>分割 (segmentation)</strong> — 為<strong>每個像素</strong>指派一個類別。<strong>語意分割 (semantic segmentation)</strong> 說「這個像素是水、那個是天空」；<strong>實例分割 (instance segmentation)</strong> 更進一步說「這個像素屬於<em>船 #2</em>」。</li>
+      </ul>
+
+      <div class="mermaid">
+graph LR
+    A["輸入影格"] --> B["分類<br/>'boat' (1 個標籤)"]
+    A --> C["偵測<br/>框 + 標籤 + 分數"]
+    A --> D["語意分割<br/>逐像素類別遮罩"]
+    A --> E["實例分割<br/>逐像素 + 屬於哪個物件"]
+    B -.->|"更多空間<br/>細節"| C -.-> D -.-> E
+</div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 類比——港務長的三份報告</div>
+        <p>分類像是一通無線電通報：<em>「外面有交通船舶。」</em> 對掌舵毫無幫助。偵測像是一張雷達圖：<em>帶有位置與大小的離散光點</em>——正是碰撞迴避演算法所消費的東西。分割則像是一張上了色的海圖，場景中的每一平方公尺都被標成「可航行水域／岸線／船隻／天空」——當危險是一個<em>區域</em>（沙洲、岸線）而非可以框起來的離散物件時，這就是你要的。</p>
+      </div>
+
+      <p>對自主載具而言，經驗法則是：<strong>離散障礙物用偵測，連續區域用分割。</strong> 一個浮標或另一艘船是一個框。水／岸的邊界，或是遙控潛水器 (ROV) 不可刮到的海床，則是一張遮罩 (mask)。</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>數學原理</h2>
+
+      <h3 id="a-box-and-how-to-score-it">2.1 一個框，以及如何替它評分</h3>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>四個數字與一個重疊度量</small></div>
+      <p>一個邊界框就只是四個數字。兩種常見的表示法：角點形式 $(x_1, y_1, x_2, y_2)$（左上角與右下角）或中心形式 $(x_c, y_c, w, h)$。torchvision 使用<strong>角點形式</strong>。偵測器對每個框輸出一個類別標籤與一個<strong>信心分數</strong> $s \in [0,1]$。</p>
+
+      <p>要衡量一個預測框 $A$ 是否與一個真實標註框 $B$ 相符，我們需要一個重疊度量。這個度量就是<strong>交集比聯集 (Intersection-over-Union, IoU)</strong>：</p>
+
+      <div class="math-box">$$
+\text{IoU}(A, B) = \frac{\text{area}(A \cap B)}{\text{area}(A \cup B)}
+$$</div>
+
+      <p>其中 $A \cap B$ 是重疊的矩形，而 $A \cup B = \text{area}(A) + \text{area}(B) - \text{area}(A \cap B)$ 是合併後的佔據範圍。<strong>它從何而來：</strong> 這是把 <strong>Jaccard 指數</strong>（第 05 課的集合相似度度量）套用到像素集合上。$\text{IoU}=1$ 代表完美重疊，$\text{IoU}=0$ 代表互不相交。交集矩形的計算方式是取內側的邊：</p>
+
+      <div class="math-box">$$
+x_1^\cap = \max(x_1^A, x_1^B),\quad y_1^\cap = \max(y_1^A, y_1^B),\quad
+x_2^\cap = \min(x_2^A, x_2^B),\quad y_2^\cap = \min(y_2^A, y_2^B)
+$$</div>
+
+      <p>若 $x_2^\cap &gt; x_1^\cap$ 且 $y_2^\cap &gt; y_1^\cap$，交集面積就是它們的乘積，否則為 $0$（兩框沒有接觸）。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> IoU 是偵測的主力</div>
+        <p>它決定一個預測是否「算」正確（通常 $\text{IoU} \ge 0.5$），並且驅動底下的 NMS。</p>
+      </div>
+
+      <h3 id="anchor-boxes">2.2 錨框——把偵測轉化為迴歸</h3>
+
+      <p>你要怎麼讓一個 CNN <em>吐出</em>框來？你很難要求一個固定大小的網路輸出數量可變的任意矩形。解開現代偵測器的關鍵技巧就是：<strong>錨框 (anchor box)</strong>（也稱為先驗框或預設框）。</p>
+
+      <p>在影像上鋪一層網格。在每個網格單元上，預先定義數個固定大小與長寬比的參考矩形——例如一個高的、一個寬的、一個正方形的，每種三種尺度。這些就是<strong>錨框</strong>。網路的工作不再是「無中生有想出一個框」，而是「對每個錨框，預測 (a) 這裡有沒有物件？以及 (b) 一個小小的<strong>偏移量 (offset)</strong>，把錨框修正到真實框」。這把一個開放式的搜尋轉化成一個固定、可平行處理的<strong>分類 + 迴歸</strong>問題，而 CNN 早就知道怎麼做。</p>
+
+      <p>迴歸目標是相對於某個錨框 $(x_a, y_a, w_a, h_a)$ 的偏移量：</p>
+
+      <div class="math-box">$$
+t_x = \frac{x - x_a}{w_a},\quad t_y = \frac{y - y_a}{h_a},\quad
+t_w = \log\frac{w}{w_a},\quad t_h = \log\frac{h}{h_a}
+$$</div>
+
+      <p>其中 $(x,y,w,h)$ 是真實框的中心／大小。<strong>它從何而來：</strong> 除以錨框大小讓目標變得<strong>尺度不變</strong>（在一個小浮標上差 10 像素和在一艘大船上差 100 像素，正規化後是可相提並論的），而對寬高取 $\log$ 則讓放大／縮小保持對稱、並強制大小為正。網路預測 $\hat{t}$；你把這些方程式反解回去就能還原出實際的框。</p>
+
+      <h3 id="two-stage-vs-one-stage">2.3 兩大家族：兩階段 vs 單階段</h3>
+
+      <div class="mermaid">
+graph TD
+    subgraph TwoStage["兩階段 (Faster R-CNN)：準確"]
+        I1["影像"] --> BB1["CNN 骨幹網路<br/>(特徵圖)"]
+        BB1 --> RPN["區域提議網路<br/>數千個候選框"]
+        RPN --> ROI["ROI 池化 +<br/>逐個分類與微調"]
+        ROI --> O1["框 + 標籤"]
+    end
+    subgraph OneStage["單階段 (YOLO / SSD)：快速"]
+        I2["影像"] --> BB2["CNN 骨幹網路"]
+        BB2 --> GRID["單一密集網格：<br/>逐單元、逐錨框 →<br/>一趟得出類別 + 框"]
+        GRID --> O2["框 + 標籤"]
+    end
+</div>
+
+      <ul>
+        <li><strong>兩階段 (R-CNN → Fast R-CNN → Faster R-CNN)。</strong> 第一階段：一個<strong>區域提議網路 (Region Proposal Network, RPN)</strong> 掃描骨幹網路的特徵圖，吐出數千個與類別無關的「這裡可能有<em>某個東西</em>」的框。第二階段：對每個提議，<strong>ROI 池化</strong>把對應的特徵區塊裁切成固定大小，再由一個小型的頭去分類它並微調框。兩趟運算 = 更多計算量但高準確率，尤其在小物件上。</li>
+        <li><strong>單階段 (YOLO, SSD)。</strong> 完全跳過提議。單一次前向傳播掃過網格，對每個單元、每個錨框，<em>同時</em>預測類別分數<em>與</em>框的偏移量。一趟運算 = 即時速度（數十到數百 FPS），代價是一些準確率。</li>
+      </ul>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 權衡，一句話總結</div>
+        <p>兩階段在決策前先花計算量放大檢視有希望的區域（準確、較慢）；單階段在所有位置同時決策（快、在小／雜亂物件上稍微不精準）。在一艘以 20 FPS 做碰撞迴避的無人水面載具 (USV) 上，你幾乎總是選<strong>單階段</strong>；至於離線測量重分析這類準確率為王的情境，兩階段就很合適。</p>
+      </div>
+
+      <h3 id="non-maximum-suppression">2.4 非極大值抑制 (NMS)</h3>
+
+      <p>錨框很密集，所以網路會在<em>同一個物件上發出許多重疊的框</em>——五個略微錯位的框全都在大喊「boat！」。你想要<strong>每個物件一個框</strong>。<strong>NMS</strong> 就是這個清理動作：</p>
+
+      <ol>
+        <li>把所有框（屬於某一類別的）依分數排序，最高的在前。</li>
+        <li>取最上面的框，留下它，並<strong>移除其餘所有與它 $\text{IoU} \ge \tau$ 的框</strong>（它們是同一個物件的重複）。$\tau$ 是 NMS 閾值，例如 $0.5$。</li>
+        <li>對下一個倖存且分數最高的框重複，直到沒有框為止。</li>
+      </ol>
+
+      <p>這是一個貪婪的「最有信心的框贏得它的鄰域」過濾器。$\tau$ 太低，你會抑制掉真正不同的相鄰物件（並排的兩艘船被合併成一個）；太高則重複框會漏網。</p>
+
+      <h3 id="map-the-detection-scorecard">2.5 mAP——偵測的計分卡</h3>
+
+      <p>你不能用單純的準確率：偵測的物件數量可變，而「正確」同時取決於標籤<em>與</em> IoU。標準度量是<strong>平均精確度均值 (mean Average Precision, mAP)</strong>：</p>
+
+      <ul>
+        <li>一個預測若標籤正確<strong>且</strong>與某個尚未配對的真實標註框 $\text{IoU} \ge$ 閾值（例如 0.5），就算<strong>真陽性 (true positive)</strong>；否則算<strong>偽陽性 (false positive)</strong>。漏掉的真實標註框則是<strong>偽陰性 (false negative)</strong>。</li>
+        <li>把分數閾值從高掃到低；在每個層級計算<strong>精確率 (precision)</strong> $= \frac{TP}{TP+FP}$ 與<strong>召回率 (recall)</strong> $= \frac{TP}{TP+FN}$（第 05 課）。這描繪出一條<strong>精確率–召回率曲線</strong>；它底下的面積就是該類別的<strong>平均精確度 (Average Precision, AP)</strong>。</li>
+        <li><strong>mAP</strong> 對所有類別（在 COCO 中，還對 IoU 閾值 0.50→0.95）的 AP 取平均。越高越好；它獎勵找到物件（召回率）<em>而不</em>亂噴偽框（精確率）。</li>
+      </ul>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>程式碼</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>逐行細讀</small></div>
+      <p>我們會從 torchvision 載入一個<strong>預訓練的 Faster R-CNN</strong>，在一張影像上執行它、過濾掉弱偵測、套用 <strong>NMS</strong>、並繪製邊界框。這個模型是在 <strong>COCO</strong> 上訓練的（80 個日常類別——<code>person</code>、<code>car</code>、<code>boat</code>、<code>bird</code>、……），所以它開箱即知「boat」，這對海洋示範來說很方便。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 注意</div>
+        <p>第一次執行會<strong>下載預訓練權重（約 160 MB）一次</strong>並快取起來。它在 CPU 上跑得很順（每張影像一兩秒）；GPU 是選用的。需要你的 <code>study</code> 環境裡有 <code>torchvision</code>（<code>pip install torchvision</code>）。</p>
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">load_detector.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import torch
+import torchvision
+from torchvision.models.detection import (
+    fasterrcnn_resnet50_fpn, FasterRCNN_ResNet50_FPN_Weights
+)
+import torchvision.ops as ops
+
+# --- 1. 以 EVAL 模式載入預訓練偵測器 ---------------------------
+# .DEFAULT 會挑選目前可用的最佳預訓練權重組合。這個組合還
+# 攜帶了 (a) COCO 類別名稱以及 (b) 精確的前處理轉換。
+weights = FasterRCNN_ResNet50_FPN_Weights.DEFAULT
+model = fasterrcnn_resnet50_fpn(weights=weights)
+model.eval()                       # 停用 dropout/BN 更新——僅做推論
+
+categories = weights.meta["categories"]   # 清單；索引 0 是 "__background__"
+print(categories[:10])
+# -&gt; ['__background__', 'person', 'bicycle', 'car', 'motorcycle',
+#     'airplane', 'bus', 'train', 'truck', 'boat']
+
+# 模型自己的前處理：轉成浮點數、縮放、正規化。
+preprocess = weights.transforms()
+</code></pre>
+      </div>
+
+      <p>現在執行推論。偵測模型接收一個<strong>影像張量的清單</strong>（它在內部處理大小不一的情況），並回傳一個<strong>字典的清單</strong>，每張影像一個，鍵為 <code>boxes</code>、<code>labels</code>、<code>scores</code>。</p>
+
+      <div class="codeblock">
+        <div class="code-head">run_inference.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from torchvision.io import read_image   # 讀成 uint8 CHW 張量
+
+# 用你手邊任何影像。海洋場景的話，港口／船隻照片最理想。
+img_uint8 = read_image("harbor.jpg")     # 形狀：(3, H, W)，dtype 為 uint8
+batch = [preprocess(img_uint8)]          # 包含一個已前處理張量的清單
+
+with torch.no_grad():                    # 推論不需要梯度
+    outputs = model(batch)
+
+pred = outputs[0]                        # 我們這張影像的字典
+print(pred["boxes"].shape, pred["scores"].shape)
+# -&gt; torch.Size([N, 4]) torch.Size([N])   # N 個原始偵測，框為 (x1,y1,x2,y2)
+</code></pre>
+      </div>
+
+      <p>原始輸出有許多低信心與重複的框。我們分兩步清理——<strong>分數過濾</strong>，接著 <strong>NMS</strong>：</p>
+
+      <div class="codeblock">
+        <div class="code-head">filter_and_nms.py <span class="lang">Python</span></div>
+<pre><code class="language-python"># --- 2. 依信心分數過濾 -----------------------------------------
+SCORE_THRESH = 0.7                       # 只保留有信心的偵測
+keep = pred["scores"] &gt;= SCORE_THRESH
+boxes_filt  = pred["boxes"][keep]        # (M, 4)  已分數過濾，仍有重複
+labels_filt = pred["labels"][keep]       # (M,)  整數類別 id
+scores_filt = pred["scores"][keep]       # (M,)
+
+# --- 3. 非極大值抑制：殺掉重複的框 ----------------------
+# ops.nms 回傳要保留的索引，依分數排序，移除任何與更高分框
+# IoU 超過閾值的框。
+NMS_IOU = 0.5
+keep_idx = ops.nms(boxes_filt, scores_filt, iou_threshold=NMS_IOU)
+boxes  = boxes_filt[keep_idx]            # 經 NMS 去重後的子集
+labels = labels_filt[keep_idx]
+scores = scores_filt[keep_idx]
+
+for b, l, s in zip(boxes, labels, scores):
+    name = categories[l.item()]
+    x1, y1, x2, y2 = b.tolist()
+    print(f"{name:8s} score={s:.2f}  box=({x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f})")
+# -&gt; boat     score=0.99  box=(412,301,640,455)
+# -&gt; boat     score=0.91  box=(110,330,250,420)
+# -&gt; person   score=0.85  box=(470,250,505,330)
+</code></pre>
+      </div>
+
+      <p>值得把 NMS 當成一行程式看一看，好讓那「魔法」去神祕化。以下是手動計算的 IoU + 貪婪 NMS，與 <code>torchvision.ops.nms</code> 相符：</p>
+
+      <div class="codeblock">
+        <div class="code-head">my_nms.py <span class="lang">Python</span></div>
+<pre><code class="language-python">def iou(box, boxes):
+    """一個框 (4,) 對上多個框 (K,4) 的 IoU。角點格式。"""
+    x1 = torch.maximum(box[0], boxes[:, 0])          # 內側左緣
+    y1 = torch.maximum(box[1], boxes[:, 1])
+    x2 = torch.minimum(box[2], boxes[:, 2])          # 內側右緣
+    y2 = torch.minimum(box[3], boxes[:, 3])
+    inter = (x2 - x1).clamp(min=0) * (y2 - y1).clamp(min=0)
+    area  = lambda b: (b[..., 2] - b[..., 0]) * (b[..., 3] - b[..., 1])
+    union = area(box) + area(boxes) - inter
+    return inter / union
+
+def my_nms(boxes, scores, thresh=0.5):
+    order = scores.argsort(descending=True)          # 分數最高的在前
+    keep = []
+    while order.numel() &gt; 0:
+        i = order[0]                                 # 贏家
+        keep.append(i.item())
+        if order.numel() == 1:
+            break
+        rest = order[1:]
+        ious = iou(boxes[i], boxes[rest])
+        order = rest[ious &lt; thresh]                  # 丟掉重疊的重複框
+    return torch.tensor(keep)
+
+# 與函式庫對照的健全性檢查：在 NMS 之前（已分數過濾）的框上
+# 同時執行兩者，確認保留的索引集合一致。（在已經去重的
+# `boxes` 上執行會理所當然地全部保留、什麼也證明不了。）
+mine = set(my_nms(boxes_filt, scores_filt, NMS_IOU).tolist())
+lib  = set(ops.nms(boxes_filt, scores_filt, NMS_IOU).tolist())
+assert mine == lib
+</code></pre>
+      </div>
+
+      <p>用 matplotlib <strong>繪製邊界框</strong>：</p>
+
+      <div class="codeblock">
+        <div class="code-head">draw_boxes.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+
+fig, ax = plt.subplots(figsize=(8, 6))
+ax.imshow(img_uint8.permute(1, 2, 0))                # CHW -&gt; HWC 供 imshow 使用
+for b, l, s in zip(boxes, labels, scores):
+    x1, y1, x2, y2 = b.tolist()
+    rect = patches.Rectangle((x1, y1), x2 - x1, y2 - y1,
+                             linewidth=2, edgecolor="lime", facecolor="none")
+    ax.add_patch(rect)
+    ax.text(x1, y1 - 4, f"{categories[l.item()]} {s:.2f}",
+            color="black", fontsize=9,
+            bbox=dict(facecolor="lime", alpha=0.8, pad=1))
+ax.axis("off"); plt.tight_layout(); plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">📡</span> 你應該看到</div>
+        <p>原始照片上有緊貼著每艘船／每個人的綠色矩形，每個都標註了它的類別名稱與信心分數——而且關鍵在於，每個物件<em>恰好</em>一個框（NMS 起了作用；沒有它，你會在每個船身上看到一叢叢近乎重複的框）。</p>
+      </div>
+
+      <h3 id="tiny-unet-shape-walkthrough">形狀逐步走訪——一個小型 U-Net（分割）</h3>
+
+      <p>偵測給的是框；<strong>分割</strong>給的是逐像素的遮罩，而其經典架構就是 <strong>U-Net</strong>：一個<strong>編碼器 (encoder)</strong> 向下取樣以學習語意、一個<strong>解碼器 (decoder)</strong> <em>向上取樣回到完整解析度</em>、以及跨越其間攜帶細節的<strong>跳躍連接 (skip connection)</strong>。解碼器的上取樣使用<strong>轉置卷積 (transposed convolution)</strong>（一種可學習的上取樣——卷積的反形狀：它把每個輸入像素<em>散布</em>成一個較大的區塊，增加 H 與 W）。看著空間維度先縮小再放大：</p>
+
+      <div class="codeblock">
+        <div class="code-head">tiny_unet.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import torch.nn as nn
+
+class TinyUNet(nn.Module):
+    def __init__(self, in_ch=3, n_classes=3):       # 例如 水／天空／岸
+        super().__init__()
+        self.enc1 = nn.Conv2d(in_ch, 16, 3, padding=1)   # 維持 H,W
+        self.enc2 = nn.Conv2d(16, 32, 3, padding=1)
+        self.pool = nn.MaxPool2d(2)                       # H,W 減半
+        self.bottleneck = nn.Conv2d(32, 64, 3, padding=1)
+        # 轉置卷積：stride 2 把 H,W 加倍（可學習的上取樣）
+        self.up   = nn.ConvTranspose2d(64, 32, 2, stride=2)
+        # 串接跳躍連接後（32 + 32 = 64 通道）：
+        self.dec  = nn.Conv2d(64, 32, 3, padding=1)
+        self.head = nn.Conv2d(32, n_classes, 1)           # 逐像素 logits
+
+    def forward(self, x):
+        s1 = torch.relu(self.enc1(x))     # 編碼器特徵，完整解析度——跳躍來源
+        s2 = torch.relu(self.enc2(s1))
+        p  = self.pool(s2)                # 向下取樣
+        b  = torch.relu(self.bottleneck(p))
+        u  = self.up(b)                   # 向上取樣回到接近完整解析度
+        u  = torch.cat([u, s2], dim=1)    # 跳躍連接：融合精細細節
+        d  = torch.relu(self.dec(u))
+        return self.head(d)               # (N, n_classes, H, W) 逐像素 logits
+
+x = torch.randn(1, 3, 64, 64)             # 一張 64x64 的 RGB 影像
+net = TinyUNet()
+print("input     ", tuple(x.shape))                       # (1, 3, 64, 64)
+print("output    ", tuple(net(x).shape))                  # (1, 3, 64, 64)
+# -&gt; input      (1, 3, 64, 64)
+# -&gt; output     (1, 3, 64, 64)   # 逐像素類別分數，H,W 與輸入相同
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 跳躍連接正是整個技巧的核心</div>
+        <p>輸出有著與輸入<strong>相同的高度與寬度</strong>，但有 <code>n_classes</code> 個通道：在通道維上取 <code>argmax</code> 你就得到一張完整解析度的標籤遮罩。<strong>跳躍連接</strong>（<code>torch.cat([u, s2])</code>）正是整個技巧的核心——編碼器在學習<em>什麼</em>的同時破壞了空間精度；跳躍連接把它原本會失去的<em>在哪裡</em>（銳利的邊緣）交還給解碼器。沒有它，U-Net 的遮罩會變得模糊。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>實際案例</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>為什麼這在載具上很重要</small></div>
+
+      <h3 id="usv-uav-camera-perception">USV／UAV 相機感知用於碰撞迴避</h3>
+
+      <p>在一艘無人水面載具 (USV) 上裝一台前向相機。以 15–30 FPS 執行一個單階段偵測器（YOLO 級，或 torchvision 的 <code>ssdlite320_mobilenet_v3_large</code> 作為輕量即時模型）。偵測器吐出框：<code>boat (0.96)</code>、<code>boat (0.88)</code>、<code>bird (0.71)</code>。現在框的幾何資訊直接餵給規劃器：</p>
+
+      <ul>
+        <li><strong>方位</strong>來自框的水平中心：一個位於畫面中心左側的框，是一個位於左舷船首方向的接觸目標。配合相機內參，像素欄位 → 角度。</li>
+        <li><strong>距離代理／逼近風險</strong>來自框的大小及其在連續影格間的<em>成長率</em>：一個 <code>boat</code> 框在兩秒內高度加倍，代表它正快速接近——升級為迴避操縱。</li>
+        <li><strong>佔據範圍</strong>（框寬）決定要規劃多少橫向淨空。</li>
+      </ul>
+
+      <p>光是一個類別標籤（「有一艘船」）做不了上述任何一件事。規劃器是一台幾何引擎；它消費的是<em>位置與範圍</em>，而這正是偵測所提供、分類所丟棄的東西。這也是 <strong>NMS 在實務上至關重要</strong>之處：沒有它，一艘逼近的船會以五個閃爍的框出現，而餵給你碰撞迴避邏輯的追蹤器就會看到五個幽靈接觸目標。</p>
+
+      <p>對於做降落區或線路巡檢的 <strong>無人飛行載具 (UAV)</strong>，故事一樣：偵測要避開的人／車輛，並用框的位置把目標保持在中心以供雲台鎖定。</p>
+
+      <h3 id="rov-usv-region-segmentation">ROV／USV 區域分割</h3>
+
+      <p>有些危險不是離散物件——它們是<em>區域</em>。這時你想要<strong>語意分割</strong>（U-Net 或 DeepLab 級）：</p>
+
+      <ul>
+        <li><strong>USV 水平線／水域分割</strong>——把每個像素標成 <code>water</code> / <code>sky</code> / <code>shore/obstacle</code>。水／非水的邊界定義了<strong>可航行區域</strong>；規劃器待在水域遮罩之內。這在偵測失效的地方很穩健：遠方的岸線、破碎的波浪、或不熟悉的漂浮殘骸都沒有「類別」，但它們顯然<em>不是</em>開闊水域。</li>
+        <li><strong>ROV 海床／結構分割</strong>——從向下相機或前向聲納影像中分割出 <code>seabed</code> / <code>water column</code> / <code>structure (pipe, hull, reef)</code>，讓 ROV 維持安全高度、不刮到底部、也不撞上它正在巡檢的管線。</li>
+      </ul>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">📡</span> 錨點（經典資料集）</div>
+        <p>這裡的 torchvision 偵測器是在 <strong>COCO</strong> 上訓練的（Common Objects in Context，80 類，約 33 萬張影像）——標準的偵測基準，也是 <code>boat</code>、<code>person</code>、<code>bird</code> 在我們的示範中能零樣本運作的原因。你會用來微調的分割對應資料集是 <strong>Cityscapes</strong> / <strong>Pascal VOC</strong>；對於海洋工作，像 <strong>MaSTr1325</strong>（USV 水／天空／障礙物分割）或 <strong>MODD</strong>（海洋障礙物偵測）這類領域資料集，才是正確的起點。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-and-tips"><span class="sec-no">5</span>常見陷阱與技巧</h2>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 使用模型自己的前處理</div>
+        <p><code>weights.transforms()</code> 套用網路訓練時所用的精確正規化。餵入原始的 $[0,255]$ 像素值，或你自己的 mean/std，會悄悄毀掉準確率——典型的<strong>訓練／服務偏移 (train/serve skew)</strong>（第 17 課）。偵測模型還預期收到一個 CHW 張量的<em>清單</em>，而不是一個堆疊好的批次張量。</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 分數閾值 ≠ NMS 閾值</div>
+        <p>它們是不同的旋鈕。<strong>分數</strong>閾值過濾弱偵測（調高它以減少偽陽性）；<strong>NMS IoU</strong> 閾值合併重複框（如果不同的相鄰物件被錯誤合併就調高它，如果你看到重複框就調低它）。要分別調校它們。</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 類別索引差一錯誤</div>
+        <p>torchvision 偵測模型保留<strong>索引 0 給 <code>__background__</code></strong>，所以 <code>categories[label]</code> 之所以正確，<em>正是</em>因為那個背景項把一切往後移了一格。不要減 1；直接索引進 <code>weights.meta["categories"]</code>。</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 不要為了安全盲目相信 mAP@0.5</div>
+        <p>高 mAP 可能掩蓋了模型漏掉<em>小</em>物件的事實——而 200 公尺外的浮標就是小。要在你<em>自己的</em>操作條件下（黃昏、眩光、霧）以及你真正在意的尺寸範圍上評估，而不是只看 COCO 的分布。</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 偵測 vs 分割：依危險類型選擇</div>
+        <p>離散障礙物 → 框（較便宜，給出一個乾淨的接觸目標）。連續區域（可航行水域、海床）→ 遮罩。硬要把「岸線」框起來是用錯了工具。</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 在好的管線中，NMS 預設是逐類別執行的</div>
+        <p>一個 <code>boat</code> 框和一個與之重疊的 <code>person</code> 框（人站在船上）應該<em>都</em>存活。<code>ops.nms</code> 與類別無關；多類別請用 <code>ops.batched_nms</code>，它會依類別把框位移開，使得跨類別的重疊不會被抑制。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-your-understanding"><span class="sec-no">6</span>自我檢測</h2>
+
+      <p><strong>Q1.</strong> 同一個船身上有兩個預測的船框：$A=(100,100,200,200)$ 與 $B=(150,100,250,200)$（角點格式，像素）。計算它們的 IoU。如果 NMS 以 $\tau=0.4$ 執行，會發生什麼事？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>交集：$x_1^\cap=\max(100,150)=150$、$x_2^\cap=\min(200,250)=200$，所以寬 $=50$；$y$ 完全重疊，高 $=100$。交集 $=50\times100=5000$。每個框是 $100\times100=10000$，聯集 $=10000+10000-5000=15000$。$\text{IoU}=5000/15000 \approx \mathbf{0.33}$。由於 $0.33 &lt; \tau=0.4$，NMS 會保留<strong>兩個</strong>框——在這個閾值下它<em>不會</em>把它們視為重複。（把 $\tau$ 調低到約 0.3，分數較低的那個就會被抑制。）</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> 為什麼單階段偵測器 (YOLO/SSD) 跑得比兩階段的 (Faster R-CNN) 快，而你通常會犧牲什麼？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>單階段在<strong>單一次前向傳播</strong>中對每個網格單元／錨框預測類別分數<strong>與</strong>框偏移量——沒有獨立的區域提議階段，也沒有逐提議的 ROI 裁切／分類。兩階段先做一趟 RPN 提議出約數千個區域，然後再重新處理每一個，計算量大得多。你通常會犧牲一些<strong>準確率，尤其在小且密集聚集的物件上</strong>，這類物件用「先提議後微調」的管線比較精準。對於即時的載具感知，你通常會為了影格率接受這個權衡。</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> 你的偵測器在單一艘逼近的船上輸出了十一個框，全都分數 &gt; 0.8。缺了哪個階段？而它又為何特別會危及碰撞迴避邏輯？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>缺了 <strong>NMS</strong>（或其 IoU 閾值設得太高而無法合併它們）。錨框很密集，所以許多重疊的框會在一個物件上發出。危險在於：<strong>下游的追蹤器／規劃器把一艘真實的船看成 11 個獨立的「接觸目標」</strong>——這些幽靈障礙物可能觸發不穩定的迴避操縱、誇大表面上的交通密度、或使多物件追蹤器混亂而拆分／互換 ID。一個物件必須只產生一個框。</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> 在 U-Net 中，<strong>跳躍連接</strong>具體加入了什麼，而沒有它們會出什麼問題？是什麼運算把空間解析度長回去？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>跳躍連接在相符的解析度上把<strong>編碼器特徵圖（高空間精度，即<em>在哪裡</em>）串接進解碼器</strong>，並把它們與上取樣後的語意特徵（即<em>什麼</em>）融合。沒有它們，解碼器必須從嚴重向下取樣的特徵重建出銳利的邊界，所以遮罩會變得<strong>模糊／空間上不精準</strong>——當水／岸的邊界必須是像素級準確時，這就很糟。解析度是靠<strong>轉置卷積</strong>（可學習的上取樣）長回去的，它把每個輸入元素散布成一個較大的輸出區塊（stride 2 把 H 與 W 加倍）。</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> 一個規劃器需要知道可航行水域<em>在哪裡</em>，好讓 USV 待在裡面，另外又需要避開兩艘其他的船。哪項任務（偵測 vs 分割）適合各自的情況，為什麼？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p><strong>可航行水域 → 語意分割。</strong> 它是一個連續的<em>區域</em>，而不是可數的物件；一張逐像素的 <code>water</code> 遮罩直接定義了可行駛區域，而且即使對於沒有類別的不熟悉／未定義危險（殘骸、岸線）也照樣有效。<strong>其他船隻 → 偵測。</strong> 它們是離散物件，而規劃器想要把每一個都當成一個帶有位置與佔據範圍的乾淨接觸目標（一個框），以推理方位、逼近率與淨空——就此目的而言，這遠比一張遮罩更便宜也更可付諸行動。</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>換你上場</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml19-pick-the-task">
+        <div class="ex-head"><span class="badge">Q1</span> 概念檢測</div>
+        <div class="ex-q">一艘 USV 必須待在開闊水域區域之內<em>並且</em>避開三個離散的浮標。哪一種任務組合最合適？</div>
+        <ul class="ex-options">
+          <li data-correct="false">兩者都用分類——每個影格一個全域標籤就夠了。</li>
+          <li data-correct="true">可航行水域區域用語意分割，離散浮標用偵測（框）。</li>
+          <li data-correct="false">水域和浮標都用偵測（框）。</li>
+          <li data-correct="false">水域用實例分割，浮標用分類。</li>
+        </ul>
+        <div class="ex-explain">本課的經驗法則：<strong>離散障礙物用偵測，連續區域用分割。</strong> 可航行水域是一個區域（用逐像素遮罩——即使對不熟悉／未定義的危險也很穩健）。浮標是可數的離散物件，所以用框能給規劃器乾淨的接觸目標，附帶方位、逼近率與佔據範圍。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml19-iou" data-answer="0.143" data-tol="0.01">
+        <div class="ex-head"><span class="badge">Q2</span> 動手算</div>
+        <div class="ex-q">兩個角點形式的框（像素）：$A=(0,0,100,100)$ 與 $B=(50,50,150,150)$。計算它們的 <strong>IoU</strong>。（提示：交集的邊在左上角取內側 max、在右下角取內側 min；聯集 = areaA + areaB − inter。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">IoU</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">交集角點：$x_1^\cap=\max(0,50)=50$、$y_1^\cap=\max(0,50)=50$、$x_2^\cap=\min(100,150)=100$、$y_2^\cap=\min(100,150)=100$。寬 $=50$、高 $=50$，所以 inter $=2500$。每個框面積 $=100\times100=10000$；聯集 $=10000+10000-2500=17500$。$\text{IoU}=2500/17500 = 1/7 \approx \mathbf{0.143}$。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml19-unet-shapes">
+        <div class="ex-head"><span class="badge">Q3</span> 推導——追蹤 U-Net 的空間維度</div>
+        <div class="ex-q">對於 <code>TinyUNet</code> 在一個 $64\times64$ 的輸入上，寫下在 <code>s2</code>（<code>enc2</code> 之後）、在 <code>p</code>（<code>pool</code> 之後）、在 <code>b</code>（bottleneck 之後）、以及在 <code>u</code>（轉置卷積之後）的空間大小 $(H,W)$——並解釋為什麼 <code>torch.cat([u, s2])</code> 在形狀上相容。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">kernel 3、<code>padding=1</code> 的 <code>Conv2d</code> 維持 $(H,W)$。<code>MaxPool2d(2)</code> 把它減半。<code>ConvTranspose2d(stride=2)</code> 把它加倍。只追蹤空間維度；通道數列在建構子裡。</div></details>
+        <details class="ex-acc"><summary>顯示一個解法</summary><div class="acc-body">
+          <p><strong>s2</strong>：<code>enc1</code> 與 <code>enc2</code> 都用 kernel 3、<code>padding=1</code>，所以維持解析度 → $(64,64)$，32 通道。</p>
+          <p><strong>p</strong>：<code>pool = MaxPool2d(2)</code> 把兩個維度減半 → $(32,32)$，32 通道。</p>
+          <p><strong>b</strong>：bottleneck 卷積有 <code>padding=1</code>、kernel 3 → 解析度維持在 $(32,32)$，64 通道。</p>
+          <p><strong>u</strong>：<code>ConvTranspose2d(64, 32, 2, stride=2)</code> 把兩個維度加倍 → $(64,64)$，32 通道。</p>
+          <p><strong>為什麼串接行得通：</strong> <code>u</code> 是 $(N,32,64,64)$ 而跳躍來源 <code>s2</code> 是 $(N,32,64,64)$——<em>空間維度相同</em>，所以 <code>torch.cat([u, s2], dim=1)</code> 沿通道軸堆疊得到 $(N,64,64,64)$，這正是 <code>self.dec = Conv2d(64, 32, ...)</code> 所預期的 64 個輸入通道。跳躍連接還原了池化丟掉的完整解析度的<em>在哪裡</em>；輸出頭接著在原始的 $64\times64$ 上映射到 <code>n_classes</code>。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本課回顧</div>
+        <ul>
+          <li><strong>偵測 = 什麼 + 在哪裡</strong>（框 + 標籤 + 分數）；<strong>分割 = 哪些像素</strong>（語意 = 逐類別，實例 = 逐物件）。對於一個要推理幾何的規劃器來說，光是分類太粗糙了。</li>
+          <li><strong>IoU</strong> 為框的重疊評分（交集／聯集）；它把關「正確」的配對、驅動 <strong>NMS</strong>（貪婪的「最佳框贏得它的鄰域」以殺掉重複框），並支撐 <strong>mAP</strong>（精確率–召回率曲線下的面積，對所有類別取平均）。</li>
+          <li><strong>錨框</strong>把開放式的找框轉化為逐錨框的<strong>分類 + 偏移量迴歸</strong>。<strong>兩階段</strong> (Faster R-CNN：先提議再微調) 以速度換取準確率；<strong>單階段</strong> (YOLO/SSD：一趟網格掃描) 以一點準確率換取即時速度——在載具上通常是正確的選擇。</li>
+          <li>一個<strong>預訓練的 torchvision 偵測器</strong>在 COCO 類別 (<code>boat</code>、<code>person</code>、……) 上零樣本運作：前處理 → 推論 → <strong>分數過濾</strong> → <strong>NMS</strong> → 繪製。永遠使用 <code>weights.transforms()</code>，並記得索引 0 是 <code>__background__</code>。</li>
+          <li><strong>U-Net</strong> = 編碼器（向下取樣、學習語意）+ 解碼器（<strong>轉置卷積</strong>上取樣回完整解析度）+ <strong>跳躍連接</strong>（跨越其間攜帶精細細節），產生一張與原圖同大小的逐像素遮罩。</li>
+        </ul>
+        <p><strong>下一課：</strong> 模型的好壞取決於你餵給它什麼。<a href="20-data-feature-engineering.html">20 — 資料與特徵工程</a> ——如何建構、清理、標註並擴增那些讓這一切運作的資料集（包含偵測框與分割遮罩）。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂部">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

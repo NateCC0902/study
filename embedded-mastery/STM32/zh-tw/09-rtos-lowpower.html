@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>FreeRTOS 與低功耗：任務、排程與睡眠模式 — Embedded Mastery</title>
+<link rel="stylesheet" href="../../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../../assets/styles.css">
+</head>
+<body class="track-stm32" data-course="embedded" data-track="stm32" data-chapter="09-rtos-lowpower">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">STM32 · 第 09 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">STM32 學習軌 · 第 09 章 · 大師級</div>
+        <h1>FreeRTOS 與低功耗：任務、排程與睡眠模式</h1>
+        <p>有兩件事把業餘專案和量產產品區分開來：它能<em>同時</em>處理許多獨立的工作而不漏掉任何一拍，而且靠一顆鈕扣電池就能運作好幾個月。並行性與功耗。這兩樣我們都要拿下——先用搶佔式 RTOS 取代超級迴圈（superloop），再讓晶片深度睡眠，在每次心跳之間只啜飲幾微安的電流。</p>
+        <div class="meta">
+          <span>⏱ 約 55 分鐘</span><span>🧠 並行性</span><span>⚡ FreeRTOS</span><span>🔋 低功耗</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="superloop-breaks"><span class="sec-no">1</span>當超級迴圈崩潰時</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先建立全貌</small></div>
+      <p>到目前為止每一章都活在一個無窮的 <code>while(1)</code> 裡——也就是<strong>超級迴圈（superloop）</strong>。讀感測器、更新顯示器、閃 LED、檢查按鈕，然後重複。對於少數幾個時序要求寬鬆的工作來說，它很完美：簡單、確定性、沒有隱藏的機制。</p>
+
+      <p>但只要你的工作有了<em>各自不同、緊湊且獨立</em>的時序需求，它就會崩潰。想像同一顆晶片上有三個工作：</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>工作</th><th>必須執行</th><th>耗時</th></tr></thead>
+        <tbody>
+          <tr><td>透過 SPI 讀取 IMU</td><td>每 1 ms 一次</td><td>約 0.2 ms</td></tr>
+          <tr><td>透過 UART 串流遙測資料</td><td>每 50 ms 一次</td><td>約 8 ms（會阻塞！）</td></tr>
+          <tr><td>處理一次顯示器刷新</td><td>每 100 ms 一次</td><td>約 12 ms（會阻塞！）</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p>在超級迴圈中，當你一啟動那個 8&nbsp;ms 的 UART 傳輸，IMU 的讀取就<em>卡住等待</em>——你會錯過八次 1&nbsp;ms 的截止時間。你可以手工打造一個狀態機把所有事情交錯處理，但只要需求一變，它就會長成無法維護的一團亂麻。誠實的解法是別再假裝一個迴圈能伺候所有主人。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話模型</div>
+        <p><strong>RTOS 給你許多獨立的「迴圈」（任務，task）</strong>，它們<em>看起來</em>是同時執行的。排程器（scheduler）在這唯一的 CPU 上快速地切換它們，而<strong>搶佔式（preemptive）</strong>排程器能在高優先權任務一準備就緒的瞬間，把 CPU 從低優先權任務手中奪走。</p>
+      </div>
+
+      <p>「即時（real-time）」不代表「快」——它代表<strong>可預測</strong>。一個即時系統保證每一次都能達到截止時間，而不是平均能達到。FreeRTOS 是 Cortex-M 上部署最廣泛的 RTOS，它給你<em>建立</em>那份保證所需的原語（primitive）；而 §5 的數學會告訴你，你的保證是否真的成立。</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="tasks-scheduler"><span class="sec-no">2</span>任務、優先權與搶佔式排程器</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>任務到底是什麼</small></div>
+      <p>FreeRTOS 中的<strong>任務（task）</strong>其實就是一個<em>永不返回</em>的 C 函式——它永遠迴圈下去，活脫脫就是它自己的一個小型超級迴圈。每個任務都有自己的<strong>堆疊（stack）</strong>和自己的一份 CPU 暫存器，在每次切換時被儲存與還原。那份被儲存的狀態就是<strong>上下文（context）</strong>；交換它的動作就是<strong>上下文切換（context switch）</strong>。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 任務就是一個永遠迴圈的函式</div>
+        <p>它必須<strong>永不 <code>return</code></strong>，也永不執行到結尾的大括號。要嘛用 <code>for(;;)</code> 永遠迴圈，要嘛在掉出函式尾端之前用 <code>vTaskDelete(NULL)</code> 把自己刪除。一個會返回的任務會讓排程器當機。</p>
+      </div>
+
+      <p>任務有<strong>優先權（priority）</strong>（整數；數字越大越緊急，<code>0</code> = 最低）。在 Cortex-M 移植版上排程器的規則極其簡單：<em>永遠執行已就緒任務中優先權最高的那一個。</em>如果有兩個任務共用最高優先權，它就在每個節拍（tick）上以輪詢（round-robin）方式在它們之間做時間切片。</p>
+
+      <p>排程器由一個週期性的計時器中斷驅動——也就是<strong>節拍（tick）</strong>，通常為 1&nbsp;kHz（每 1&nbsp;ms 一次），由 SysTick（第 02 章）產生。每個節拍上排程器重新評估該由誰執行。在兩次節拍之間，一個<em>阻塞（block）</em>的任務（等待資料、睡眠、取得已被持有的互斥鎖）會立即讓出 CPU——你不必等到下一個節拍才放棄 CPU。</p>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>任務狀態</small></div>
+      <p>在任何一個瞬間，每個任務都恰好處於四種狀態之一。掌握這張圖，FreeRTOS 就不再神秘：</p>
+
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> 就緒(Ready): xTaskCreate()
+    就緒(Ready) --> 執行中(Running): 排程器挑選<br/>最高優先權
+    執行中(Running) --> 就緒(Ready): 被更高優先權<br/>任務搶佔
+    執行中(Running) --> 阻塞(Blocked): vTaskDelay()<br/>或等待佇列/號誌
+    阻塞(Blocked) --> 就緒(Ready): 逾時或<br/>事件到達
+    執行中(Running) --> 暫停(Suspended): vTaskSuspend()
+    暫停(Suspended) --> 就緒(Ready): vTaskResume()
+    執行中(Running) --> [*]: vTaskDelete()
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 閒置任務是必備的</div>
+        <p>FreeRTOS 會自動建立一個優先權為 <code>0</code> 的任務：<strong>閒置任務（idle task）</strong>。只有當<em>所有</em>其他任務都處於阻塞或暫停狀態時，它才會執行。它的職責是釋放被刪除任務的記憶體，而且——對我們至關重要的是——它是我們<strong>讓 CPU 進入睡眠</strong>的掛鉤點（§7）。如果閒置任務永遠不執行，晶片就永遠不省電。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="creating-tasks"><span class="sec-no">3</span>建立任務：<code>xTaskCreate</code>、延遲與堆疊</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>逐行讀</small></div>
+      <p>你用 <code>xTaskCreate</code> 把一個任務交給排程器：函式指標、一個除錯用的名稱、一個堆疊大小（單位是<em>字（word）</em>，不是位元組！）、一個選用的參數、一個優先權，以及一個用來接收回傳控制代碼（handle）的槽位。接著 <code>vTaskStartScheduler()</code> 永不返回——控制權永遠交給了排程器。</p>
+
+      <div class="codeblock">
+        <div class="code-head">main.c <span class="lang">C / FreeRTOS</span></div>
+<pre><code class="language-c">#include "FreeRTOS.h"
+#include "task.h"
+
+// 任務就是一個永遠迴圈的函式。pvParameters 是你傳給
+// xTaskCreate 的選用參數（這裡未使用）。
+void vBlinkTask(void *pvParameters)
+{
+    const TickType_t period = pdMS_TO_TICKS(500);  // 500 ms 換算成 ticks
+    TickType_t wake = xTaskGetTickCount();         // 快照「現在」時間
+    for (;;) {                                     // 永不 return
+        HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);     // 切換 LED
+        // 睡到剛好 wake+period。固定速率，不漂移。
+        vTaskDelayUntil(&amp;wake, period);
+    }
+}
+
+int main(void)
+{
+    HAL_Init();
+    SystemClock_Config();                          // 見第 02 章
+    MX_GPIO_Init();
+
+    // 堆疊單位是「字（WORD）」：128 字 = 32 位元 Cortex-M 上的 512 位元組。
+    xTaskCreate(vBlinkTask,        // 函式
+                "blink",           // 名稱（僅供除錯）
+                128,               // 堆疊深度，單位為字（WORD）
+                NULL,              // 參數
+                2,                 // 優先權（0 = 最低）
+                NULL);             // 控制代碼（我們不需要）
+
+    vTaskStartScheduler();         // 交出 CPU——永不返回
+    for (;;) { }                   // 不可達；放在這裡保險
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——<code>vTaskDelay</code> 會漂移，<code>vTaskDelayUntil</code> 不會</div>
+        <p><code>vTaskDelay(N)</code> 的意思是「<em>從現在起</em>阻塞 N 個節拍」——所以週期會悄悄地隨著你的工作所耗的時間增長。如果迴圈本體執行了 2&nbsp;ms，而你用 <code>vTaskDelay(pdMS_TO_TICKS(500))</code>，你的真實週期就是 502&nbsp;ms，而且會漂移。<code>vTaskDelayUntil(&amp;wake, N)</code> 則阻塞到一個<em>絕對</em>的截止時間，所以無論工作耗時多久，速率都穩如磐石。任何週期性取樣都該用它。</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——堆疊溢位是無聲的記憶體破壞</div>
+        <p>每個任務的堆疊在建立時就固定了。一條很深的呼叫鏈、一個很大的區域陣列，或一個 <code>printf</code>（吃堆疊的胃口超大）都可能讓堆疊衝過邊界，悄悄踐踏下一個任務的記憶體——這是一種會在<em>別處</em>當機的海森堡蟲（heisenbug）。防禦手段有：啟用 <code>configCHECK_FOR_STACK_OVERFLOW = 2</code>（寫入一個已知圖樣並檢查它）、呼叫 <code>uxTaskGetStackHighWaterMark()</code> 看你最接近極限的程度，並且根據量測而非猜測來決定堆疊大小。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="ipc"><span class="sec-no">4</span>任務間溝通：佇列、號誌與互斥鎖</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>三種工具，三種職責</small></div>
+      <p>任務在設計上是相互隔離的，所以你需要安全的方式來傳遞資料與協調。FreeRTOS 給你三種原語——而選對哪一個是經典的面試題，因為人們老是把它們搞混。</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>原語</th><th>會攜帶資料嗎？</th><th>用於</th></tr></thead>
+        <tbody>
+          <tr><td><strong>佇列（Queue）</strong></td><td>會——複製項目</td><td>由生產者→消費者傳遞值（執行緒安全的 FIFO）</td></tr>
+          <tr><td><strong>號誌（Semaphore）</strong>（二元 / 計數）</td><td>不會——只是個計數</td><td><em>訊號通知</em>：「某事件發生了」——尤其是 ISR→任務</td></tr>
+          <tr><td><strong>互斥鎖（Mutex）</strong></td><td>不會——是所有權令牌</td><td><em>互斥（mutual exclusion）</em>：守護單一共享資源（例如 I²C 匯流排）</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 號誌 vs 互斥鎖——真正的差別</div>
+        <p><strong>二元號誌（binary semaphore）</strong>是一個任何任務或 ISR 都能「給出（give）」的旗標；正在等待的那一方會被喚醒。它<em>沒有擁有者</em>——非常適合 ISR 對任務的訊號通知。<strong>互斥鎖（mutex）</strong>則是一個帶<em>擁有者</em>的號誌：只有取得它的任務才可以把它還回去，而且它加上了<strong>優先權繼承（priority inheritance）</strong>。用號誌來<em>通知</em>，用互斥鎖來<em>保護</em>。</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>ISR 透過號誌通知任務</small></div>
+      <p>典範模式：一個中斷觸發了，但你<em>絕不</em>該在 ISR 裡做繁重的工作。取而代之，ISR <code>Give</code>（給出）一個號誌，而一個在它上面阻塞等待的高優先權任務便會醒來去做真正的工作。這就是「延遲中斷處理（deferred interrupt processing）」。</p>
+
+      <div class="codeblock">
+        <div class="code-head">sensor.c <span class="lang">C / FreeRTOS</span></div>
+<pre><code class="language-c">SemaphoreHandle_t xDataReady;   // 用 xSemaphoreCreateBinary() 建立
+
+// --- 中斷：保持精簡。只通知然後離開。---
+void EXTI0_IRQHandler(void)
+{
+    BaseType_t hpw = pdFALSE;   // 「是否喚醒了更高優先權的任務？」
+    __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_0);
+    // 在中斷內部一定要用 FromISR 變體：
+    xSemaphoreGiveFromISR(xDataReady, &amp;hpw);
+    // 如果我們喚醒的任務比被中斷的那個更緊急，
+    // 就在從 ISR 返回的瞬間切換過去：
+    portYIELD_FROM_ISR(hpw);
+}
+
+// --- 任務：在中斷情境之外做繁重的工作 ---
+void vSensorTask(void *pv)
+{
+    for (;;) {
+        // 阻塞（0 % CPU）直到 ISR 給出號誌。
+        // portMAX_DELAY = 永遠等待。
+        if (xSemaphoreTake(xDataReady, portMAX_DELAY) == pdTRUE) {
+            read_and_process_sample();   // 安全：完整的任務情境
+        }
+    }
+}
+</code></pre>
+      </div>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>優先權反轉</small></div>
+      <p>互斥鎖解決了一個微妙又著名的臭蟲。假設一個<strong>低</strong>優先權任務 L 取得了 I²C 匯流排上的互斥鎖。接著一個<strong>高</strong>優先權任務 H 想用同一條匯流排，於是阻塞等待 L 釋放它。到此為止都沒問題——但現在一個<strong>中</strong>優先權任務 M（它根本不需要那條匯流排）變成就緒了。M 搶佔了 L，因為 M 的位階高於 L。於是 M 執行，L 沒法完成，L 沒法釋放互斥鎖，而 H——系統中優先權<em>最高</em>的任務——被卡在 M 後面。優先權實際上被反轉了。</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——火星探路者號，1997 年</div>
+        <p>這不是教科書上的假想。NASA 的火星探路者號（Mars Pathfinder）在火星表面不斷重置自己，原因正是這個發生在以互斥鎖保護的共享資料匯流排上的優先權反轉。看門狗（watchdog）發現高優先權任務挨餓，於是重啟了太空船。JPL 遠端診斷出問題，並上傳了一個<strong>啟用優先權繼承</strong>的修補程式——和今天在 FreeRTOS 裡只要一個旗標就能開啟的功能一模一樣。</p>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 優先權繼承</div>
+        <p>FreeRTOS 的互斥鎖會自動修正反轉：當 H 在等待 L 持有的互斥鎖時，L 會被<strong>暫時提升</strong>到 H 的優先權。如此一來 M 就無法搶佔 L，於是 L 很快完成、釋放互斥鎖、降回它自己的優先權，H 便得以執行。單純的號誌沒有擁有者，所以它<em>無法</em>做到這一點——這也是守護資源時要伸手去拿互斥鎖的另一個理由。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="scheduling-math"><span class="sec-no">5</span>排程數學：它真的能趕上截止時間嗎？</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>推導它</small></div>
+      <p>建立任務很容易；<em>證明</em>它們全都趕得上截止時間才是真正的工程。把每個週期性任務 <span>$i$</span> 用它的最差情況執行時間 <span>$C_i$</span>（跑一次要多久）和它的週期 <span>$T_i$</span>（多久必須跑一次）來建模。它消耗的 CPU 比例是 <span>$C_i / T_i$</span>，所以總<strong>CPU 利用率（utilization）</strong>就是這些的總和：</p>
+
+      <div class="math-box">
+        $$ U = \sum_{i=1}^{n} \frac{C_i}{T_i} $$
+      </div>
+
+      <p>如果 <span>$U &gt; 1$</span>，你要求的就超過了 100% 的 CPU——<em>沒有</em>任何排程器救得了你；那在數學上是不可能的。但 <span>$U \le 1$</span> 是必要條件，不是充分條件。對於<strong>速率單調排程（rate-monotonic scheduling，RMS——把較高優先權指派給週期較短的任務，這是可證明為最佳的固定優先權規則）</strong>，Liu &amp; Layland 證明了一個漂亮的<em>充分</em>界限：</p>
+
+      <div class="math-box">
+        $$ U \le n\left(2^{1/n} - 1\right) $$
+      </div>
+
+      <p>這個界限會隨著你加入更多任務而縮小。一個任務時是 <span>$1.0$</span>；兩個任務時是 <span>$2(\sqrt{2}-1)\approx 0.828$</span>；而當 <span>$n\to\infty$</span> 時，它收斂到一個著名的極限：</p>
+
+      <div class="math-box">
+        $$ \lim_{n\to\infty} n\left(2^{1/n}-1\right) = \ln 2 \approx 0.693 $$
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 69% 的經驗法則</div>
+        <p>如果你的總利用率維持在<strong>約 69%</strong>以下，速率單調排程就<em>保證</em>每一個截止時間都能達到，無論有多少個任務。超過這個界限它<em>可能</em>還是行得通（這個界限是保守的——你可以做精確的回應時間分析），但在界限以下，你是有證明在身的安全。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>實例演練</small></div>
+      <p>兩個任務：一個 IMU 讀取，每 <span>$T_1 = 10\,\text{ms}$</span> 耗時 <span>$C_1 = 2\,\text{ms}$</span>；以及一個控制迴圈，每 <span>$T_2 = 5\,\text{ms}$</span> 耗時 <span>$C_2 = 1\,\text{ms}$</span>。利用率：</p>
+
+      <div class="math-box">
+        $$ U = \frac{2}{10} + \frac{1}{5} = 0.2 + 0.2 = 0.4 $$
+      </div>
+
+      <p>雙任務的 RMS 界限是 <span>$2(2^{1/2}-1) \approx 0.828$</span>。由於 <span>$0.4 \le 0.828$</span>，這組任務是<strong>可排程的（schedulable）</strong>——每個截止時間都可證明能達到，還有充裕的餘裕容納第三個任務或一場中斷風暴。（並且注意，RMS 會把<em>較高</em>的優先權給那個 5&nbsp;ms 的控制迴圈，因為它的週期較短。）</p>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="low-power-modes"><span class="sec-no">6</span>低功耗：執行、睡眠、停止與待命</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>用喚醒速度換電流</small></div>
+      <p>一個電池產品的生命大部分時間都在無所事事。藝術就在於讓「無所事事」幾乎不花任何電流。STM32 晶片提供了一道低功耗模式的階梯；每往下一階就關掉晶片更多的部分，省下更多電流，但保留的狀態更少、喚醒所需的時間更長。下面的數字對 STM32L4 而言是典型值——確切數字在資料手冊裡，但其<em>形態</em>是普遍適用的。</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>模式</th><th>CPU</th><th>保留的 SRAM / 暫存器</th><th>喚醒來源</th><th>典型電流</th></tr></thead>
+        <tbody>
+          <tr><td><strong>執行（Run）</strong></td><td>執行中</td><td>全部</td><td>—</td><td>約 5–10 mA</td></tr>
+          <tr><td><strong>睡眠（Sleep）</strong></td><td>停住（時脈關閉）</td><td>全部</td><td>任何中斷</td><td>約 1–2 mA</td></tr>
+          <tr><td><strong>停止（Stop）</strong></td><td>關閉（時脈關閉）</td><td>保留所有 SRAM + 暫存器</td><td>EXTI 線、RTC、IWDG</td><td>約 1–10 µA</td></tr>
+          <tr><td><strong>待命（Standby）</strong></td><td>關閉（核心斷電）</td><td>僅備援暫存器 + RTC</td><td>WKUP 腳位、RTC、重置</td><td>約 0.1–1 µA</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 睡眠後什麼會存活</div>
+        <p><strong>睡眠（Sleep）</strong>只是把 CPU 時脈閘掉——喚醒最快、省得最少、一切完好。<strong>停止（Stop）</strong>關掉時脈，但<em>讓 SRAM 和暫存器持續供電</em>，所以你能從離開的地方原地恢復；這是感測器節點的主力模式。<strong>待命（Standby）</strong>把核心電域<em>關掉</em>——電流最低，但 RAM 沒了，喚醒近乎一次完整的<strong>重置（reset）</strong>：你會重新跑 <code>main()</code>，而且只能從那塊極小的電池備援電域（RTC + 幾個備援暫存器）恢復狀態。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>從平均電流算電池壽命</small></div>
+      <p>電池壽命就是電荷除以你耗用它的速率。設容量為 <span>$Q$</span>（單位 mAh），<em>平均</em>電流為 <span>$I_{\text{avg}}$</span>（單位 mA）：</p>
+
+      <div class="math-box">
+        $$ t_{\text{life}} = \frac{Q}{I_{\text{avg}}} $$
+      </div>
+
+      <p>整場遊戲就是工作週期化（duty cycling）：只在極小的時間比例 <span>$d$</span> 內以高執行電流 <span>$I_{\text{run}}$</span> 清醒，其餘時間都在停止模式下以極小的 <span>$I_{\text{stop}}$</span> 待著。時間加權的平均值是：</p>
+
+      <div class="math-box">
+        $$ I_{\text{avg}} = d\,I_{\text{run}} + (1-d)\,I_{\text{stop}} $$
+      </div>
+
+      <p>具體來說：每 <span>$10\,\text{s}$</span> 清醒 <span>$0.2\,\text{s}$</span>（所以 <span>$d = 0.02$</span>），執行電流 <span>$I_{\text{run}} = 50\,\text{mA}$</span>，在停止模式下閒置電流 <span>$I_{\text{stop}} = 10\,\mu\text{A} = 0.01\,\text{mA}$</span>：</p>
+
+      <div class="math-box">
+        $$ I_{\text{avg}} = 0.02(50) + 0.98(0.01) \approx 1.0\,\text{mA} \;\Rightarrow\; t_{\text{life}} = \frac{2000\,\text{mAh}}{1.0\,\text{mA}} \approx 2000\,\text{h} \approx 83\,\text{天} $$
+      </div>
+
+      <p>同樣的硬體若<em>不</em>睡眠——維持在執行模式吃 50&nbsp;mA——會在 <span>$2000/50 = 40$</span> 小時內耗盡，不到兩天。停止模式靠一個設計決策就為我們換來了<strong>50 倍長的壽命</strong>。這個比率正是本節存在的理由。</p>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="tickless-idle"><span class="sec-no">7</span>無節拍閒置：讓 FreeRTOS 睡覺</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>節拍是睡眠的敵人</small></div>
+      <p>這裡有個矛盾：那個 1&nbsp;kHz 的節拍<em>每一毫秒</em>就喚醒一次 CPU，只為了問「有誰準備好了嗎？」如果所有任務在接下來的 500&nbsp;ms 都阻塞著，你就毫無意義地喚醒了 500 次，晶片從來沒能深到足以省下真正的電。解法是<strong>無節拍閒置（tickless idle）</strong>。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 無節拍閒置做了什麼</div>
+        <p>當閒置任務執行，而 FreeRTOS 看到<em>每一個</em>任務在接下來的（譬如）500&nbsp;ms 都阻塞著時，它就<strong>停掉節拍</strong>，設定一個低功耗計時器（RTC 或一個喚醒計時器）在 500&nbsp;ms 後觸發，並把晶片降入<strong>停止模式</strong>。喚醒時它讀出實際睡了多久，並<em>一次跳躍地把節拍計數向前修正</em>，讓核心對時間的感知保持準確。你設定 <code>configUSE_TICKLESS_IDLE = 1</code> 來開啟它。</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>會睡眠的閒置掛鉤</small></div>
+      <p>最簡單的進入點是<strong>閒置掛鉤（idle hook）</strong>——一個 FreeRTOS 在閒置任務每次轉一圈時都會呼叫的函式。對於睡眠模式的設計，你可以在這裡直接用 Cortex-M 的 <code>WFI</code>（「等待中斷」，wait for interrupt）指令讓核心睡著；對於更深的停止模式睡眠，你會去實作完整的 <code>portSUPPRESS_TICKS_AND_SLEEP</code> 巨集，但閒置掛鉤把這個想法乾淨俐落地展示了出來：</p>
+
+      <div class="codeblock">
+        <div class="code-head">freertos_hooks.c <span class="lang">C / FreeRTOS</span></div>
+<pre><code class="language-c">// 每當沒有任何其他東西準備好執行時，閒置任務就呼叫它。
+// 需要 FreeRTOSConfig.h 中 configUSE_IDLE_HOOK == 1
+void vApplicationIdleHook(void)
+{
+    // __WFI() 讓核心停住，直到下一個中斷觸發。
+    // 節拍中斷（或任何周邊 IRQ）會喚醒我們，排程器
+    // 重新檢查就緒清單，然後生活繼續。
+    // 電流從約 mA（空轉）降到它的一小部分。
+    __WFI();   // 「等待中斷」——Cortex-M 的睡眠指令
+}
+
+// 想要真正的深度睡眠，就改為啟用無節拍閒置：
+//   #define configUSE_TICKLESS_IDLE 1
+// 然後 FreeRTOS 會呼叫 portSUPPRESS_TICKS_AND_SLEEP(xExpectedIdleTime)，
+// 你要去實作它來進入 STOP 模式並重新設定 RTC。
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——一個忙碌的任務會讓閒置任務挨餓</div>
+        <p>晶片只有在閒置任務執行時才會睡眠，而這只有在<em>每一個</em>其他任務都阻塞時才會發生。一個在緊湊的 <code>for(;;)</code> 迴圈裡輪詢、卻從不阻塞（沒有 <code>vTaskDelay</code>、沒有佇列等待）的任務，會永遠把 CPU 釘在執行模式——你那個「低功耗」節點現在抽的是滿載電流。永遠要阻塞在一個延遲或一個事件上；絕不要忙等（busy-wait）。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="sensor-node"><span class="sec-no">8</span>真實案例：一個電池感測器節點</h2>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>這會出貨到產品裡</small></div>
+      <p>讓我們把一切組裝成一個真實產品：一個無線土壤濕度節點，它必須靠一顆 2000&nbsp;mAh 的電池運作一年。它有兩個工作——取樣感測器、送出封包——而其餘時間都必須在睡眠。這個架構是教科書級的 RTOS + 低功耗設計：</p>
+
+      <div class="mermaid">
+flowchart TB
+    RTC([RTC 喚醒<br/>每 10 秒]) --> SAMP["取樣任務<br/>讀 ADC，約 5 ms"]
+    SAMP -->|xQueueSend| Q[["佇列<br/>（濕度讀值）"]]
+    Q -->|xQueueReceive| COMMS["通訊任務<br/>TX 無線封包，約 150 ms"]
+    COMMS --> IDLE["閒置任務<br/>全部阻塞"]
+    IDLE -->|無節拍閒置| STOP([進入 STOP 模式<br/>約 10 µA])
+    STOP -.RTC 觸發.-> RTC
+      </div>
+
+      <p><strong>取樣任務</strong>在 RTC 節拍上醒來，讀取 ADC，並把讀值推進一個<strong>佇列</strong>。<strong>通訊任務</strong>則阻塞在那個佇列上；只有當一筆讀值到達時它才執行，傳送出去，然後再次阻塞。一旦兩者都阻塞，閒置任務就執行，無節拍閒置便把晶片降入停止模式，直到下一次 RTC 喚醒。以下是這兩個任務，以及把它們串接起來的佇列：</p>
+
+      <div class="codeblock">
+        <div class="code-head">node.c <span class="lang">C / FreeRTOS</span></div>
+<pre><code class="language-c">QueueHandle_t xMoistureQ;   // 在 main 中建立，存放 uint16_t 讀值
+
+// 生產者：約每 10 秒被 RTC 喚醒，取樣並入列。
+void vSampleTask(void *pv)
+{
+    const TickType_t period = pdMS_TO_TICKS(10000);   // 10 秒
+    TickType_t wake = xTaskGetTickCount();
+    for (;;) {
+        uint16_t moisture = adc_read(ADC_CHANNEL_3);  // 約 5 ms 的工作
+        // 非阻塞送出；若佇列已滿就丟棄這筆樣本。
+        xQueueSend(xMoistureQ, &amp;moisture, 0);
+        vTaskDelayUntil(&amp;wake, period);               // 固定 10 秒速率
+    }
+}
+
+// 消費者：睡到有一筆讀值存在，然後把它傳送出去。
+void vCommsTask(void *pv)
+{
+    uint16_t reading;
+    for (;;) {
+        // 阻塞（0 % CPU）直到生產者送出。portMAX_DELAY
+        // => 任務完全睡著，讓晶片得以抵達 STOP。
+        if (xQueueReceive(xMoistureQ, &amp;reading, portMAX_DELAY) == pdTRUE) {
+            radio_transmit(&amp;reading, sizeof reading);  // 約 150 ms
+        }
+    }
+}
+
+int main(void)
+{
+    HAL_Init();  SystemClock_Config();  MX_ADC_Init();  MX_RTC_Init();
+    xMoistureQ = xQueueCreate(4, sizeof(uint16_t));     // 深度 4
+    xTaskCreate(vSampleTask, "samp",  192, NULL, 3, NULL);
+    xTaskCreate(vCommsTask,  "comms", 256, NULL, 2, NULL);
+    vTaskStartScheduler();                              // 永不返回
+    for (;;) { }
+}
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——為什麼用佇列，而不是共享全域變數</div>
+        <p>你大可讓兩個任務都去碰同一個全域 <code>uint16_t</code>——然後你就離一次時機不巧的上下文切換只有一步之遙，等著遇上撕裂讀取（torn read）或丟失樣本。佇列讓這次交接<strong>原子且阻塞</strong>：消費者以<em>零</em> CPU 睡著，直到資料存在，這正是讓閒置任務得以執行、晶片得以抵達停止模式的關鍵。佇列不只是整潔；它是讓低功耗設計<em>成為可能</em>的東西。這個模式——生產者、佇列、消費者、深度睡眠——是市面上幾乎每一款商用電池感測器的骨架。</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>⑤ 換你上場</h2>
+      <div class="layer"><span class="step">⑤</span> 練習 <small>由你撰寫與決定</small></div>
+      <p>三個檢查點。點一個答案、輸入一個數字，或展開一個程式挑戰。你的進度會儲存在這台裝置上，並顯示在首頁。</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="stm09-mutex-vs-sem">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">兩個任務共用一條 I²C 匯流排，你需要阻止它們發出重疊的交易，<em>並且</em>避開火星探路者號那個優先權反轉的臭蟲。你會伸手去拿哪一個原語，又為什麼？</div>
+        <ul class="ex-options">
+          <li data-correct="false">二元號誌——它的額外開銷最低</li>
+          <li data-correct="true">互斥鎖——它有擁有者，並加上了優先權繼承</li>
+          <li data-correct="false">佇列——它能在任務之間安全地複製匯流排資料</li>
+          <li data-correct="false">一個初始化為任務數量的計數號誌</li>
+        </ul>
+        <div class="ex-explain"><strong>互斥鎖</strong>是<em>保護共享資源</em>的正確工具：只有它的擁有者能釋放它，而且 FreeRTOS 的互斥鎖實作了<strong>優先權繼承</strong>，這正是 JPL 對探路者號施加的修正。二元號誌雖然也能做互斥，卻<em>沒有擁有者</em>、<em>沒有繼承</em>，所以它無法防止反轉。佇列是用來傳遞資料的，不是上鎖。</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="stm09-utilization" data-answer="0.4" data-tol="0.02">
+        <div class="ex-head"><span class="badge">Q2</span> 算一算</div>
+        <div class="ex-q">一個系統執行兩個週期性任務：一個 IMU 讀取，每 $T_1 = 10\,\text{ms}$ 耗時 $C_1 = 2\,\text{ms}$；以及一個控制迴圈，每 $T_2 = 5\,\text{ms}$ 耗時 $C_2 = 1\,\text{ms}$。計算總 CPU 利用率 $U = \sum C_i / T_i$（一個介於 0 與 1 之間的無因次分數）。</div>
+        <input class="ex-input" type="number" step="any" placeholder="U"><span class="ex-unit">（分數）</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$U = \dfrac{2}{10} + \dfrac{1}{5} = 0.2 + 0.2 = 0.4$。雙任務的速率單調界限是 $2(2^{1/2}-1)\approx 0.828$，而 $0.4 \le 0.828$，所以這組任務是<strong>可排程的</strong>，還有充裕的餘裕。你用掉了 40% 的 CPU；剩下 60% 留給更多任務或中斷。</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="stm09-two-tasks-queue">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰——生產者、佇列、消費者</div>
+        <div class="ex-q">寫兩個由佇列串接的 FreeRTOS 任務。一個<strong>生產者</strong>以固定速率每 100&nbsp;ms 讀取一個按鈕（<code>read_button()</code> 回傳一個 <code>uint8_t</code>），並把該值送進佇列。一個<strong>消費者</strong>阻塞在佇列上，每當它收到一個值，就呼叫 <code>process(value)</code>。別忘了在啟動排程器之前建立佇列——並確保消費者是真正地<em>阻塞</em>（這樣晶片才能睡眠），而不是輪詢。</div>
+        <details class="ex-acc">
+          <summary>提示</summary>
+          <div class="acc-body">在 <code>main</code> 中、於 <code>vTaskStartScheduler()</code> 之前用 <code>xQueueCreate(depth, sizeof(uint8_t))</code> 建立佇列。在生產者裡用 <code>vTaskDelayUntil</code> 維持固定的 100&nbsp;ms 速率，並用 <code>xQueueSend(q, &amp;val, 0)</code>。在消費者裡用 <code>xQueueReceive(q, &amp;val, portMAX_DELAY)</code>——<code>portMAX_DELAY</code> 的意思是「永遠阻塞直到資料到達」，這讓任務在事件之間維持 0% CPU。</div>
+        </details>
+        <details class="ex-acc">
+          <summary>顯示一個解答</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">button_node.c <span class="lang">C / FreeRTOS</span></div>
+<pre><code class="language-c">QueueHandle_t xBtnQ;
+
+// 生產者：以固定的 100 ms 速率取樣按鈕。
+void vProducer(void *pv)
+{
+    const TickType_t period = pdMS_TO_TICKS(100);
+    TickType_t wake = xTaskGetTickCount();
+    for (;;) {
+        uint8_t val = read_button();        // 0 或 1
+        xQueueSend(xBtnQ, &amp;val, 0);          // 非阻塞入列
+        vTaskDelayUntil(&amp;wake, period);      // 精確 100 ms，不漂移
+    }
+}
+
+// 消費者：完全睡著，直到有一個值到達。
+void vConsumer(void *pv)
+{
+    uint8_t val;
+    for (;;) {
+        if (xQueueReceive(xBtnQ, &amp;val, portMAX_DELAY) == pdTRUE) {
+            process(val);                    // 處理該事件
+        }
+    }
+}
+
+int main(void)
+{
+    HAL_Init();  SystemClock_Config();  MX_GPIO_Init();
+    xBtnQ = xQueueCreate(8, sizeof(uint8_t));   // 深度 8
+    xTaskCreate(vProducer, "prod", 128, NULL, 2, NULL);
+    xTaskCreate(vConsumer, "cons", 192, NULL, 2, NULL);
+    vTaskStartScheduler();                       // 永不返回
+    for (;;) { }
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">課題重點：消費者的 <code>portMAX_DELAY</code> 正是讓這套設計友善於功耗的關鍵——它以零 CPU 坐在阻塞狀態，所以一旦生產者也在延遲中，閒置任務就會執行，無節拍閒置便能把晶片降入停止模式。把佇列換成二元號誌，你就能通知「發生了一次按壓」卻不攜帶是哪個按鈕——而把 <code>vTaskDelayUntil</code> 換回 <code>vTaskDelay</code>，你就會重新引入 §3 的時序漂移。</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> 本章回顧</div>
+        <p>你現在能解釋為什麼超級迴圈對許多獨立且時序敏感的工作會失靈，並用 FreeRTOS <strong>任務</strong>來取代它——那些永遠迴圈的函式，依優先權由 SysTick 節拍驅動、被搶佔式地排程，並以必備的<strong>閒置任務</strong>作為你的睡眠掛鉤。你用 <code>xTaskCreate</code> 建立任務，用 <code>vTaskDelayUntil</code>（絕不用會漂移的 <code>vTaskDelay</code>）維持固定速率，並從 <code>uxTaskGetStackHighWaterMark</code> 決定堆疊大小。你會挑選正確的 IPC 原語——<strong>佇列</strong>用於資料、<strong>號誌</strong>用於 ISR 對任務的訊號通知、<strong>互斥鎖</strong>用於帶優先權繼承的互斥（探路者號的修正）。你能用 $U = \sum C_i/T_i$ 對上 RMS 界限 $n(2^{1/n}-1)\to\ln 2\approx 0.693$ 來<em>證明</em>可排程性。而且你會用<strong>執行 / 睡眠 / 停止 / 待命</strong>模式來大幅削減平均電流，以 $Q/I_{\text{avg}}$ 計算電池壽命，並用<strong>無節拍閒置</strong>在事件之間抵達停止模式——把一個撐兩天的裝置變成撐好幾個月的裝置。這就是從業餘躍升到產品的那一跳。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="回到頂端">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../../../assets/vendor/highlight.min.js"></script>
+<script src="../../../assets/katex/katex.min.js"></script>
+<script src="../../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../../assets/vendor/mermaid.min.js"></script>
+<script src="../../../assets/app.js"></script>
+</body>
+</html>

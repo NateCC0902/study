@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>基礎篇：微控制器、AVR 與你的第一支 Sketch — Embedded Mastery</title>
+<link rel="stylesheet" href="../../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../../assets/styles.css">
+</head>
+<body class="track-arduino" data-course="embedded" data-track="arduino" data-chapter="01-intro">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">Arduino · 第 01 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Arduino 路線 · 第 01 章 · 入門</div>
+        <h1>基礎篇：微控制器、AVR 與你的第一支 Sketch</h1>
+        <p>在你寫下任何一行程式之前，必須先對自己究竟在<em>對什麼</em>寫程式建立正確的心智模型。我們會從矽晶片由下而上建構這個模型——接著讓一顆 LED 閃爍，並徹底理解它為何能運作的<em>每一個</em>奈秒。</p>
+        <div class="meta">
+          <span>⏱ 約 35 分鐘</span><span>🧠 心智模型</span><span>⚡ 第一次接觸硬體</span><span>🔧 工具鏈</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="what-is-mcu"><span class="sec-no">1</span>微控制器<em>究竟是</em>什麼？</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先建立畫面</small></div>
+      <p>你的筆電是一台<strong>電腦</strong>：一顆 CPU，加上負責記憶體、儲存、顯示與 I/O 的數顆獨立晶片，全部佈線在一塊大電路板上。<strong>微控制器（MCU）</strong>則把這整個概念縮進<em>一顆</em>晶片裡——CPU、記憶體與周邊裝置融合成一片指甲大小的矽晶。它只要幾塊美金、耗電以毫瓦計，並在數微秒內開機，完全看不到作業系統的蹤影。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話模型</div>
+        <p>微控制器是一台<strong>微小、自給自足、永遠只執行一支程式的電腦</strong>，透過它的接腳直接與物理世界對話。</p>
+      </div>
+
+      <p>你桌上的「Arduino」是一塊圍繞著 MCU 打造的方便<em>開發板</em>。在經典的 <strong>Arduino Uno</strong> 上，那顆 MCU 是 Microchip 的 <strong>ATmega328P</strong>，一顆 8 位元的 AVR 晶片。開發板額外加上 USB 接頭、穩壓器、時脈石英晶體與排針——這些都是方便用的配件。真正的大腦是 328P。</p>
+
+      <div class="mermaid">
+flowchart TB
+    subgraph CHIP["ATmega328P — 單一晶片"]
+        CPU["8 位元 AVR CPU 核心<br/>（執行指令）"]
+        FLASH["Flash 32 KB<br/>（你的程式）"]
+        SRAM["SRAM 2 KB<br/>（變數）"]
+        EE["EEPROM 1 KB<br/>（儲存的設定）"]
+        PERIPH["周邊裝置：<br/>計時器 · ADC · UART · SPI · I²C · GPIO"]
+        CPU --- FLASH
+        CPU --- SRAM
+        CPU --- EE
+        CPU --- PERIPH
+    end
+    PERIPH --> PINS(["實體接腳 → LED、感測器、馬達"])
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 關鍵區別</div>
+        <p><strong>微處理器</strong>（如 PC 裡那顆）需要外部晶片才能做任何事。<strong>微控制器</strong>本身就已內含記憶體與周邊裝置——它一通電的瞬間就「準備好掌控物理世界」。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-atmega"><span class="sec-no">2</span>ATmega328P 的解剖學</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>裡面有什麼</small></div>
+      <p>有三件事主導你怎麼寫嵌入式程式：CPU <strong>跑多快</strong>、你能用<strong>多少記憶體</strong>，以及<strong>哪種記憶體存放什麼</strong>。328P 刻意做得很小——而這份稀缺性塑造了你日後的每一個決策。</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>資源</th><th>ATmega328P（Uno）</th><th>你的筆電</th><th>比例</th></tr></thead>
+        <tbody>
+          <tr><td>時脈速度</td><td><code>16 MHz</code></td><td>約 3 GHz</td><td>約慢 190 倍</td></tr>
+          <tr><td>程式記憶體（Flash）</td><td><code>32 KB</code></td><td>約 512 GB SSD</td><td>約 1600 萬倍</td></tr>
+          <tr><td>RAM（SRAM）</td><td><code>2 KB</code></td><td>約 16 GB</td><td>約 800 萬倍</td></tr>
+          <tr><td>CPU 位元寬度</td><td>8 位元</td><td>64 位元</td><td>—</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 三種記憶體，三種職責</div>
+        <p><strong>Flash（32 KB）</strong>——非揮發性；存放你編譯後的<em>程式</em>。斷電後依然保留。<br>
+        <strong>SRAM（2 KB）</strong>——揮發性；執行期間存放<em>變數</em>。斷電即消失。<br>
+        <strong>EEPROM（1 KB）</strong>——非揮發性；存放你選擇要永久保留的<em>設定</em>（例如一個校正值）。</p>
+      </div>
+
+      <p>AVR 採用 <strong>哈佛架構（Harvard architecture）</strong>：程式（Flash）與資料（SRAM）位於<em>各自獨立</em>的匯流排與位址空間。這就是為什麼字串常數 <code>"hello"</code> 暗地裡住在 Flash 裡，卻會在開機時被複製到你寶貴的 SRAM——這是「我怎麼會把 RAM 用完了？」這類意外的經典來源，我們會在第 8 章拆解它。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>編列稀缺記憶體的預算</small></div>
+      <p>記憶體計算在嵌入式工作中無所不在。假設你把溫度取樣存成 16 位元整數（<code>int16_t</code>＝每筆 2 個位元組）。在忽略額外開銷的情況下，SRAM 能容納幾筆？</p>
+
+      <div class="math-box">
+      $$ N_{\max} = \left\lfloor \frac{\text{SRAM}}{\text{bytes per sample}} \right\rfloor = \left\lfloor \frac{2048 \text{ B}}{2 \text{ B}} \right\rfloor = 1024 \text{ samples} $$
+      </div>
+
+      <p>實際上，堆疊（stack）、全域變數與 Arduino 核心函式庫早已占去數百個位元組——所以要預留餘裕。這種信封背面快速估算的習慣，正是「能運作好幾年的韌體」與「凌晨三點神祕自我損毀的韌體」之間的差別。</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="toolchain"><span class="sec-no">3</span>你的程式碼如何變成一盞閃爍的燈</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>整條流水線</small></div>
+      <p>當你按下 <kbd>上傳</kbd> 時，背後發生的事多到令人驚訝。你那份人類可讀的 C++ 會分階段被轉換成原始機器碼，再一個位元組一個位元組地灌進晶片的 Flash。理解這條流水線，能把「它就是不肯編譯」從恐慌變成診斷。</p>
+
+      <div class="mermaid">
+flowchart LR
+    A["Sketch<br/>blink.ino"] --> B["預處理<br/>（＋ Arduino 核心）"]
+    B --> C["avr-gcc<br/>編譯 → .o"]
+    C --> D["連結<br/>→ .elf"]
+    D --> E["擷取<br/>→ .hex"]
+    E --> F["avrdude<br/>透過 USB 上傳"]
+    F --> G(["Bootloader 寫入<br/>Flash → 開始執行"])
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> IDE 替你藏起來的事</div>
+        <p>你的 <code>.ino</code> 檔其實並不完全是 C++。IDE 會把你各分頁串接起來、自動產生函式原型、用 Arduino 核心包住一切，並插入一個隱藏的 <code>main()</code>。所謂的「魔法」不過就是預處理——你完全可以用 <code>arduino-cli compile</code> 在命令列重現這一切。</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——Bootloader</div>
+        <p>一顆全新的晶片，在沒有燒錄器的情況下，怎麼能透過單純的 USB 接受程式碼？有一支稱為 <strong>bootloader（開機載入程式）</strong> 的小程式，住在 Flash 受保護的一個角落。重置時它會聆聽約 1 秒；如果 IDE 正在傳輸，它就把進來的位元組寫入 Flash，然後跳到你的程式。這 1 秒的聆聽，正是 Uno 在通電後要愣一下才啟動的原因。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="sketch-anatomy"><span class="sec-no">4</span>Sketch 的解剖學：<code>setup()</code> 與 <code>loop()</code></h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先跑一次，然後永遠跑下去</small></div>
+      <p>每一支 Arduino sketch 都恰好有兩個必備函式。<code>setup()</code> 在開機時<strong>只跑一次</strong>——在這裡設定你的接腳。接著 <code>loop()</code> 會<strong>一遍又一遍、永不停止地</strong>，以 CPU 能達到的最快速度執行。這裡沒有 <code>return</code>、沒有「程式結束」——嵌入式軟體永遠不會停。</p>
+
+      <div class="mermaid">
+flowchart TB
+    P([通電 / 重置]) --> S["setup() — 只跑一次"]
+    S --> L["loop() 主體"]
+    L --> L2{抵達結尾？}
+    L2 -- 是 --> L
+    L2 -. 永不結束 .-> X[(停機)]
+    style X stroke-dasharray: 5 5,opacity:0.3
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 隱藏的 <code>main()</code></div>
+        <p>在幕後，Arduino 核心其實<em>確實</em>有一個標準的 C++ <code>main()</code>。它大致是：<code>int main(){ init(); setup(); for(;;){ loop(); } }</code>。所以 <code>loop()</code> 實際上是在一個無窮的 <code>for(;;)</code> 裡被呼叫。你寫的每一行，永遠都在一個永恆的迴圈之中。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="first-blink"><span class="sec-no">5</span>你的第一支程式：Blink，逐行完整註解</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>讀懂每一行</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">blink.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">// Uno 有一顆內建 LED，接在數位接腳 13。
+// LED_BUILTIN 是一個具名常數，在 Uno 上等於 13。
+
+void setup() {
+  // 只跑一次。把接腳 13 設定為 OUTPUT，這樣 MCU
+  // 才能在它上面「驅動」電壓（而不是「聆聽」）。
+  pinMode(LED_BUILTIN, OUTPUT);
+}
+
+void loop() {
+  // 永遠執行。
+  digitalWrite(LED_BUILTIN, HIGH);  // 接腳給 5 V → LED 亮
+  delay(500);                       // 什麼都不做，停 500 ms
+  digitalWrite(LED_BUILTIN, LOW);   // 接腳給 0 V → LED 滅
+  delay(500);                       // 再等 500 ms
+}                                   // loop() 返回 → 核心再次呼叫它
+</code></pre>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 每個呼叫實際上做了什麼</div>
+        <p><code>pinMode(pin, OUTPUT)</code> 會翻轉硬體暫存器裡的一個位元，讓接腳變成一個微小、可控的電壓源。<code>digitalWrite(pin, HIGH)</code> 把接腳設為約 5 V；<code>LOW</code> 則設為 0 V。<code>delay(ms)</code> 讓 CPU 在一個計數迴圈裡空轉，做那麼多毫秒的無用功。（那種「什麼都不做」是我們會在第 5 章懺悔的罪過。）</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——忘了 <code>pinMode</code></div>
+        <p>如果你略過 <code>pinMode(.., OUTPUT)</code>，接腳會維持在<em>輸入</em>狀態，而 <code>digitalWrite(.., HIGH)</code> 會悄悄啟用內部的提升電阻（pull-up resistor），而不是驅動該接腳。你的 LED 會微亮或全暗，而且不會跳出任何錯誤。永遠先設定好方向。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="timing-math"><span class="sec-no">6</span>時序數學：時脈、週期，以及 16 MHz 的意義</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>時間從何而來</small></div>
+      <p>Uno 的石英晶體以 <span>$f_{\text{clk}} = 16\,\text{MHz} = 16{\times}10^6$</span> 個週期每秒的頻率振盪。每一條指令需要一個或多個<em>時脈週期（clock cycle）</em>。單一週期的時間長度就是它的倒數：</p>
+
+      <div class="math-box">
+        $$ T_{\text{cycle}} = \frac{1}{f_{\text{clk}}} = \frac{1}{16\times10^6\,\text{Hz}} = 62.5\,\text{ns} $$
+      </div>
+
+      <p>所以在你的 LED 亮著的那半秒裡，CPU 大約執行了</p>
+
+      <div class="math-box">
+        $$ N = f_{\text{clk}} \cdot t = 16\times10^6 \,\tfrac{\text{cyc}}{\text{s}} \times 0.5\,\text{s} = 8\times10^6 \text{ cycles} $$
+      </div>
+
+      <p>——八百萬個週期，幾乎全部都耗在 <code>delay()</code> 裡，徹底地什麼也沒做。現在反過來看：我們這個方波的<strong>閃爍頻率</strong>與<strong>占空比（duty cycle）</strong>為</p>
+
+      <div class="math-box">
+        $$ T = t_{\text{on}} + t_{\text{off}}, \qquad f = \frac{1}{T}, \qquad D = \frac{t_{\text{on}}}{T}\times100\% $$
+      </div>
+
+      <p>當 <span>$t_{\text{on}} = t_{\text{off}} = 500\,\text{ms}$</span> 時：週期 <span>$T = 1\,\text{s}$</span>、頻率 <span>$f = 1\,\text{Hz}$</span>、占空比 <span>$D = 50\%$</span>。記牢這條公式——它是第 4 章 <strong>PWM</strong> 的種子，屆時我們會閃得太快，讓眼睛看到的是亮度而非閃動。</p>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-blink-wrap">
+        <div class="sim-title">🔬 即時：閃爍波形探索器</div>
+        <canvas id="sim-blink"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">拖動滑桿：看看 on/off 時間如何重塑方波，並即時重新計算 <em>T</em>、<em>f</em> 與占空比。</p>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="why-it-matters"><span class="sec-no">7</span>真實案例：不起眼的狀態 LED</h2>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>這會延伸到實際產品</small></div>
+      <p>「Blink」感覺像玩具，但閃爍的狀態 LED 在出貨硬體裡無所不在——路由器、3D 印表機、醫療裝置、人造衛星。它是成本最低的<strong>人類可讀診斷工具</strong>：一台沒有螢幕的裝置，仍然能用一顆 LED、零額外成本告訴你「開機中」（快閃）、「執行中」（緩慢脈動）或「故障」（SOS 模式）。</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——把心跳當看門狗</div>
+        <p>成熟的韌體常會在主迴圈內部切換一顆「心跳（heartbeat）」LED。如果那顆 LED <em>停止</em>閃爍，工程師立刻就知道迴圈卡住了——完全不需要除錯器。這個閃爍模式<em>本身</em>就是存活訊號。你剛剛學會了一個真正的量產技巧。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>⑤ 換你動手</h2>
+      <div class="layer"><span class="step">⑤</span> 練習 <small>由你來寫、由你來決定</small></div>
+      <p>三道檢核題。點選一個答案、輸入一個數字，或展開一道程式挑戰。你的進度會儲存在這台裝置上，並顯示於首頁。</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="ard01-memory">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢核</div>
+        <div class="ex-q">你在 <code>loop()</code> 內定義了 <code>int sensorValue = 0;</code>。當程式執行時，這個變數實際上住在哪裡？</div>
+        <ul class="ex-options">
+          <li data-correct="false">Flash 記憶體</li>
+          <li data-correct="true">SRAM</li>
+          <li data-correct="false">EEPROM</li>
+          <li data-correct="false">Bootloader</li>
+        </ul>
+        <div class="ex-explain">執行期間的變數住在 <strong>SRAM</strong>（揮發性，Uno 上有 2 KB）。Flash 存放<em>程式</em>；EEPROM 存放你明確選擇要永久保留的設定。這正是哈佛架構分割在實際運作。</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="ard01-cycletime" data-answer="62.5" data-tol="0.6">
+        <div class="ex-head"><span class="badge">Q2</span> 算算看</div>
+        <div class="ex-q">另一塊 AVR 開發板以 <strong>16 MHz</strong> 運行。一個時脈週期有多長，以<strong>奈秒</strong>為單位？（回想 $T_{\text{cycle}} = 1/f_{\text{clk}}$，且 $1\,\text{s}=10^9\,\text{ns}$。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="ns"><span class="ex-unit">ns</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$T = \dfrac{1}{16\times10^6} = 62.5\times10^{-9}\,\text{s} = 62.5\,\text{ns}$。在 8 MHz 時會是 125 ns；在 1 MHz 時則是 1000 ns。週期時間就只是時脈頻率的倒數。</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="ard01-sos">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰——摩斯電碼 SOS</div>
+        <div class="ex-q">修改 Blink，讓 LED 打出 <strong>SOS</strong>：三短閃（·）、三長閃（–）、三短閃（·），然後一段長暫停。短＝亮 200 ms，長＝亮 600 ms，閃與閃之間的間隔＝滅 200 ms。想想看，要怎麼避免把 <code>digitalWrite</code> 複製貼上九次。</div>
+        <details class="ex-acc">
+          <summary>提示</summary>
+          <div class="acc-body">寫一個輔助函式 <code>flash(int onMs)</code>，讓 LED 亮 <code>onMs</code>、再滅 200 ms。然後用 200 呼叫它三次、用 600 三次、用 200 三次，並在 <code>loop()</code> 結尾加上一個長的 <code>delay(700)</code>。</div>
+        </details>
+        <details class="ex-acc">
+          <summary>顯示一種解法</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">sos.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const int LED = LED_BUILTIN;
+
+void setup() { pinMode(LED, OUTPUT); }
+
+// 一次閃爍：亮 onMs，接著一段 200 ms 的間隔
+void flash(int onMs) {
+  digitalWrite(LED, HIGH); delay(onMs);
+  digitalWrite(LED, LOW);  delay(200);
+}
+
+void loop() {
+  for (int i = 0; i &lt; 3; i++) flash(200);   // S : · · ·
+  for (int i = 0; i &lt; 3; i++) flash(600);   // O : – – –
+  for (int i = 0; i &lt; 3; i++) flash(200);   // S : · · ·
+  delay(700);                                // 字間間隔
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">重點在 <code>flash()</code> 這個輔助函式：把重複的部分抽取成一個函式。這同時也預示了為什麼 <code>delay()</code> 有局限——真實產品需要在閃爍的<em>同時</em>讀取按鈕，而會阻塞的 <code>delay()</code> 不容許這樣做。第 5 章正是要修正這一點。</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> 本章回顧</div>
+        <p>你現在能夠解釋什麼是 MCU、說出 328P 的三種記憶體及其職責、追溯整條上傳流水線、讀懂一支 sketch 的 <code>setup()</code>／<code>loop()</code> 結構，並從基本原理計算時脈週期與閃爍時序。下一章我們會讓接腳真正<em>做點事</em>——並認識那套讓你硬體保持存活的電阻計算。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="回到頂端">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../../../assets/vendor/highlight.min.js"></script>
+<script src="../../../assets/katex/katex.min.js"></script>
+<script src="../../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../../assets/vendor/mermaid.min.js"></script>
+<script src="../../../assets/app.js"></script>
+
+<!-- chapter-specific simulator -->
+<script>
+EM.sim("sim-blink", {
+  height: 230,
+  params: [
+    { key: "on",  label: "t_on  (ms)",  min: 50, max: 1500, step: 50, value: 500, unit: "ms" },
+    { key: "off", label: "t_off (ms)", min: 50, max: 1500, step: 50, value: 500, unit: "ms" }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h, pad = 40 * dpr;
+    var hi = pad, lo = H - pad;                         // HIGH / LOW 的 y 座標
+    ctx.lineWidth = 1 * dpr; ctx.strokeStyle = "#262d3a";
+    ctx.fillStyle = "#6e7681"; ctx.font = (12 * dpr) + "px monospace";
+    // 基準線 + 電位輔助線
+    ctx.beginPath(); ctx.moveTo(pad, hi); ctx.lineTo(W - 10 * dpr, hi);
+    ctx.moveTo(pad, lo); ctx.lineTo(W - 10 * dpr, lo); ctx.stroke();
+    ctx.fillText("5V", 6 * dpr, hi + 4 * dpr);
+    ctx.fillText("0V", 6 * dpr, lo + 4 * dpr);
+
+    var T = v.on + v.off;                               // 每個週期的毫秒數
+    var pxPerMs = (W - pad - 14 * dpr) / (2.5 * T);     // 顯示約 2.5 個週期
+    var x = pad, t = 0, level = 1;
+    ctx.beginPath(); ctx.moveTo(x, level ? hi : lo);
+    ctx.strokeStyle = "#2ec4b6"; ctx.lineWidth = 2.5 * dpr;
+    while (x < W - 14 * dpr) {
+      var seg = (level ? v.on : v.off) * pxPerMs;
+      ctx.lineTo(x + seg, level ? hi : lo);             // 水平線
+      x += seg;
+      level = 1 - level;
+      ctx.lineTo(x, level ? hi : lo);                   // 垂直邊緣
+    }
+    ctx.stroke();
+
+    var f = 1000 / T, D = (v.on / T) * 100;
+    return "週期 <b>T</b> = " + T + " ms &nbsp;·&nbsp; 頻率 <b>f</b> = " +
+           (Math.round(f * 100) / 100) + " Hz &nbsp;·&nbsp; 占空比 <b>D</b> = " +
+           (Math.round(D * 10) / 10) + " %";
+  }
+});
+</script>
+</body>
+</html>

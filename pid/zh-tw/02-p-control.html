@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>P 控制：彈簧與它的偏差 — USV 的 PID 控制</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-pid" data-course="pid" data-track="main" data-chapter="02-p-control">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> PID&nbsp;·&nbsp;USV</a>
+  <span class="spacer"></span>
+  <span class="track-pill">PID · 第 02 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">PID 課程 · 第 02 章 · P 項</div>
+        <h1>P 控制：彈簧與它的偏差</h1>
+        <p>只打開一個項——比例（proportional）——船就變成了彈簧上的一塊質量。我們會掃描（sweep）$k_p$，看著它從遲鈍一路走到永不止息的振盪，然後證明：當水流（current）推動船首（bow）時，單靠 P 為何<em>永遠</em>無法停在設定值（setpoint）上。兩個案例，一個頑固的教訓：增益更大不是答案。</p>
+        <div class="meta"><span>⏱ 約 30 分鐘</span><span>🪝 彈簧類比</span><span>⚡ kp 即時掃描</span><span>📐 e_ss = −4°/kp</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="p-is-a-spring"><span class="sec-no">1</span>單靠 P：船變成一個彈簧</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先抓住畫面</small></div>
+      <p>把控制器精簡到只剩一個項。沒有積分（integral），沒有微分（derivative）——只有 $u = k_p\,e$。舵（rudder）命令與你偏離多遠成正比：偏得很離譜，就打到底；快到了，輕輕一點；正好在設定值上，零舵。最後那句聽起來人畜無害，卻是第&nbsp;5 節的大反派。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> P <em>就是</em>一個彈簧</div>
+        <p>彈簧（spring）以正比於你拉伸量的力把你拉回去：$F = -kx$。P 控制器以正比於航向（heading）偏離設定值多遠來推舵：$u = k_p\,e$。同一條定律，同一種個性——包括那些壞毛病。把一塊質量（mass）掛在阻尼（damping）很小的彈簧上，它會<strong>振盪（oscillation）</strong>。我們的「質量」是船體（hull）的偏航（yaw）轉動慣性（inertia）；我們的「摩擦」是水動力偏航阻尼。把彈簧調得夠硬，摩擦就跟不上了。</p>
+      </div>
+
+      <p>所以在我們碰滑桿之前，先預測它的樣子：彈簧越硬（$k_p$ 越大）就越快地撲向目標，但一塊快速運動的質量會帶著動量<em>衝過頭</em>——超調（overshoot）——而阻尼不足的彈簧會在靠近靜止時振鈴（ringing）。把硬度拉得夠高，它就根本停不下來。</p>
+
+      <div class="mermaid">
+flowchart LR
+    E["誤差 e = ψ_set − ψ"] -->|"× kp"| U["舵 u = kp·e"]
+    U -->|"受控體 (K, T)"| R["偏航角速度 r"]
+    R -->|"∫ dt"| P["航向 ψ"]
+    P -->|"回授"| E
+</div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 要背起來的規律</div>
+        <p>$k_p$ 越大 = 響應（response）越快、殘餘偏差（offset）越小、振鈴越多——<strong>一直到它永遠停不下來為止。</strong>本章所有的內容都是這一句話的後果。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="kp-sweep"><span class="sec-no">2</span>kp 掃描：從遲鈍到永不穩定</h2>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>筆記中的案例 1</small></div>
+      <p>實驗很簡單：$u = k_p e$，命令船從 0° 轉到 90°，然後掃描增益（gain）。底下是船在四個值下的表現——把它當成 $k_p$ 的性格測驗來讀。</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>$k_p$</th><th>行為</th><th>穩定於</th></tr></thead>
+        <tbody>
+          <tr><td>0.5</td><td>遲鈍；又大又邋遢的超調</td><td>約 98°（偏差很大 → §4）</td></tr>
+          <tr><td>2</td><td>俐落；振鈴一次；可用</td><td>約 92°</td></tr>
+          <tr><td>5</td><td><strong>永不穩定</strong>——±16° 振盪，永無止境</td><td>—（這就是 $K_u$）</td></tr>
+          <tr><td>8</td><td>更大、更快的振盪</td><td>±25°，永無止境</td></tr>
+        </tbody>
+      </table></div>
+
+      <p>$k_p=5$ 那一列很特別。船進入一種<strong>持續振盪（sustained oscillation）</strong>，既不增長也不衰減——一個乾淨的 ±16° 擺動，週期（period）$T_u\approx 9$&nbsp;s。這就是<em>臨界增益（ultimate gain, Ku）</em>$K_u$：在這個硬度下，彈簧的振鈴恰好與船體的阻尼相互平衡。這不是什麼花絮——它是整定（tuning）這艘船時最有用的一個數字（我們會在第 08 章把它換成真正的增益）。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span>「那我把 kp 拉大就好」是個陷阱</div>
+        <p>每一個本能都會說：偏差太大？把增益拉高。它<em>確實</em>會縮小偏差（§4）。但 $k_p\ge 5$ 會無止境地振盪。你被夾在一個無法完全消除的穩態誤差（steady-state error），與一個無法忍受的振盪之間。單靠 P 贏不了這場仗——這正是 I 與 D 存在的理由。</p>
+      </div>
+
+      <p>別只聽我說這四列——去親手開開看。把 $k_p$ 慢慢拉上去，找出擺動既不再縮小也不再增長的那個值。那個交界點就是 $K_u$。</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>🧭</span> 只有 P 的航向保持（掃描 kp；打開水流）</div>
+        <canvas id="sim-p"></canvas>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 該拖什麼、該看什麼</div>
+        <p><strong>把 $k_p$ 從低掃到高。</strong>在 0.5 附近，船慢吞吞地爬進來，遠遠不到目標就停住——注意它<em>停在哪裡</em>，而不只是它很慢。到了 2 左右，它俐落地抵達，只振鈴一小下。往 5 推，振盪就鎖死成穩定的 ±16° 永無止境——那就是 $K_u$；替完整的一個週期計時，你會得到 $T_u\approx 9$&nbsp;s。過了 5 只會更糟，不會更好。然後<strong>把水流打開</strong>再跑一次：每一個穩定點都會位移——那就是 §4 的偏差，活生生的。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="why-oscillation"><span class="sec-no">3</span>為什麼會振盪：彈簧遇上延遲</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>振鈴從何而來</small></div>
+      <p>把 P 迴圈閉合在第&nbsp;01 章的 Nomoto 受控體（plant）上，動態就變成二階。從受控體出發，代入控制律（control law）$u = k_p e$，其中 $e = \psi_\text{set}-\psi$（暫時不考慮擾動）：</p>
+      <div class="math-box">$$ T\,\ddot\psi + \dot\psi = K\,u = K\,k_p\,(\psi_\text{set} - \psi) $$</div>
+      <p>整理一下，這就是一個被驅向 $\psi_\text{set}$ 的阻尼諧振子方程式：</p>
+      <div class="math-box">$$ T\,\ddot\psi + \underbrace{1\cdot\dot\psi}_{\text{阻尼}} + \underbrace{K k_p\,\psi}_{\text{彈簧}} = K k_p\,\psi_\text{set} $$</div>
+      <p>把兩個旋鈕讀出來。<strong>彈簧硬度</strong>是 $K k_p$——它隨你設定的增益一起增長。<strong>阻尼</strong>係數固定為 $1$（它是船體自己的偏航阻尼，已內建在受控體裡）。自然頻率與阻尼比直接掉出來：</p>
+      <div class="math-box">$$ \omega_n = \sqrt{\frac{K k_p}{T}}, \qquad \zeta = \frac{1}{2\sqrt{K k_p\,T}} $$</div>
+      <p>現在整章都濃縮在一個不等式裡了。把 $k_p$ 拉大，$\zeta$ 就<em>下降</em>——硬度更高，摩擦不變，於是阻尼按比例變少。質量每一次都更用力地盪過目標。在 $K=0.6$、$T=2.5$ 之下，$\zeta$ 恰好就在筆記所說的地方跌出舒適區：大約 $k_p\approx 2$ 時你得到一個俐落的超調，而到了 $k_p=5$，迴圈裡的延遲（lag）已經吃光了最後一點有效阻尼，於是你永遠振鈴下去。</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 老實的提醒（完整故事在第 09 章）</div>
+        <p>一艘<em>純粹的</em>一階（first-order）Nomoto 船，配上一個完美的舵，在技術上其實太守規矩了——在紙面上，連巨大的 $k_p$ 都會穩定下來。真實的船會振盪，是因為致動器（actuator）有<strong>延遲</strong>：我們的伺服機（servo）以 25&nbsp;°/s 變化，跟不上一個在兩端之間翻來覆去的命令。那個相位延遲（phase lag）正是缺少的那味料，它把「阻尼較弱」在 $K_u\approx 5$ 處變成了「無阻尼」。模擬器（simulator）內建了變化率限制（slew rate），所以它會像真實的船一樣振盪。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="the-offset"><span class="sec-no">4</span>結構性偏差：P 贏不了水流</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>筆記中的案例 2</small></div>
+      <p>現在把水流打開——那股像 4° 卡住的舵一樣作用的固定推力。讓只有 P 的船跑到某個航向，然後<em>仔細</em>看它停在哪裡。它不會停在設定值上。而且再怎麼等也修不好：誤差就停在那裡，穩定而頑固。這不是粗心或慢吞吞的暫態——它是結構性的，而三行代數就能告訴你它到底有多大。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>算一次就好，只有 3 行</small></div>
+      <p>要維持固定航向，淨偏航力矩必須為零。水流像 +4° 的舵那樣推，所以控制器的舵必須維持在 <strong>−4°</strong> 來抵消它——否則船會一直轉。但一個 P 控制器永遠只能輸出 $k_p\,e$。把它等於船<em>所需要的</em>舵：</p>
+      <div class="math-box">$$ k_p\,e_{ss} = -4° \qquad\Longrightarrow\qquad \boxed{\,e_{ss} = -\frac{4°}{k_p}\,} $$</div>
+      <p>就是它了。為了產生那 −4° 的維持舵，P 項<em>需要</em>一個非零的誤差來相乘——於是船恰好偏離目標 $4°/k_p$ 穩定下來。代入增益：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>$k_p$</th><th>偏差 $|e_{ss}|$</th><th>穩定於（目標 90°）</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>4°</td><td>94°</td></tr>
+          <tr><td>2</td><td>2°</td><td>92°</td></tr>
+          <tr><td>4</td><td>1°</td><td>91°</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 為什麼這是<em>結構性</em>的，而不是 bug</div>
+        <p>在<strong>誤差為零時 P 控制器輸出零舵</strong>——而零舵贏不了水流。所以 P 要維持任何非零的舵，唯一的辦法就是讓一個非零的誤差繼續存在，去乘上 $k_p$。這個偏差不是整定失誤；它是這個項的數學本質。沒錯，$k_p$ 越大偏差就越小（$4°/k_p \to 0$）——但 §2 早就替你封頂了：$k_p\ge 5$ 會振盪。用可用的增益，你就是永遠卡在偏離一兩度的地方。</p>
+      </div>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>它無所不在</small></div>
+      <p>同樣的下垂出現在每一個對抗固定負載的純比例迴圈裡：定速巡航的車在長上坡時掉了幾 mph、暖氣機在外頭結冰時只守得住涼颼颼的 19°、一個增益有限的運算放大器隨耦器。解藥永遠一樣——<strong>在誤差為零時，必須有別的東西把致動器撐住。</strong>那個東西就是積分項，而和它見面正是第 05 章的全部工作。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> I 的預告</div>
+        <p>想像一個會<em>記住</em>「我已經短少 2° 一陣子了」的項，然後慢慢地把重量壓在舵上，直到誤差消失——接著即使誤差歸零也繼續維持那個壓力。那就是積分：一塊會自我配平（trim）、會學會水流的配平片（trim tab）。P 做不到，因為 P 沒有記憶；它只知道你<em>此刻</em>在哪裡。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="in-code"><span class="sec-no">5</span>只有 P，寫成程式</h2>
+
+      <div class="layer"><span class="step">③</span> 程式 <small>每一行都讀</small></div>
+      <p>這就是整個 P 控制器——把第&nbsp;01 章的 PID 類別兩個增益歸零。我把它明明白白地攤出來，好讓那個偏差無可抵賴：追蹤 $e=0$ 時的控制步驟，輸出就是不折不扣的零舵，不管擾動有多大。</p>
+
+      <div class="codeblock">
+        <div class="code-head">p_only.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import math
+
+def wrap(angle):                     # → (-pi, pi]；一旦你越過正北就有關係了（第 07 章）
+    return (angle + math.pi) % (2 * math.pi) - math.pi
+
+class PController:
+    """整個 P 控制器。ki = kd = 0 —— 沒有記憶，沒有預判。"""
+    def __init__(self, kp, rudder_max=math.radians(35)):
+        self.kp = kp
+        self.rudder_max = rudder_max
+
+    def update(self, setpoint, heading):
+        error = wrap(setpoint - heading)          # rad
+        u = self.kp * error                        # 完整的控制律就這一行
+        # 注意：當 error == 0 時，u == 0。零舵贏不了水流。
+        return max(-self.rudder_max, min(self.rudder_max, u))
+</code></pre>
+      </div>
+
+      <p>接著是穩態檢查——相當於盯著船停在哪裡看的模擬器版本。我們在打開水流的情況下，解出讓一切停止運動的那個航向：</p>
+
+      <div class="codeblock">
+        <div class="code-head">offset_check.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import math
+
+K, T   = 0.6, 2.5                  # Nomoto 受控體（第 01 章）
+current = math.radians(4.0)        # 擾動 ≡ +4° 卡住的舵
+setpoint = math.radians(90.0)
+
+for kp in (1.0, 2.0, 4.0):
+    # 穩態：偏航角速度 r = 0  ⇒  淨舵（u + current）= 0  ⇒  u = -current。
+    # P 律：u = kp * e_ss，且 e_ss = setpoint - heading_ss。
+    #   kp * e_ss = -current  ⇒  e_ss = -current / kp
+    e_ss   = -current / kp
+    settle = setpoint - e_ss                       # 船首實際停泊的位置
+    print(f"kp={kp:>3}:  offset = {math.degrees(e_ss):+5.1f}°"
+          f"   settles at {math.degrees(settle):5.1f}°")
+
+# kp=1.0:  offset =  -4.0°   settles at  94.0°
+# kp=2.0:  offset =  -2.0°   settles at  92.0°
+# kp=4.0:  offset =  -1.0°   settles at  91.0°
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 正負號慣例，免得你跌跤</div>
+        <p>誤差是 $e = \psi_\text{set}-\psi$。一股把船首<em>往上</em>推（航向變大）的水流，需要控制器維持<em>負</em>舵來抵消，所以 $e_{ss}$ 算出來是負的——船會停在稍微<em>越過</em>設定值的地方，停在 94° 而不是 86°。你拿來整定的對象是大小 $4°/k_p$；正負號只告訴你它往哪邊下垂。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="two-failures"><span class="sec-no">6</span>兩種失敗，一個根源</h2>
+      <p>退一步看。我們遇到了兩種截然不同的壞行為，但它們其實不是兩個問題——它們是同一個侷限換了身衣服而已。</p>
+      <ol>
+        <li><strong>振盪</strong>（沒有水流）：把 $k_p$ 拉上去，彈簧的硬度就壓過了阻尼。先振鈴，然後在 $K_u\approx 5$ 處變成永無止境的擺動。</li>
+        <li><strong>偏差</strong>（有水流）：P 控制器在誤差為零時輸出零舵，所以它無法維持固定水流所要求的 −4° 配平。它會短少 $4°/k_p$ 穩定下來。</li>
+      </ol>
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 兩面夾擊</div>
+        <p>每一種失敗都指向<em>相反</em>的增益。偏差希望 $k_p$ <strong>高</strong>（縮小 $4°/k_p$）。振盪希望 $k_p$ <strong>低</strong>（待在 $K_u$ 之下）。一個旋鈕沒辦法同時滿足兩者，因為單靠 $k_p$ 既沒有記憶也沒有預判。解法不是一個更好的 $k_p$——而是<em>再加</em>兩個項：<strong>D</strong> 加進阻尼，讓你能跑更大的增益（第 03 章），以及 <strong>I</strong> 完全不靠任何增益就消除偏差（第 05 章）。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>換你上場</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="pid02-why-offset">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">在水流打開的情況下，一艘只有 P 的船停在偏離設定值幾度的地方，然後就一直待在那裡。為什麼它永遠無法精確抵達設定值？</div>
+        <ul class="ex-options">
+          <li data-correct="false">增益 $k_p$ 設得太低；夠高的 $k_p$ 就能精確抵達。</li>
+          <li data-correct="true">誤差為零時 P 控制器輸出零舵，但水流需要 −4° 的維持舵——所以必須留下一個非零的誤差來產生它。</li>
+          <li data-correct="false">舵在 ±35° 飽和，推不夠力。</li>
+          <li data-correct="false">受控體不穩定，所以它哪裡都停不下來。</li>
+        </ul>
+        <div class="ex-explain">維持固定航向需要淨偏航力矩為零，也就是舵 $=-4°$。P 只能透過 $k_p\,e$ 產生舵，所以它需要 $e_{ss}=-4°/k_p \ne 0$。把 $k_p$ 拉高會把偏差<em>縮小</em>趨近零，但永遠到不了零——而且你也拉不了太高，因為 $k_p\ge 5$ 會振盪。這個偏差是結構性的；要消除它需要積分項。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="pid02-offset-kp25" data-answer="91.6" data-tol="0.15">
+        <div class="ex-head"><span class="badge">Q2</span> 算算看</div>
+        <div class="ex-q">一艘只有 P 的船，$k_p = 2.5$，在 4° 水流打開的情況下被命令轉到 90°。用 $e_{ss} = -4°/k_p$，它實際會停在哪個航向（以度為單位）？</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">°</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$e_{ss} = -4°/2.5 = -1.6°$。因為 $e = \psi_\text{set}-\psi$，負的誤差代表 $\psi$ 衝過設定值：$\psi_{ss} = 90° - e_{ss} = 90° - (-1.6°) = 91.6°$。注意 $k_p=2.5$ 是可用範圍的高端——在 $K_u\approx 5$ 之下，所以不會振盪——即使在那裡，偏差仍有 1.6°。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="pid02-second-order">
+        <div class="ex-head"><span class="badge">Q3</span> 推導——為什麼 $k_p$ 越高振鈴越多</div>
+        <div class="ex-q">從閉迴路方程式 $T\ddot\psi + \dot\psi + K k_p\,\psi = K k_p\,\psi_\text{set}$ 出發，說明阻尼比 $\zeta$ 如何依賴於 $k_p$，並用一句話解釋為什麼把增益拉大會讓船振盪。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">逐項與標準二階形式 $\ddot\psi + 2\zeta\omega_n\dot\psi + \omega_n^2\psi = \omega_n^2\psi_\text{set}$ 比對。先把整個方程式除以 $T$，讓 $\ddot\psi$ 的係數為 1。</div></details>
+        <details class="ex-acc"><summary>看一個解答</summary><div class="acc-body">
+          <p>除以 $T$：$\ddot\psi + \dfrac{1}{T}\dot\psi + \dfrac{K k_p}{T}\psi = \dfrac{K k_p}{T}\psi_\text{set}$。與標準形式比對得到 $\omega_n^2 = \dfrac{K k_p}{T}$，所以 $\omega_n = \sqrt{\dfrac{K k_p}{T}}$，且 $2\zeta\omega_n = \dfrac{1}{T}$，所以</p>
+          <p>$$\zeta = \frac{1}{2\omega_n T} = \frac{1}{2T}\sqrt{\frac{T}{K k_p}} = \frac{1}{2\sqrt{K k_p\,T}}.$$</p>
+          <p><strong>一句話：</strong>$\zeta \propto 1/\sqrt{k_p}$——彈簧隨 $k_p$ 變硬，但阻尼由船體固定，所以把增益拉高會壓低阻尼比，船就振鈴得更兇。（在理想模型上 $\zeta$ 從不真正歸零；如 §3 的提醒所說，真實的致動器延遲才是最終在 $K_u$ 把有效 $\zeta$ 推到零、產生持續 ±16° 振盪的元兇。）</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章回顧</div>
+        <p>單靠 P 是一個彈簧：$u=k_p e$。閉合在船上，它是一個阻尼振子，$\zeta = 1/(2\sqrt{K k_p T})$——所以 $k_p$ 越大代表響應越快但阻尼越少，振鈴越兇，直到在 $K_u\approx 5$ 處永不穩定（週期 $T_u\approx 9$&nbsp;s）。更糟的是，面對固定水流，P 根本沒辦法停在設定值上：零誤差給出零舵，所以它會下垂一個結構性偏差 $e_{ss}=-4°/k_p$。這兩種失敗把 $k_p$ 拉往相反方向——這就證明了一個項不夠用。下一步：加上 D 把阻尼買回來，好讓你終於能跑一個有用的增益。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+<script src="../../assets/pid-sim.js"></script>
+<script>EM.pidSim("sim-p", EM.pidPresets.pOnly());</script>
+</body>
+</html>

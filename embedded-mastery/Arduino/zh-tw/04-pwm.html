@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>PWM 與類比輸出：調光、伺服馬達與馬達 — Embedded Mastery</title>
+<link rel="stylesheet" href="../../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../../assets/styles.css">
+</head>
+<body class="track-arduino" data-course="embedded" data-track="arduino" data-chapter="04-pwm">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">Arduino · 第 04 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Arduino 學習軌 · 第 04 章 · 中階</div>
+        <h1>PWM 與類比輸出：調光、伺服馬達與馬達</h1>
+        <p>一支數位腳位只能完全開或完全關——但你卻能用它調暗一顆 LED、設定馬達轉速、讓伺服馬達轉到指定角度。訣竅在於<strong>時間</strong>：切換得夠快，這個世界就會把模糊的閃爍平均成一個平滑的數值。這是嵌入式硬體中最有用的一招「假動作」。</p>
+        <div class="meta">
+          <span>⏱ 約 45 分鐘</span><span>🧠 工作週期（duty cycle）</span><span>⚡ 調光與馬達</span><span>🔧 MOSFET · 伺服馬達 · RC</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="the-trick"><span class="sec-no">1</span>訣竅：閃得太快，看起來就像類比</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先把畫面建立起來</small></div>
+      <p>在第 1 章你以 1 Hz 讓一顆 LED 閃爍，能看見它在閃。把這個閃爍加速到每秒數百次，奇妙的事就發生了：閃爍消失了，LED 看起來只是變<em>暗</em>了。你並沒有改變電壓——它仍在 0 V 與 5 V 之間硬切換——但你的眼睛追不上這個閃動，於是把一段時間內的光累積起來，回報出一個<strong>平均亮度</strong>。</p>
+
+      <p>這就是<strong>脈波寬度調變（Pulse-Width Modulation，PWM）</strong>。腳位永遠是數位的：要嘛硬切到 0 V，要嘛硬切到 5 V，從來不會停在中間。我們只是選擇<em>每個週期中有多少比例的時間是高電位</em>。讓它有 25% 的時間是高電位，就得到微弱的光；75% 就接近全亮。比例是唯一的旋鈕。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話模型</div>
+        <p>PWM <strong>靠把腳位非常快速地完全開、完全關，來偽造出一個類比電壓</strong>；負載——或你的眼睛、或馬達的慣性——會把這個方波平均成一個有效電位，讓你能從 0% 一路調到 100%。</p>
+      </div>
+
+      <p>為什麼要費事去偽造？因為真正的類比輸出既昂貴又耗能。若要<em>真的</em>以可用電流輸出 2.5 V，晶片就必須在穩壓器裡把另一半功率燒成熱。PWM 不浪費任何功率：開關要嘛完全導通（其上幾乎沒有壓降，損耗極小），要嘛完全關閉（沒有電流，沒有損耗）。這也正是你家用切換方式調光、電動車用切換方式驅動馬達（而非用電阻）的原因。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——PWM 腳位<em>不是</em> DAC</div>
+        <p>Uno 的輸出腳位永遠只會停在 0 V 或 5 V。若你用一台反應慢的電壓表去量 PWM 腳位，讀到的是一個模糊的平均值；若你用示波器去看，看到的是原始的方波。在傳統的 AVR 上，<code>analogWrite()</code> 背後並沒有任何類比電路——所謂「類比」完全藏在時序裡。（某些開發板，例如以 SAMD 為基礎的 Zero，<em>確實</em>有真正的 DAC；但 Uno 沒有。）</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="duty-and-vavg"><span class="sec-no">2</span>數學：工作週期與平均電壓</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>把它推導出來</small></div>
+      <p>一個完整的 PWM 週期有固定的<strong>週期</strong> <span>$T$</span>。在其中腳位高電位持續一段時間 <span>$t_{\text{on}}$</span>、低電位持續 <span>$t_{\text{off}}$</span>，且 <span>$T = t_{\text{on}} + t_{\text{off}}$</span>。定義這個波形「電位」的唯一數字就是<strong>工作週期（duty cycle）</strong>——一個週期中處於高電位的比例：</p>
+
+      <div class="math-box">
+        $$ D = \frac{t_{\text{on}}}{T} = \frac{t_{\text{on}}}{t_{\text{on}} + t_{\text{off}}} \in [0, 1] $$
+      </div>
+
+      <p><strong>平均電壓</strong>不過就是一個波形的時間平均——這個波在一個週期中有比例 <span>$D$</span> 的時間等於 <span>$V_{cc}$</span>、其餘時間等於 <span>$0$</span>。一個雙電位訊號的平均，就是其各電位以時間為權重的加權平均：</p>
+
+      <div class="math-box">
+        $$ V_{\text{avg}} = \frac{1}{T}\!\int_0^{T}\! v(t)\,dt = \frac{V_{cc}\cdot t_{\text{on}} + 0\cdot t_{\text{off}}}{T} = D\,V_{cc} $$
+      </div>
+
+      <p>乾淨又線性：平均電壓等於工作週期乘以電源電壓。在 <span>$V_{cc}=5\,\text{V}$</span> 時，40% 的工作週期平均出 <span>$0.40\times5 = 2.0\,\text{V}$</span>；60% 平均出 3.0 V。這條直線 <span>$V_{\text{avg}} = D\,V_{cc}$</span> 就是整章的核心。</p>
+
+      <p>Arduino API 把 <span>$D$</span> 藏在一個 8 位元整數背後。<code>analogWrite(pin, val)</code> 接受 <span>$[0, 255]$</span> 範圍內的 <code>val</code>，並把它線性映射成工作週期：</p>
+
+      <div class="math-box">
+        $$ D = \frac{\texttt{val}}{255}, \qquad V_{\text{avg}} = \frac{\texttt{val}}{255}\,V_{cc} $$
+      </div>
+
+      <p>所以 <code>analogWrite(pin, 0)</code> 是完全關閉（0 V），<code>255</code> 是完全開啟（5 V），而 <code>127</code> 則是 <span>$127/255 \approx 49.8\%$</span>——基本上就是一半。要反推這條公式、找出對應某個目標電壓的數值，就解出 <code>val</code>：</p>
+
+      <div class="math-box">
+        $$ \texttt{val} = \operatorname{round}\!\left(\frac{V_{\text{target}}}{V_{cc}}\times 255\right) $$
+      </div>
+
+      <p>在 5 V 開發板上要得到 3.0 V：<span>$\texttt{val} = \operatorname{round}(3.0/5.0\times255) = \operatorname{round}(153.0) = 153$</span>。把這趟來回算法背起來——這是你最常會做的 PWM 算術。</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 補充——電阻性負載的 RMS 對平均值</div>
+        <p>加熱器或白熾燈泡以 <span>$P = V_{\text{rms}}^2/R$</span> 消耗功率，而對於一個 PWM 波，其<em>RMS</em>（均方根）電壓是 <span>$V_{\text{rms}} = V_{cc}\sqrt{D}$</span>，而不是 <span>$V_{cc}D$</span>。因此功率與工作週期呈<em>線性</em>關係：<span>$P = D\,V_{cc}^2/R$</span>。這很方便——50% 工作週期恰好提供電阻一半的功率——但要注意所得的 RMS 電壓（例如 50% 時為 <span>$5\sqrt{0.5}\approx3.54\,\text{V}$</span>）與平均電壓（2.5 V）並不相同。對於 LED，你在意的是平均光量；對於加熱器，你在意的是平均功率。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="where-pwm-comes-from"><span class="sec-no">3</span>方波從哪來：一個硬體計時器</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>並非用軟體完成</small></div>
+      <p>這是初學者常忽略的部分：<code>analogWrite()</code> <strong>並不會</strong>待在一個迴圈裡反覆切換腳位。如果它真這麼做，CPU 就永遠騰不出手做別的事了。它其實是去設定一塊專用的矽晶電路——一個<strong>計時器/計數器周邊（timer/counter peripheral）</strong>——讓它在硬體中自主、永遠地產生方波，同時你的程式照常執行。</p>
+
+      <p>計時器是一個計數器，每來一個時脈節拍就遞增一次，溢位時繞回零。PWM 的運作方式是把這個持續跑動的計數器與你設定的<strong>比較值（compare value）</strong>相比較：當 <code>counter &lt; compare</code> 時腳位被驅動為高電位；一旦 <code>counter ≥ compare</code> 就翻成低電位。這個比較值<em>就是</em>你的工作週期。<code>analogWrite(pin, 153)</code> 實際上就是把 153 寫進一個比較暫存器（<code>OCRnx</code>），剩下的交給硬體。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 「計數器對門檻」模型</div>
+        <p>一個自由跑動的計數器斜升 0 → 255 → 0 → 255……。每個週期中，當計數器低於你設定的門檻時腳位為 HIGH，高於門檻時為 LOW。提高門檻 → 高電位脈波變寬 → 工作週期變高 → 更亮。CPU 只設定門檻一次；計時器則在零 CPU 介入下，每秒重畫波形數千次。</p>
+      </div>
+
+      <p>在 ATmega328P 上有三個計時器驅動六支可做 PWM 的腳位：<strong>Timer0</strong>（腳位 5、6）、<strong>Timer1</strong>（腳位 9、10）與 <strong>Timer2</strong>（腳位 3、11）。板子上印在那些腳位編號旁的波浪符號 <code>~</code> 就是它們的標記。其他腳位根本沒有接上比較硬體，這就是為什麼 <code>analogWrite()</code> 只能在那六支腳位上運作。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——預設頻率並不相同</div>
+        <p>因為這三個計時器在 Arduino 核心中以不同的預除器（prescaler）計時，PWM 頻率並不一致。在 Uno 上，腳位 3、9、10、11 跑在<strong>約 490 Hz</strong>，而腳位 <strong>5 與 6 跑在約 980 Hz</strong>（Timer0，它同時也支撐 <code>millis()</code> 與 <code>delay()</code>）。除非你已準備好破壞計時功能，否則別重新設定 Timer0 來對抗這點——我們會在<strong>第 5 章</strong>刻意掀開這個蓋子。</p>
+      </div>
+
+      <p>我們會在下一章從預除器與計數器位寬推導出這些頻率。現在，先牢牢記住這條連結：<strong>PWM 就是一個計時器把計數器拿去跟門檻比較</strong>。這句話正是通往第 5 章的橋樑。</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="dimming-and-gamma"><span class="sec-no">4</span>程式碼：調暗一顆 LED（以及為何線性看起來不對勁）</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>逐行讀過</small></div>
+      <p>最簡單的 PWM 程式：讓一顆 LED 漸亮、漸暗。把一顆 LED（連同第 3 章的限流電阻）接到一支 <code>~</code> 腳位——比如腳位 9——然後讓工作週期從 0 掃到 255 再掃回來。</p>
+
+      <div class="codeblock">
+        <div class="code-head">fade.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const int LED = 9;  // 必須是 PWM（~）腳位：Uno 上為 3,5,6,9,10,11
+
+void setup() {
+  pinMode(LED, OUTPUT);   // analogWrite 仍然需要一支 OUTPUT 腳位
+}
+
+void loop() {
+  // 漸亮：工作週期 0 -&gt; 255（0% -&gt; 100%）
+  for (int val = 0; val &lt;= 255; val++) {
+    analogWrite(LED, val);   // 寫入計時器的比較暫存器（OCR1A）
+    delay(8);                // 完整掃一趟約 2 秒（256 * 8 ms）
+  }
+  // 漸暗：工作週期 255 -&gt; 0
+  for (int val = 255; val &gt;= 0; val--) {
+    analogWrite(LED, val);
+    delay(8);
+  }
+}
+</code></pre>
+      </div>
+
+      <p>上傳後你會注意到一件惱人的事：LED 在前四分之一的掃描裡就一路衝到「看起來全亮」，接著剩下的過程幾乎沒什麼變化。這趟漸變在數學上是線性的，但<em>看起來</em>卻嚴重失衡。這不是 bug——是你的眼睛。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>眼睛是對數的</small></div>
+      <p>人類對亮度的感知大致遵循一條冪次律（即 CIE 明度關係）。感知到的明度大致與物理強度的 <span>$1/2.2$</span> 次方成正比，這代表若要得到一條在<em>感知上</em>線性的斜坡，我們必須用反函數預先扭曲工作週期——也就是一個 <span>$\gamma \approx 2.2$</span> 的<strong>伽瑪（gamma）</strong>：</p>
+
+      <div class="math-box">
+        $$ \texttt{out} = \left(\frac{\texttt{in}}{255}\right)^{\gamma}\!\times 255, \qquad \gamma \approx 2.2 $$
+      </div>
+
+      <p>低輸入值會被壓向零（所以暗端得到你眼睛渴望的細緻解析度），高輸入值則仍接近滿值。套用這個校正後，漸變在視覺上就變得平滑且均勻：</p>
+
+      <div class="codeblock">
+        <div class="code-head">fade_gamma.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;math.h&gt;
+const int LED = 9;
+
+// 把感知上的 0..255 需求映射成眼睛實際需要的工作週期。
+uint8_t gamma8(uint8_t in) {
+  float norm = in / 255.0f;                     // 0.0 .. 1.0
+  float corrected = powf(norm, 2.2f);           // 壓縮低端
+  return (uint8_t)(corrected * 255.0f + 0.5f);  // +0.5 做四捨五入
+}
+
+void setup() { pinMode(LED, OUTPUT); }
+
+void loop() {
+  for (int b = 0; b &lt;= 255; b++) {
+    analogWrite(LED, gamma8(b));   // 請求感知亮度 b，輸出校正後的工作週期
+    delay(8);
+  }
+  for (int b = 255; b &gt;= 0; b--) {
+    analogWrite(LED, gamma8(b));
+    delay(8);
+  }
+}
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 預先算好查表</div>
+        <p>在沒有 FPU 的 8 位元 AVR 上，<code>powf()</code> 很慢。在實際產品中，你會一次算好這條 256 筆的曲線，把它以 <code>const uint8_t gamma_lut[256] PROGMEM</code> 存進 Flash，然後直接查表——把一次浮點次方運算變成一次陣列讀取。Adafruit NeoPixel 函式庫正是基於這個原因附帶了這樣一張表。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="driving-motors"><span class="sec-no">5</span>驅動馬達：為何腳位辦不到，以及辦得到的 MOSFET</h2>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>這會出現在實際產品中</small></div>
+      <p>現在來談本章最重要的安全課。你<strong>不能</strong>把一顆直流馬達直接接到 Arduino 腳位上。ATmega328P 的一支腳位安全狀況下最多只能供出約 20 mA（絕對上限 40 mA，而且整顆晶片有共用的總額度）。一顆小型玩具馬達運轉時就會拉<em>數百</em>毫安，堵轉時甚至好幾<em>安培</em>。把它接到腳位上，你得到的不是一顆慢轉的馬達——而是一顆燒掉的微控制器。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——腳位是訊號，不是電源</div>
+        <p>把每一支輸出腳位都當成一條<strong>控制線</strong>，而不是電源線。它的職責是<em>告訴</em>一個更大的開關該做什麼，而馬達的電流則從電源、經過那個開關流動——絕不流經晶片。任何超過約 20 mA 的負載（馬達、繼電器、電磁閥、燈絲燈泡、長條 LED 燈帶）都需要外部的切換元件。</p>
+      </div>
+
+      <p>那個開關就是 <strong>MOSFET</strong>——一種被當成電子式繼電器使用的電晶體，沒有任何機械活動部件。一顆邏輯電位（logic-level）的 N 通道 MOSFET（例如 <strong>IRLZ44N</strong>，或用於極小負載的 <strong>2N7000</strong>）會在它的閘極（gate）被腳位驅動為高電位時完全導通，把馬達的負極端接到地。把你的 <em>PWM</em> 訊號餵進閘極，馬達就會每秒開關數百次；它的轉動慣性會把這些脈波平均成一個穩定的轉速——和 LED 一樣的平均化把戲，只是現在變成機械的了。</p>
+
+      <div class="mermaid">
+flowchart LR
+    PIN["Arduino 腳位 9<br/>PWM 輸出"] -->|閘極| Q["N 通道 MOSFET<br/>IRLZ44N"]
+    VPLUS(["+12 V 電源"]) --> M["直流馬達"]
+    M -->|汲極| Q
+    Q -->|源極| GND[("GND")]
+    M -. 飛輪電流 .-> D["二極體 1N4007<br/>陰極接 +12 V"]
+    D -.-> VPLUS
+    VPLUS --- GND
+      </div>
+
+      <p>注意跨接在馬達兩端的那顆二極體——<strong>飛輪（freewheeling）二極體</strong>。馬達是個電感，而電感的定義式是 <span>$v_L = L\,\dfrac{di}{dt}$</span>。當 MOSFET 關閉時，原本流動的電流被迫幾乎瞬間停止，於是 <span>$di/dt$</span> 極大且為負——馬達為了維持電流流動，會產生一個巨大的<em>正向</em>電壓尖波（數百伏特）。若沒有路徑可走，那個尖波就會擊穿 MOSFET 並毀掉它。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 飛輪二極體是必備的，不是選配</div>
+        <p>把二極體以<em>逆向偏壓</em>跨接在馬達兩端：陰極（有條紋的那一端）接 +電源，陽極接汲極。正常運作時它是關閉且看不見作用的。在關斷的瞬間它翻成導通，給崩潰中的電感電流一個安全的迴路去消散，把尖波箝制到約 0.7 V。略過它，你就會在每一個 PWM 邊緣燒掉 MOSFET——而 PWM 每秒會產生數千個邊緣。</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——你筆電的散熱風扇</div>
+        <p>每片主機板上那個 4 針的 PWM 風扇接頭，正是這個電路的產品化版本。第 4 針帶著一個約 25 kHz 的 PWM 訊號（選在人耳聽覺之上，讓切換不會發出嘯叫聲）；風扇本身的驅動 IC 讀取工作週期並設定轉速，飛輪則在內部處理掉。當你的 CPU 變熱時，韌體就提高工作週期——正是你剛學到的那個 <span>$D\,V_{cc}$</span>——風扇就轉得更快。一模一樣的數學，正在十億台機器裡出貨運行。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="servos"><span class="sec-no">6</span>伺服馬達：訊息藏在脈波<em>寬度</em>，而非工作週期裡的 PWM</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>另一種風味的 PWM</small></div>
+      <p>一顆業餘玩家用的伺服馬達（像 SG90、MG996R）是一具帶減速齒輪的小馬達，內部還有一套位置控制電路。你不是告訴它轉速；你告訴它一個<strong>角度</strong>，它就自行驅動轉到那裡並維持住。指令同樣是一連串脈波——但這裡資訊是編碼在<em>絕對脈波寬度</em>裡，週期則由慣例固定。</p>
+
+      <p>標準是一個 <strong>50 Hz</strong> 的訊框：每 <span>$T = 20\,\text{ms}$</span> 一個脈波。每個訊框中，高電位脈波的寬度選定角度：</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>脈波寬度</th><th>角度</th><th>在 20 ms 中的工作週期</th></tr></thead>
+        <tbody>
+          <tr><td><code>1.0 ms</code></td><td>0°</td><td>5%</td></tr>
+          <tr><td><code>1.5 ms</code></td><td>90°（中央）</td><td>7.5%</td></tr>
+          <tr><td><code>2.0 ms</code></td><td>180°</td><td>10%</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p>所以伺服馬達看到的工作週期永遠只落在 5% 到 10% 之間——<em>工作週期不是訊息，脈波寬度才是</em>。從角度 <span>$\theta$</span>（度）到脈波寬度 <span>$w$</span>（微秒）的線性映射是：</p>
+
+      <div class="math-box">
+        $$ w(\theta) = 1000 + \frac{\theta}{180}\,(2000 - 1000) = 1000 + \frac{1000\,\theta}{180}\ \ [\mu s] $$
+      </div>
+
+      <p>你大可手動用 bit-bang 的方式硬刻這個訊號，但「在做其他工作的同時，每 20 ms 產生一個精確的 1–2 ms 脈波」正是計時器存在的目的。<strong>Servo</strong> 函式庫接管 Timer1 來乾淨俐落地完成這件事：</p>
+
+      <div class="codeblock">
+        <div class="code-head">sweep.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;Servo.h&gt;
+
+Servo arm;            // 一個 Servo 物件透過 Timer1 管理一支輸出腳位
+
+void setup() {
+  arm.attach(9);      // 訊號線接在腳位 9（三線：電源、地、訊號）
+  // arm.attach(9, 1000, 2000);  // 選用：設定你伺服馬達真實的最小/最大微秒值
+}
+
+void loop() {
+  for (int deg = 0; deg &lt;= 180; deg++) {
+    arm.write(deg);   // 函式庫把 deg 換算成脈波寬度並驅動計時器
+    delay(15);        // 給伺服馬達時間實際轉動
+  }
+  for (int deg = 180; deg &gt;= 0; deg--) {
+    arm.write(deg);
+    delay(15);
+  }
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——伺服馬達要從電源軌供電，而非從腳位</div>
+        <p>伺服馬達的<em>訊號</em>線是一條控制線（接腳位沒問題），但它的馬達會從<em>電源</em>線拉數百毫安。這些電源要由一個適當的 5 V 供應來餵，並把它的地接到 Arduino 的地（共地是必備的，否則脈波就沒有參考基準）。用 Uno 的 5 V 腳位去帶伺服馬達會讓板子電壓驟降（brown out）並在掃動到一半時重置。另外要注意：Servo 函式庫使用 Timer1，所以只要有伺服馬達 attach 著，腳位 9 與 10 上的 <code>analogWrite()</code> 就會失效。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="rc-filter"><span class="sec-no">7</span>讓它真正類比：RC 低通濾波器</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>還原出真正的直流電位</small></div>
+      <p>有時候你需要一個真正平滑的電壓，而不是方波——用來偏壓一顆電晶體、餵給一個運算放大器、或驅動一個無法容忍切換的電路。你可以把 PWM 轉成真正的類比直流電位，方法是用一個<strong>電阻-電容低通濾波器（RC low-pass filter）</strong>實際把它平均掉：電阻與電容構成一個緩慢充放的水桶，把脈波平滑成它們的平均值。</p>
+
+      <p>一階 RC 低通濾波器讓直流自由通過，並衰減其<strong>截止頻率（cutoff frequency）</strong>以上的所有頻率；在截止頻率處，輸出已降到輸入的 <span>$1/\sqrt{2}$</span>（−3 dB）：</p>
+
+      <div class="math-box">
+        $$ f_c = \frac{1}{2\pi R C} $$
+      </div>
+
+      <p>設計準則很簡單：把截止頻率設在<em>遠低於</em> PWM 頻率，好把切換漣波壓垮，但又要高到讓你的訊號仍能合理地快速變化。對於 490 Hz 的 PWM，瞄準低一個數量級，大約 50 Hz。取 <span>$R = 10\,\text{k}\Omega$</span>：</p>
+
+      <div class="math-box">
+        $$ C = \frac{1}{2\pi R f_c} = \frac{1}{2\pi (10^4)(50)} \approx 3.2\times10^{-7}\,\text{F} = 0.32\,\mu\text{F} $$
+      </div>
+
+      <p>一顆標準的 0.33 µF 電容剛剛好。在你的電表上呈現的結果：一個穩定的 <span>$D\,V_{cc}$</span>，只剩下幾毫伏的殘餘漣波。你已經用一顆電阻加一顆電容做出了一個粗糙的 8 位元 DAC。</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 漣波對速度的取捨</div>
+        <p>較低的 <span>$f_c$</span>（較大的 R 或 C）＝輸出更平滑，但反應遲鈍——在你改變工作週期後，電壓要花上好幾毫秒才會穩定下來（一個時間常數是 <span>$\tau = RC$</span>）。較高的 <span>$f_c$</span>＝反應更俐落，但漣波更明顯。天下沒有白吃的午餐：被動式 RC 是拿漣波去換反應時間。如果你兩者都要，那就該去找一顆真正的 DAC 晶片了（例如透過 I²C 的 MCP4725——會在後面的章節登場）。</p>
+      </div>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-pwm-wrap">
+        <div class="sim-title">🔬 即時：PWM 波形與 V<sub>avg</sub> 探索器</div>
+        <canvas id="sim-pwm"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">拖動 <em>duty（工作週期）</em>與 <em>V<sub>cc</sub></em>：青色方波會重塑外形，橘色虛線則即時追蹤 <span>$V_{\text{avg}} = D\,V_{cc}$</span>。週期固定在 Uno 的約 490 Hz（T ≈ 2.04 ms）。</p>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>⑤ 換你上場</h2>
+      <div class="layer"><span class="step">⑤</span> 練習 <small>由你動手寫、由你做決定</small></div>
+      <p>三道檢驗。點一個答案、輸入一個數字，或揭開一道程式挑戰。你的進度會儲存在這台裝置上，並顯示在首頁。</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="ard04-pwm-concept">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢驗</div>
+        <div class="ex-q">你把一個驅動 LED 的 PWM 訊號工作週期從 25% 提高到 75%。腳位上實際發生了什麼物理變化？</div>
+        <ul class="ex-options">
+          <li data-correct="false">腳位的高電位從約 1.25 V 升到約 3.75 V</li>
+          <li data-correct="true">腳位仍在 0 V 與 5 V 之間硬切換，但每個週期中有更大比例的時間是高電位</li>
+          <li data-correct="false">PWM 頻率變成三倍</li>
+          <li data-correct="false">晶片內部的 DAC 輸出一個平滑的 3.75 V</li>
+        </ul>
+        <div class="ex-explain">PWM 從不改變<em>電位</em>——它們永遠是 0 V 與 <span>$V_{cc}$</span>。工作週期改變的是高電位脈波的<em>寬度</em>，所以即使瞬時電壓仍是純數位，<strong>平均值</strong>還是升到 <span>$0.75\times5 = 3.75\,\text{V}$</span>。做平均的是眼睛，不是腳位。</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="ard04-vavg" data-answer="2" data-tol="0.05">
+        <div class="ex-head"><span class="badge">Q2</span> 算出來</div>
+        <div class="ex-q">一台 Uno（<span>$V_{cc}=5\,\text{V}$</span>）以 <strong>40% 工作週期</strong>輸出 PWM。平均電壓是多少伏特？（使用 $V_{\text{avg}} = D\,V_{cc}$。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="V"><span class="ex-unit">V</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$V_{\text{avg}} = D\,V_{cc} = 0.40 \times 5\,\text{V} = 2.0\,\text{V}$。做個健全性檢查：40% 對應的 <code>analogWrite</code> 數值是 $\operatorname{round}(0.40\times255)=102$，而確實 $102/255\times5 \approx 2.0\,\text{V}$。若想改為命令 3.0 V，你會用 $\operatorname{round}(3/5\times255)=153$。</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="ard04-breathe">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰——一顆呼吸燈</div>
+        <div class="ex-q">讓一顆 LED <strong>「呼吸」</strong>：亮度應像緩慢的呼吸那樣平滑地起伏，週期大約 4 秒。用一個正弦波來做出平滑的運動，並套用伽瑪校正，讓暗端看起來和亮端一樣漸進。腳位 9，沒有「不准用 <code>delay()</code>」之類的限制——用 <code>millis()</code> 風格的計時或一個單純的迴圈，保持簡單即可。</div>
+        <details class="ex-acc">
+          <summary>提示</summary>
+          <div class="acc-body">把正弦映射到 0..1 就能得到平滑的振盪：<code>(sin(phase) + 1) / 2</code>。乘以 255 得到一個感知亮度需求，然後在 <code>analogWrite</code> 之前先把它送過你 §4 的 <code>gamma8()</code>。每個迴圈讓 <code>phase</code> 推進一點點；完整的一次呼吸是 <span>$2\pi$</span> 弧度的相位。</div>
+        </details>
+        <details class="ex-acc">
+          <summary>顯示一個解答</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">breathe.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;math.h&gt;
+const int LED = 9;
+
+uint8_t gamma8(uint8_t in) {                 // 感知 -&gt; 工作週期（取自 §4）
+  float n = in / 255.0f;
+  return (uint8_t)(powf(n, 2.2f) * 255.0f + 0.5f);
+}
+
+void setup() { pinMode(LED, OUTPUT); }
+
+void loop() {
+  // phase 掃過 0 -&gt; 2*pi；以此步進/延遲，完整一次呼吸約 4 秒
+  for (float phase = 0; phase &lt; 2 * PI; phase += 0.05f) {
+    float s = (sinf(phase) + 1.0f) / 2.0f;   // 0.0 .. 1.0，平滑
+    uint8_t want = (uint8_t)(s * 255.0f);    // 感知亮度
+    analogWrite(LED, gamma8(want));          // 伽瑪校正後的工作週期
+    delay(16);                               // 約 125 步 * 16 ms ~ 上升+下降 2 秒
+  }
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">兩堂課疊在一起：<strong>正弦</strong>給出平滑的物理運動，而<strong>伽瑪</strong>讓那段運動對一隻非線性的眼睛<em>看起來</em>也平滑。把 <code>gamma8()</code> 的呼叫拿掉，你就會看到這次呼吸花太久時間停在「亮」的樣子，然後猛地穿過暗端——正是 §4 那種失衡，現在在運動中變得一目了然。</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> 本章回顧</div>
+        <p>你現在能把 PWM 解釋成「被負載平均掉的快速開關」，能推導出 <span>$V_{\text{avg}} = D\,V_{cc}$</span> 以及 <code>analogWrite</code> 的映射 <span>$D = \texttt{val}/255$</span>，並能記得 Uno 約 490 Hz／約 980 Hz 的腳位分組。你知道 PWM 是由一個計時器把計數器拿去跟門檻比較而產生的（第 5 章的種子）、為何調光需要伽瑪校正、為何馬達需要一顆 MOSFET 加一顆必備的飛輪二極體、一個 50 Hz／1–2 ms 的訊框如何瞄準伺服馬達的角度，以及一個帶 <span>$f_c = 1/(2\pi RC)$</span> 的 RC 濾波器如何還原出真正的類比電壓。下一章我們會撬開計時器本身，並徹底擺脫對阻塞式 <code>delay()</code> 的依賴。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="回到頂端">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../../../assets/vendor/highlight.min.js"></script>
+<script src="../../../assets/katex/katex.min.js"></script>
+<script src="../../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../../assets/vendor/mermaid.min.js"></script>
+<script src="../../../assets/app.js"></script>
+
+<!-- chapter-specific simulator -->
+<script>
+EM.sim("sim-pwm", {
+  height: 250,
+  params: [
+    { key: "duty", label: "工作週期 D", min: 0,   max: 100, step: 1,   value: 40, unit: "%" },
+    { key: "vcc",  label: "Vcc",    min: 1,   max: 5,   step: 0.1, value: 5,  unit: "V" }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h, pad = 42 * dpr;
+    var hi = pad, lo = H - pad;                          // HIGH(Vcc) / LOW(0V) 的 y 座標
+    var span = lo - hi;                                  // 完整 5 V 刻度的像素數
+    var D = v.duty / 100;
+    var vavg = D * v.vcc;
+
+    // 在 0 V 與刻度頂的 Vcc（5 V 頂）畫軸線
+    ctx.lineWidth = 1 * dpr; ctx.strokeStyle = "#262d3a";
+    ctx.fillStyle = "#6e7681"; ctx.font = (12 * dpr) + "px monospace";
+    ctx.beginPath();
+    ctx.moveTo(pad, hi); ctx.lineTo(W - 10 * dpr, hi);
+    ctx.moveTo(pad, lo); ctx.lineTo(W - 10 * dpr, lo);
+    ctx.stroke();
+    ctx.fillText("5V", 6 * dpr, hi + 4 * dpr);
+    ctx.fillText("0V", 6 * dpr, lo + 4 * dpr);
+
+    // 把一個電壓（0..5）映射成 y 座標
+    function yOf(volts) { return lo - (volts / 5) * span; }
+
+    // --- Vavg 虛線（橘色）---
+    var yAvg = yOf(vavg);
+    ctx.setLineDash([7 * dpr, 5 * dpr]);
+    ctx.strokeStyle = "#ff9f1c"; ctx.lineWidth = 2 * dpr;
+    ctx.beginPath(); ctx.moveTo(pad, yAvg); ctx.lineTo(W - 10 * dpr, yAvg); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#ff9f1c";
+    ctx.fillText("Vavg", W - 56 * dpr, yAvg - 6 * dpr);
+
+    // --- PWM 方波（青色），高電位 = Vcc ---
+    var yHigh = yOf(v.vcc), yLow = yOf(0);
+    var periods = 4;                                     // 畫 4 個週期
+    var usable = W - pad - 14 * dpr;
+    var pPx = usable / periods;                          // 每個週期的像素數
+    ctx.strokeStyle = "#2ec4b6"; ctx.lineWidth = 2.5 * dpr;
+    ctx.beginPath();
+    var x = pad;
+    ctx.moveTo(x, D > 0 ? yHigh : yLow);
+    for (var i = 0; i < periods; i++) {
+      var onPx = D * pPx, offPx = pPx - onPx;
+      // 高電位段
+      if (onPx > 0) { ctx.lineTo(x + onPx, yHigh); }
+      x += onPx;
+      // 下降邊緣 + 低電位段
+      ctx.lineTo(x, yLow);
+      if (offPx > 0) { ctx.lineTo(x + offPx, yLow); }
+      x += offPx;
+      // 下一週期的上升邊緣（除非是最後一個）
+      if (i < periods - 1) ctx.lineTo(x, yHigh);
+    }
+    ctx.stroke();
+
+    // Uno 約 490 Hz PWM -> T = 1/490 s ~ 2.04 ms
+    var T = 1000 / 490;
+    return "週期 <b>T</b> ≈ " + (Math.round(T * 100) / 100) +
+           " ms（f ≈ 490 Hz 固定） &nbsp;·&nbsp; 工作週期 <b>D</b> = " + v.duty +
+           "% &nbsp;·&nbsp; <b>Vavg = D·Vcc</b> = " + (Math.round(vavg * 100) / 100) + " V";
+  }
+});
+</script>
+</body>
+</html>

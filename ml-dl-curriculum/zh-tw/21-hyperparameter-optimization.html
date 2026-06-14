@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>超參數最佳化與模型選擇 — 機器學習與深度學習</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="21-hyperparameter-optimization">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 21</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL 課程 · 21 · 實用 ML 技藝</div>
+        <h1>超參數最佳化與模型選擇</h1>
+        <p>每個模型都有兩種旋鈕：一種是訓練替你調好的，另一種是 <em>你</em> 必須自己設定的。本課講的就是如何高效地搜尋第二種——網格搜尋對隨機搜尋對貝氏搜尋——以及同樣重要的：如何回報一個你真的敢拿去賭一次部署的最終數字，而不是一個你早已悄悄騙過自己的數字。</p>
+        <div class="meta"><span>⏱ ~40 分鐘</span><span>🧩 需要第 05 課</span><span>🐍 scikit-learn（含 Optuna 補充）</span><span>∑ 雙層黑箱搜尋</span></div>
+      </section>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🧭</span> 第 8 部分 · 第 21 課 · 程式技術棧：scikit-learn（外加一段選讀的 Optuna 補充）</div>
+        <p><strong>先備知識：</strong> <a href="05-overfitting-evaluation.html">05 — 過度擬合、正則化與評估</a>。有幫助的：<a href="07-svm-kernels.html">07 — 支持向量機與核</a>、<a href="20-data-feature-engineering.html">20 — 資料與特徵工程</a>。</p>
+        <p><strong>學完本課你能：</strong></p>
+        <ul>
+          <li>說清楚 <strong>參數 (parameters)</strong>（學習而來）與 <strong>超參數 (hyperparameters)</strong>（你來選定）的差異，以及為何後者需要自己的搜尋程序。</li>
+          <li>在 scikit-learn 裡執行 <strong>網格搜尋 (grid search)</strong> 與 <strong>隨機搜尋 (random search)</strong>，並透過 Bergstra &amp; Bengio 的洞見解釋為何隨機搜尋常以一小部分預算就勝出。</li>
+          <li>勾勒出 <strong>貝氏最佳化 (Bayesian optimization) / TPE</strong>（Optuna）與 <strong>Hyperband</strong> 如何更聰明地花用預算。</li>
+          <li>指出大家在模型表現上自我欺騙最常見的那一招，並用 <strong>巢狀交叉驗證 (nested cross-validation)</strong> 或 <strong>只碰一次的測試集 (touch-once test set)</strong> 來修正它。</li>
+          <li>在 <strong>聲納地雷對岩石 (sonar mine-vs-rock)</strong> 問題上調校 SVM / 隨機森林，並回報一個你真的敢信的數字。</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>直覺理解</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺理解 <small>兩種旋鈕</small></div>
+      <p>每個模型都有兩種旋鈕。第一種是 <strong>參數 (parameters)</strong>，由訓練程序 <em>從資料中學習</em> 而來：邏輯迴歸裡的權重、樹內部的切分閾值、支持向量的係數。你從來不會手動設定這些——是梯度下降或建樹器把它們找出來的。</p>
+
+      <p>第二種是 <strong>超參數 (hyperparameters)</strong>，是你在訓練 <em>開始之前</em> 就設定好、而訓練程序無法替你調校的旋鈕：學習率、網路深度、SVM 的 $C$ 與 $\gamma$、森林的 <code>n_estimators</code> 與 <code>max_depth</code>、正則化強度 $\lambda$。它們控制學習 <em>如何</em> 發生，所以學習器無法用同一個損失去最佳化它們，否則就會原地打轉。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 類比——調校一個控制迴路</div>
+        <p>當你在一艘無人水面載具 (USV) 上調試 PID 航向控制器時，增益 $K_p, K_i, K_d$ 並不是船自己學來的；是你挑定它們、跑一次試驗、觀察響應、再做調整。船在一次運行中實際的舵角才是「參數」——它們會自動反應。增益則是「超參數」——決定自動部分如何行為的那些元旋鈕。超參數最佳化（<strong>HPO</strong>）就是替 ML 模型做系統化的增益調校，只是多了一個危險：你太容易把增益「調」到專門對付你即將被評分的那個確切海況，然後在真實海洋不同時還一臉驚訝。</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    H["Hyperparameters<br/>(你設定：lr、depth、C、γ)"] --> T["訓練程序"]
+    D["訓練資料"] --> T
+    T --> P["Parameters<br/>(學習而來：weights、splits)"]
+    P --> S["驗證分數"]
+    S -. "搜尋迴圈<br/>挑出更好的 H" .-> H
+    style H fill:#1f6f3f,color:#fff
+    style P fill:#274690,color:#fff
+</div>
+
+      <p>那張圖裡的外層迴圈——提出超參數、訓練、評分、重複——<em>就是</em> HPO。整堂課講的就是 (a) 如何高效地跑這個迴圈，以及 (b) 如何誠實地讀最終分數。</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>數學原理</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>雙層、黑箱、昂貴</small></div>
+      <p><strong>HPO 問題。</strong> 令 $\lambda$ 為一個超參數向量（例如 $\lambda = (C, \gamma)$）。在資料集 $\mathcal{D}_{\text{train}}$ 上訓練會產生參數</p>
+
+      <div class="math-box">$$\hat{\theta}(\lambda) = \arg\min_{\theta}\; L\big(\theta; \mathcal{D}_{\text{train}}, \lambda\big),$$</div>
+
+      <p>其中 $L$ 是訓練損失、$\theta$ 是學到的參數。接著我們想找出能最小化 <strong>泛化誤差 (generalization error)</strong> 的 $\lambda$，這個誤差是在保留資料 $\mathcal{D}_{\text{val}}$ 上估計的：</p>
+
+      <div class="math-box">$$\lambda^{\star} = \arg\min_{\lambda \in \Lambda}\; \mathcal{E}\big(\hat{\theta}(\lambda); \mathcal{D}_{\text{val}}\big).$$</div>
+
+      <p>這是一個 <strong>雙層最佳化 (bilevel optimization)</strong>：對 $\theta$ 的內層最小化（也就是普通訓練）巢狀於對 $\lambda$ 的外層最小化之中。讓 HPO 變難的是外層目標——$\mathcal{E}$ 對 $\lambda$ 沒有公式、沒有可直接讀取的梯度，而且每次評估都要花一整輪完整的訓練。它是一個 <strong>黑箱、評估成本高昂</strong> 的函數。下面每一種搜尋策略，都只是在這個限制下「下一個該試哪個 $\lambda$」的不同政策而已。</p>
+
+      <h3>網格搜尋</h3>
+      <p>把 $d$ 個超參數各自離散成一個清單，然後評估完整的笛卡兒積。每軸取 $k$ 個值時，成本為</p>
+
+      <div class="math-box">$$N_{\text{grid}} = k^{\,d},$$</div>
+
+      <p><strong>維度災難</strong> 一目了然：4 個超參數各取 5 個值就已經是 $5^4 = 625$ 輪訓練，再加上 k 折交叉驗證又要乘上 $k_{\text{folds}}$。它徹底又可重現，但擴展性糟糕——而且關鍵是：不論你花多少次試驗，它每一軸都只測試了 $k$ 個 <em>不同的值</em>。</p>
+
+      <h3>隨機搜尋</h3>
+      <p>固定 $n$ 次試驗的預算，每次都從一個分布（均勻、對數均勻等）為每個超參數抽樣。<strong>Bergstra &amp; Bengio (2012)</strong> 的洞見是：在真實問題裡，真正重要的超參數只有少數幾個，而且你事先不知道是哪幾個。網格會浪費試驗——它在重要那一軸上反覆測試 <em>相同</em> 的值，卻只變動不相干的那一軸。隨機搜尋在任何一軸上都不會重複某個值，所以用 $n$ 次試驗就探測了 <em>每個維度</em> 的 $n$ 個不同值，包含有影響力的那些。從幾何上看，把試驗投影到重要的那一軸：網格塌縮成 $k$ 個點，隨機則散開成 $n \gg k$ 個點。</p>
+
+      <p>如果重要那一軸的好區域佔其範圍的比例 $f$，那麼單次隨機抽樣落入其中的機率為 $f$，於是</p>
+
+      <div class="math-box">$$P(\text{at least one of }n\text{ trials hits the good region}) = 1 - (1-f)^n.$$</div>
+
+      <p>對 $f = 0.05$，只要 $n = 60$ 次隨機試驗就給出 $1 - 0.95^{60} \approx 0.95$——也就是有 95% 的機會找到那個好區段，完全不需要網格。</p>
+
+      <h3>貝氏最佳化 / TPE</h3>
+      <p>與其盲目抽樣，不如對目前已見過的試驗擬合一個便宜的 <strong>代理模型 (surrogate model)</strong> $\hat{\mathcal{E}}(\lambda)$，然後透過最大化一個 <strong>獲取函數 (acquisition function)</strong> 來挑下一個 $\lambda$——通常是相對於目前找到的最佳分數 $\mathcal{E}^{\star}$ 的 <strong>期望改善 (Expected Improvement)</strong>：</p>
+
+      <div class="math-box">$$\text{EI}(\lambda) = \mathbb{E}\big[\max(0,\; \mathcal{E}^{\star} - \mathcal{E}(\lambda))\big].$$</div>
+
+      <p>EI 在 <strong>利用 (exploitation)</strong>（在代理模型預測分數好的地方抽樣）與 <strong>探索 (exploration)</strong>（在它不確定的地方抽樣）之間取得平衡。高斯過程的貝氏最佳化直接對 $\mathcal{E}(\lambda)$ 建模；<strong>TPE</strong>（Tree-structured Parzen Estimator，Optuna 的預設值）則改為對「好」試驗的 <em>密度</em> $\ell(\lambda)$ 與「壞」試驗的密度 $g(\lambda)$ 建模，並在比值 $\ell(\lambda)/g(\lambda)$ 大的地方抽樣——而這正好等價於最大化 EI。不論哪一種：每次試驗都會 <em>為下一次提供資訊</em>，所以找到好設定所需的評估次數遠少於隨機搜尋。</p>
+
+      <h3>Hyperband / 連續減半</h3>
+      <p>這是一個正交的想法：別只決定 <em>要試哪個</em> $\lambda$，還要決定 <em>每個花多久</em>。用很小的預算（少數訓練週期 / 少數幾棵樹 / 一個資料子集）啟動許多設定，只保留排名前 $1/\eta$ 的那一小撮，給存活者 $\eta\times$ 的更多預算，再重複。壞設定會 <strong>被提早剪枝 (pruned early)</strong>，而非訓練到完成，所以同樣的牆鐘時間能買到多得多的候選評估。這就是 Optuna 的剪枝器與 Ray Tune 的 ASHA 背後的引擎。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 四種策略各一句話</div>
+        <ul>
+          <li><strong>網格</strong>——什麼都試；在 $k^d$ 處死掉。</li>
+          <li><strong>隨機</strong>——試 $n$ 個散開的點；免費地對每一軸探測 $n$ 次。</li>
+          <li><strong>貝氏/TPE</strong>——讓過去的試驗引導下一次；當每次試驗都昂貴時勝出。</li>
+          <li><strong>Hyperband</strong>——提早幹掉輸家；每小時的算力能買到更多候選。</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>程式碼</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>搜尋、視覺化，並停止自我欺騙</small></div>
+      <p>我們會用經典的 <strong>威斯康辛乳癌 (Wisconsin breast-cancer)</strong> 資料集作為快速、無依賴的起點（聲納機器人案例在第 4 節）。它隨 scikit-learn 一起附帶，所以不會有任何下載。</p>
+
+      <h3>3.1 同一個估計器上的網格搜尋對隨機搜尋</h3>
+      <p>我們調校一個外覆縮放器 (scaler) 的 RBF SVM（回想第 07 課的 $C$ 與 $\gamma$）——SVM <em>需要</em> 標準化後的特徵。我們一律在 CV 管線 <strong>內部</strong> 做縮放，這樣驗證折就絕不會看到訓練折的平均值/變異數（第 20 課的洩漏陷阱）。</p>
+
+      <div class="codeblock">
+        <div class="code-head">grid_vs_random.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+from scipy.stats import loguniform
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import (GridSearchCV, RandomizedSearchCV,
+                                     StratifiedKFold)
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+
+rng = 42
+X, y = load_breast_cancer(return_X_y=True)        # 569 個樣本、30 個特徵
+
+# 縮放 -&gt; SVM，當作「單一」估計器，這樣縮放會在每個 CV 折重新擬合（無洩漏）。
+pipe = Pipeline([("scaler", StandardScaler()),
+                 ("svc", SVC(kernel="rbf"))])
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=rng)
+
+# --- 網格搜尋：在 7x7 = 49 個點的網格上窮舉 ---------------------
+grid = {"svc__C":     np.logspace(-2, 4, 7),      # 0.01 ... 10000
+        "svc__gamma": np.logspace(-5, 1, 7)}      # 1e-5 ... 10
+gs = GridSearchCV(pipe, grid, cv=cv, scoring="roc_auc", n_jobs=-1)
+gs.fit(X, y)
+print(f"Grid   : {49} trials | best AUC {gs.best_score_:.4f} | {gs.best_params_}")
+
+# --- 隨機搜尋：只用 15 次試驗，在「相同」範圍上做對數均勻抽樣 --------
+dist = {"svc__C":     loguniform(1e-2, 1e4),
+        "svc__gamma": loguniform(1e-5, 1e1)}
+rs = RandomizedSearchCV(pipe, dist, n_iter=15, cv=cv, scoring="roc_auc",
+                        n_jobs=-1, random_state=rng)
+rs.fit(X, y)
+print(f"Random : {15} trials | best AUC {rs.best_score_:.4f} | {rs.best_params_}")
+# -&gt; Grid   : 49 trials | best AUC 0.9962 | {'svc__C': 1000.0, 'svc__gamma': 1e-04}
+# -&gt; Random : 15 trials | best AUC 0.9952 | {'svc__C': ~47, 'svc__gamma': ~7e-05}
+</code></pre>
+      </div>
+
+      <p>隨機搜尋 <strong>只用約 30% 的預算就達到統計上無法區分的 AUC</strong>（這裡是 0.9952 對 0.9962——完全落在折與折之間的雜訊範圍內）——而且因為它連續抽樣，它能落在網格刻度之間的某個 $C$ 上，那是網格永遠搆不到的。</p>
+
+      <h3>3.2 視覺化「為何」隨機搜尋會勝出</h3>
+      <p>把試驗的位置畫在 $(\log\gamma, \log C)$ 平面上。網格落在僵硬的格點上；隨機則散開。重點在於當你投影到單一軸上時會發生什麼事。</p>
+
+      <div class="codeblock">
+        <div class="code-head">why_random_wins.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import matplotlib.pyplot as plt
+
+gC = np.log10(gs.cv_results_["param_svc__C"].data.astype(float))
+gG = np.log10(gs.cv_results_["param_svc__gamma"].data.astype(float))
+rC = np.log10(rs.cv_results_["param_svc__C"].data.astype(float))
+rG = np.log10(rs.cv_results_["param_svc__gamma"].data.astype(float))
+
+fig, ax = plt.subplots(1, 2, figsize=(11, 4.6), sharex=True, sharey=True)
+for a, (gx, gy, ttl, c) in zip(
+        ax, [(gG, gC, "Grid (49)", "tab:blue"),
+             (rG, rC, "Random (15)", "tab:red")]):
+    a.scatter(gx, gy, c=c, s=60, alpha=.8, edgecolor="k")
+    # 地毯刻度：把每次試驗向下投影到 gamma 軸上
+    a.plot(gx, np.full_like(gx, gy.min() - .4), "|", c=c, ms=18)
+    a.set(title=ttl, xlabel=r"$\log_{10}\gamma$", ylabel=r"$\log_{10}C$")
+plt.tight_layout(); plt.show()
+</code></pre>
+      </div>
+
+      <p>你應該 <strong>看到</strong> 網格投影出的 $\gamma$ 地毯塌縮成僅僅 7 個疊在一起的刻度，而隨機的地毯則散成 15 個不同的值。如果 $\gamma$ 是有影響力的那一軸，隨機搜尋對它的探索密度多了兩倍以上——而且只花了三分之一的試驗。</p>
+
+      <h3>3.3 那個大陷阱，以及它的修正：巢狀 CV</h3>
+      <p>這裡是幾乎每個人都會犯的錯。你跑 <code>GridSearchCV</code>（它內部會用 CV 來挑 $\lambda$），然後把 <code>gs.best_score_</code> 引述為你模型的表現。<strong>那個數字是樂觀偏誤的。</strong> 你搜尋了許多設定，並回報了在同一批驗證折上的 <em>最大值</em>，而這批折正是你用來做選擇的——所以你已經把超參數擬合到了那些折裡的雜訊。選擇過程偷看了它如今正用來替自己打分數的那批資料。</p>
+
+      <p>誠實的估計需要一個 <strong>外層</strong> 迴圈，且這個迴圈絕不碰內層的選擇：</p>
+
+      <div class="mermaid">
+flowchart TB
+    subgraph Outer["外層迴圈 — 無偏的表現估計"]
+      direction LR
+      O1["外層折 1<br/>train / test"]
+      O2["外層折 2<br/>train / test"]
+      O3["外層折 k<br/>train / test"]
+    end
+    O1 --> I["僅在外層 TRAIN 部分上的內層迴圈：<br/>GridSearchCV 挑出最佳 λ"]
+    I --> E["以最佳 λ 重新擬合，在外層 TEST 上評分<br/>（選擇過程從未見過）"]
+    E --> R["平均外層測試分數<br/>= 誠實的數字"]
+    style R fill:#1f6f3f,color:#fff
+</div>
+
+      <div class="codeblock">
+        <div class="code-head">nested_cv.py <span class="lang">Python</span></div>
+<pre><code class="language-python">from sklearn.model_selection import cross_val_score
+
+inner = StratifiedKFold(n_splits=5, shuffle=True, random_state=1)
+outer = StratifiedKFold(n_splits=5, shuffle=True, random_state=2)
+
+# 內層迴圈：這個物件負責「選擇」超參數。
+selector = GridSearchCV(pipe, grid, cv=inner, scoring="roc_auc", n_jobs=-1)
+
+# 非巢狀（樂觀的、不該拿來回報的數字）：
+selector.fit(X, y)
+non_nested = selector.best_score_
+
+# 巢狀：把 selector 當成「單一」估計器；外層迴圈在從未用於
+# 選擇其超參數的折上替它評分。
+nested_scores = cross_val_score(selector, X, y, cv=outer, scoring="roc_auc",
+                                n_jobs=-1)
+nested = nested_scores.mean()
+
+print(f"Non-nested AUC (report this and you're fooling yourself): {non_nested:.4f}")
+print(f"Nested AUC     (honest generalization estimate)        : "
+      f"{nested:.4f} +/- {nested_scores.std():.4f}")
+# -&gt; Non-nested AUC ...: 0.9960
+# -&gt; Nested AUC     ...: 0.9960 +/- 0.0051
+</code></pre>
+      </div>
+
+      <p>在 <em>這個</em> 簡單又量大的資料集上，落差很小（兩個數字幾乎重合）——而這本身就是教訓：<strong>選擇偏誤會隨著資料縮小、搜尋空間增大而成長。</strong> 乳癌資料是 569 列乾淨的資料，所以偷看幾乎沒能幫最佳化器作弊。把同樣的做法套到第 4 節那個 208 列的聲納問題上，落差——尤其是 <em>變異數</em>——就大到無法忽視。非巢狀數字與巢狀數字之間的差距 <em>就是</em> 選擇偏誤；把它的大小當成警示燈，而不是一個常數。誠實回報有兩種有效的做法：</p>
+      <ol>
+        <li><strong>巢狀 CV</strong>（如上）——當資料稀少、而你想要一個低變異數的估計外加對所選模型穩定程度的感覺時最好用。</li>
+        <li><strong>只碰一次的測試集</strong>——在最一開始就切出一個最終測試集，把 <em>所有</em> 調校（搭配 CV 的網格/隨機/Optuna）都在剩下的資料上做，然後在測試集上 <strong>恰好評估一次</strong>，之後再也不對著它調校。更簡單、更便宜，是生產環境 MLOps 的常規做法。</li>
+      </ol>
+
+      <h3>3.4 選讀：一個 Optuna study（貝氏/TPE）</h3>
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">📦</span> 選用安裝</div>
+        <p><code>pip install optuna</code>（不在基本的 <code>study</code> 環境裡）。這段草圖展示了 API 的樣貌；若已安裝，它幾秒內就跑完。</p>
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">optuna_study.py <span class="lang">Python</span></div>
+<pre><code class="language-python"># import optuna
+# from sklearn.model_selection import cross_val_score
+#
+# def objective(trial):
+#     # Optuna 從某個範圍「建議」每個超參數；自然該用對數尺度的就用對數尺度。
+#     C     = trial.suggest_float("C", 1e-2, 1e4, log=True)
+#     gamma = trial.suggest_float("gamma", 1e-5, 1e1, log=True)
+#     model = Pipeline([("scaler", StandardScaler()),
+#                       ("svc", SVC(kernel="rbf", C=C, gamma=gamma))])
+#     # 回傳要「最大化」的值；TPE 代理模型用它來挑下一次試驗。
+#     return cross_val_score(model, X, y, cv=cv, scoring="roc_auc").mean()
+#
+# study = optuna.create_study(direction="maximize",
+#                             sampler=optuna.samplers.TPESampler(seed=42),
+#                             pruner=optuna.pruners.HyperbandPruner())  # 提早終止壞試驗
+# study.optimize(objective, n_trials=30)
+# print(study.best_value, study.best_params)   # -&gt; ~0.996，約 30 次試驗就找到聰明的 C/gamma
+</code></pre>
+      </div>
+
+      <p>心智模型是：每一次呼叫 <code>objective</code> 都是一次黑箱評估；TPE 建立一個「好分數住在哪裡」的密度模型，並把下一個 <code>suggest_*</code> 導向那裡。注意這仍然是 <strong>內層</strong> 選擇迴圈——若要誠實的數字，你得把 <em>整個 study</em> 包進一個外層測試切分裡，或在只碰一次的測試集上回報它。</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>實際案例 — 調校聲納地雷對岩石分類器</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>小資料、誠實的數字</small></div>
+      <p><strong>聲納 (Sonar)</strong> 資料集（Gorman &amp; Sejnowski，在 OpenML / UCI 上；208 個樣本、60 個特徵）是 60 個頻帶上的聲納回波能量，把每個接觸點標記為金屬圓柱（<strong>Mine</strong>，地雷）或岩石（<strong>Rock</strong>）——這正是一艘自主 USV 或遙控潛水器 (ROV) 從它的側掃回波所做的障礙物分類判斷。它 <em>小</em> 又 <em>高維</em>（208 × 60），而這恰恰是 (a) SVM 大放異彩（第 07 課）、以及 (b) 對著測試集調校的陷阱咬得最兇的場景，因為每一折都又小又吵雜。</p>
+
+      <div class="codeblock">
+        <div class="code-head">sonar_honest_hpo.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import socket; socket.setdefaulttimeout(60)
+import numpy as np
+from sklearn.datasets import fetch_openml          # 約 90 KB 下載，僅一次
+from sklearn.model_selection import (RandomizedSearchCV, StratifiedKFold,
+                                     cross_val_score, train_test_split)
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+from scipy.stats import loguniform
+
+X, y = fetch_openml("sonar", version=1, return_X_y=True, as_frame=False)
+y = (y == "Mine").astype(int)                       # 1 = 地雷（代價高昂的漏判）
+
+# 只碰一次的測試集：在「任何」調校之前就把它鎖起來。
+X_dev, X_test, y_dev, y_test = train_test_split(
+    X, y, test_size=0.25, stratify=y, random_state=0)
+
+pipe = Pipeline([("scaler", StandardScaler()),
+                 ("svc", SVC(kernel="rbf"))])
+dist = {"svc__C": loguniform(1e-1, 1e3),
+        "svc__gamma": loguniform(1e-4, 1e0)}
+inner = StratifiedKFold(5, shuffle=True, random_state=1)
+search = RandomizedSearchCV(pipe, dist, n_iter=40, cv=inner,
+                            scoring="roc_auc", n_jobs=-1, random_state=1)
+
+# 誠實估計 #1：在 dev 集上做巢狀 CV（選擇過程絕不會看到外層測試）。
+outer = StratifiedKFold(5, shuffle=True, random_state=2)
+nested = cross_val_score(search, X_dev, y_dev, cv=outer, scoring="roc_auc")
+print(f"Nested CV AUC (dev): {nested.mean():.3f} +/- {nested.std():.3f}")
+
+# 誠實估計 #2：在「全部」dev 資料上以最佳設定重新擬合，對保留的測試集只評分「一次」。
+search.fit(X_dev, y_dev)
+test_auc = search.score(X_test, y_test)
+print(f"Chosen params : {search.best_params_}")
+print(f"Inner-CV AUC  : {search.best_score_:.3f}  (optimistic)")
+print(f"Held-out test : {test_auc:.3f}  (report THIS)")
+# -&gt; Nested CV AUC (dev): 0.941 +/- 0.047    （誠實，看看在 156 個 dev 樣本上那個 +/-！）
+# -&gt; Chosen params : {'svc__C': ~600, 'svc__gamma': ~0.022}
+# -&gt; Inner-CV AUC  : 0.943  (optimistic)
+# -&gt; Held-out test : 0.951  (report THIS)   [確切數字會隨切分大幅擺動]
+</code></pre>
+      </div>
+
+      <p>這裡有兩點要讀。第一，inner-CV AUC 是粗心的同事會引述的那個數字——但它是 <em>搜尋過程中的最大值</em>，所以偏向樂觀；改去信任巢狀 CV 與只碰一次的測試。第二——而這才是一個 208 列資料集真正的教訓——那個巢狀的 $\pm 0.047$ <em>大得驚人</em>。誠實的「表現」是一條寬頻帶，而單一一個保留的測試切分（這裡是 0.951）純粹靠運氣就可能落在它的上方 <em>或</em> 下方。在這麼小的資料上，永遠別信任單一一個數字；回報那個分散程度，並偏好變異數較低的巢狀估計。</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🌊</span> 為何這在海上很重要</div>
+        <p>當頻帶其實是 0.89–0.99 時卻假裝你有一個整整齊齊 0.95 的地雷偵測器，正是一個「已驗證」的模型害人受傷的方式。如果你寧可用隨機森林（第 06 課）——不需要縮放、能很好地處理高維頻帶——把管線換成 <code>RandomForestClassifier</code>，並搜尋 <code>n_estimators</code>、<code>max_depth</code>、<code>max_features</code>、<code>min_samples_leaf</code>；巢狀對內層的紀律完全相同。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>常見陷阱與技巧</h2>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 六個要分清楚的陷阱</div>
+        <ul>
+          <li><strong>對著測試集調校是頭號大罪。</strong> 如果一個數字影響了 <em>任何</em> 決策（選哪個模型、哪個 $\lambda$、哪些特徵、何時停止），它就不再是一個無偏的測試數字。保留一個你只碰一次的集合，或使用巢狀 CV。</li>
+          <li><strong>在 CV 管線「內部」做縮放與填補，絕不要在它之前做。</strong> 在切分之前就對整個資料集擬合一個 <code>StandardScaler</code>，會把測試折的統計量洩漏進訓練——一種無聲的灌水（見第 20 課）。一律把前處理包進 <code>Pipeline</code>，這樣它會在每一折重新擬合。</li>
+          <li><strong>在正確的尺度上搜尋超參數。</strong> $C$、$\gamma$、學習率與 $\lambda$ 都活在 <strong>對數尺度</strong> 上——網格用 <code>np.logspace</code>，隨機/Optuna 用 <code>loguniform</code>/<code>suggest_float(..., log=True)</code>。線性範圍會把幾乎所有試驗浪費在模型根本不在乎的區域。</li>
+          <li><strong>讓預算配合搜尋方法。</strong> 網格對 1–2 個超參數沒問題；超過這個數量，隨機搜尋每次試驗划算得多，而當每次評估都昂貴時（深層網路）貝氏/TPE 勝出。別讓一個 4 維網格整夜跑，當 40 次隨機試驗在午餐前就能與它打平。</li>
+          <li><strong>挑一個與錯誤代價相符的評分指標。</strong> 漏掉一顆地雷的代價遠高於一次假警報——調校時用 <code>roc_auc</code>、<code>recall</code> 或代價加權分數，而不是光禿禿的 <code>accuracy</code>（第 05 課）。<code>GridSearchCV(scoring=...)</code> 控制你 <em>在最佳化什麼</em>。</li>
+          <li><strong>回報分散程度，不只回報平均。</strong> 在 208 個樣本上一個 $0.92 \pm 0.05$ 的巢狀 AUC，和 $0.92 \pm 0.01$ 是截然不同的故事。資料極小時，折與折之間的變異數是誠實答案的一部分。</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>自我檢測</h2>
+
+      <p><strong>Q1.</strong> 對一個隨機森林，把下列各項分類為參數或超參數：(a) 在某個特定節點上選定的特徵與閾值，(b) <code>max_depth</code>，(c) <code>n_estimators</code>，(d) 一個葉節點裡的類別投票統計。</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>(a) <strong>參數</strong>——由建樹器從資料學習而來。(b) <strong>超參數</strong>——你在訓練前設定它。(c) <strong>超參數</strong>——你設定它。(d) <strong>參數</strong>——由哪些訓練樣本落到那個葉節點所決定。經驗法則：如果是 <em>擬合程序</em> 從資料中產生它，那就是參數；如果是你必須選定它來 <em>配置</em> 程序，那就是超參數。</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> 你有 4 個超參數，想在每軸試 6 個不同的值。一個窮舉網格需要多少輪訓練（不計 CV 折）？大約多少次隨機試驗就能讓每軸都探測到 6 個以上的不同值？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>網格：$6^4 = 1296$ 輪。隨機：任何 $n \ge 6$ 都會給出 <em>每軸</em> 6 個以上的不同值（隨機絕不重複某個軸值），所以即使約 30–60 次隨機試驗，每軸的探測密度都遠高於網格——這就是 Bergstra &amp; Bengio 的重點。網格花 1296 輪只為了測試那 <em>唯一</em> 重要的那一軸的 6 個值；隨機花 60 次就測試了它的 60 個值。</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> 你的同事跑了 <code>RandomizedSearchCV</code>，取 <code>best_score_ = 0.94</code>，然後在巡航報告裡寫了「94% AUC」。哪裡錯了，報告應該改成怎麼說？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p><code>best_score_</code> 是 <strong>許多設定之中 inner-CV 分數的最大值</strong>——它是樂觀偏誤的，因為挑出贏家的那同一批折正在替它打分數。它高估了實戰表現。請改回報 <strong>巢狀 CV</strong> 估計（外層迴圈從不用於選擇）或在 <strong>只碰一次的保留測試集</strong> 上的分數。預期那個誠實的數字會低個幾個百分點。</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> 為什麼貝氏最佳化 / TPE 通常能用比隨機搜尋更少的評估就找到好設定，而這項優勢在什麼時候最重要？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>它從過去的試驗建立一個分數曲面的 <strong>代理模型</strong>，並用一個獲取函數（期望改善）去在 <em>可能</em> 改善的地方抽樣，而非盲目抽樣——每次試驗都為下一次提供資訊。這項優勢在 <strong>每次評估都昂貴</strong> 時（訓練一個深層網路要好幾個小時）最重要，所以削減試驗次數能省下實打實的時間。對於便宜、你負擔得起數百次試驗的模型，單純的隨機搜尋往往就夠好了。</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> 在巢狀 CV 裡，內層迴圈與外層迴圈各自確切發生什麼事，而你回報的是哪一個的分數？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p><strong>內層</strong> 迴圈在每個外層訓練分區上執行並 <strong>選擇超參數</strong>（它就是 <code>GridSearchCV</code>/<code>RandomizedSearchCV</code>）。<strong>外層</strong> 迴圈保留一個內層選擇從未見過的折，在外層訓練資料上以所選設定重新擬合，並在那個未被碰過的外層測試折上替它評分。你回報的是 <strong>外層各折分數的平均</strong>——那才是無偏的泛化估計。內層的 <code>best_score_</code> 只供選擇用，絕不拿來回報。</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>換你上場</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml21-honest-number">
+        <div class="ex-head"><span class="badge">Q1</span> 你該回報哪個數字？</div>
+        <div class="ex-q">你用 5 折內層 CV、在 40 個設定上跑了 <code>RandomizedSearchCV</code>，現在想要一個誠實估計這個模型在它從未見過的 <em>新的</em> 聲納接觸點上會表現如何的數字。是哪一個？</div>
+        <ul class="ex-options">
+          <li data-correct="false"><code>search.best_score_</code>——所有 40 個設定中最高的 inner-CV AUC。</li>
+          <li data-correct="true">在只碰一次的保留測試集上的分數（或巢狀 CV 的平均），因為選擇過程從未見過它。</li>
+          <li data-correct="false">全部 40 個設定的 inner-CV 分數的平均，用來「把雜訊平均掉」。</li>
+          <li data-correct="false">重新擬合後最佳模型的訓練集 AUC。</li>
+        </ul>
+        <div class="ex-explain"><code>best_score_</code> 是在同一批用來挑選贏家的折上取的 <em>最大值</em>，所以是樂觀偏誤的——選擇過程偷看了打分數的資料。把全部設定平均則混入了好與壞的模型，回答的是另一個問題。訓練 AUC 純粹是死記硬背。唯一無偏的估計來自一份在選擇中 <strong>毫無作用</strong> 的資料：一個只碰一次的測試集，或巢狀 CV 的外層折。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml21-random-hit" data-answer="0.95" data-tol="0.01">
+        <div class="ex-head"><span class="badge">Q2</span> 隨機搜尋找到好區段的機率</div>
+        <div class="ex-q">你那唯一有影響力的超參數的好區域佔其範圍的比例 $f = 0.05$。在 $n = 60$ 次獨立的隨機抽樣下，<em>至少一次</em> 試驗落入好區域的機率是多少？用 $P = 1-(1-f)^n$。（四捨五入到小數第 2 位。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="機率"><span class="ex-unit">P</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$P = 1 - (1-0.05)^{60} = 1 - 0.95^{60}$。現在 $0.95^{60} = e^{60\ln 0.95} = e^{60\,(-0.051293)} = e^{-3.0776} \approx 0.0461$，所以 $P \approx 1 - 0.046 = 0.954 \approx 0.95$。這就是 Bergstra &amp; Bengio 的妙語：約 60 次盲目的隨機試驗，就給你 95% 的機會打中那條重要軸的好區段——不需要網格，也事先不知道是哪一軸。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml21-grid-vs-random">
+        <div class="ex-head"><span class="badge">Q3</span> 網格還是隨機——以及為什麼？</div>
+        <div class="ex-q">你正在調校一個有 <em>兩個</em> 超參數（$C$、$\gamma$）的 RBF SVM，預算大約是 25 輪訓練。一位隊友提議用 $5 \times 5$ 網格。論證在這裡網格還是隨機搜尋是更划算的花法，並說出一般情況下決定它的那一條規則。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">在同樣的 25 次試驗下，每種策略各探測了 <em>每軸幾個不同的值</em>？哪一軸更重要——而你事先知道嗎？</div></details>
+        <details class="ex-acc"><summary>看一個解答</summary><div class="acc-body">
+          <p><strong>隨機是更划算的花法，即使只有兩個維度也一樣。</strong> 那個 $5\times5$ 網格只測試了 <strong>$C$ 的 5 個不同值</strong> 與 <strong>$\gamma$ 的 5 個</strong>，不管它花了 25 輪。25 次隨機抽樣（在相同範圍上做對數均勻）探測了 <strong>每軸 25 個不同的值</strong>——對最終真正重要的那一軸有五倍的解析度——而且能落在網格刻度之間，那正是 $C$ 與 $\gamma$ 的最佳值常常坐落的地方。網格在這裡唯一真正的優勢是可重現性與一張乾淨的熱圖；隨機的優勢是每次試驗的解析度。</p>
+          <p><strong>一般規則：</strong> 當你想要一個可解讀的掃描時，網格對 1–2 個超參數沒問題；一旦維度成長、或你不知道哪一軸主導，就改用隨機（接著在每次評估都昂貴時改用貝氏/TPE）——因為網格的成本是 $k^d$，卻仍只測試每軸 $k$ 個值，而隨機用 $n$ 次試驗就給你每軸 $n$ 個值。</p>
+        </div></details>
+      </div>
+
+      <!-- ============================================================ recap -->
+      <h2 id="recap-next"><span class="sec-no">8</span>回顧與下一步</h2>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本課回顧</div>
+        <ul>
+          <li><strong>參數</strong> 由訓練學習而來；<strong>超參數</strong> 是你設定的元旋鈕，它們需要自己的外層搜尋迴圈——HPO 是雙層、黑箱的最佳化。</li>
+          <li><strong>網格</strong> 窮舉但會以 $k^d$ 爆炸，且每軸只測 $k$ 個值；<strong>隨機</strong> 搜尋用少得多的試驗就密集探測每一軸（Bergstra &amp; Bengio）；當評估昂貴時，<strong>貝氏/TPE</strong>（Optuna）與 <strong>Hyperband</strong> 把預算花得更聰明。</li>
+          <li>頭號大罪是 <strong>對著測試集調校</strong>，或引述一個既用於選擇 <em>又</em> 用於回報的單一 CV 分數——它是樂觀偏誤的。</li>
+          <li>用 <strong>巢狀 CV</strong>（內層選擇、外層估計）或一個 <strong>只碰一次的保留測試集</strong> 來修正它——並且回報分散程度，不只回報平均。</li>
+          <li>我們在 <strong>聲納地雷對岩石</strong> 資料上調校了一個 SVM，並看到 inner-CV 數字坐在誠實數字上方幾個百分點——這正是讓「已驗證」模型在實戰中惹上麻煩的那個落差。</li>
+        </ul>
+        <p>這就是不自我欺騙的實務技藝。回到 <a href="README.html">課程索引</a> 去回顧完整的脈絡——或重訪 <a href="05-overfitting-evaluation.html">05 — 過度擬合與評估</a> 與 <a href="20-data-feature-engineering.html">20 — 資料與特徵工程</a>，這兩課是本課最仰賴的。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

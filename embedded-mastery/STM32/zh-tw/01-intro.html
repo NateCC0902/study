@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>從 AVR 到 ARM：Cortex-M、記憶體映射與工具鏈 — Embedded Mastery</title>
+<link rel="stylesheet" href="../../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../../assets/styles.css">
+</head>
+<body class="track-stm32" data-course="embedded" data-track="stm32" data-chapter="01-intro">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">STM32 · 第 01 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">STM32 進度 · 第 01 章 · 入門（假設你已完成 Arduino 進度）</div>
+        <h1>從 AVR 到 ARM：Cortex-M、記憶體映射與工具鏈</h1>
+        <p>你已經知道一顆 8 位元 AVR 如何讓 LED 閃爍。現在我們要升級到一顆 32 位元的 ARM Cortex-M 核心，它的執行速度快上一個數量級，而且它的周邊（peripheral）能在 <em>CPU 休眠時</em>繼續工作。物理原理相同，但這是一台大得多的機器。我們會圍繞著一張 <strong>32 位元記憶體映射（memory map）</strong>，以及對它燒錄程式的工具鏈，重新建立你的心智模型——然後用兩種方式讓 LED 閃爍，親眼看看「函式庫帶來的舒適」到底讓你付出了什麼代價。</p>
+        <div class="meta">
+          <span>⏱ 約 45 分鐘</span><span>🧠 心智模型</span><span>🗺️ 記憶體映射</span><span>🔧 工具鏈</span><span>⚡ 暫存器層級的閃爍</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="why-step-up"><span class="sec-no">1</span>為什麼要離開 8 位元 AVR 的舒適圈？</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先把整體圖像建立起來</small></div>
+      <p>ATmega328P 一直為你服務得很好：8 位元、16 MHz、2 KB 的 SRAM，外加一把周邊。它之所以是個絕佳的教學對象，正是因為它夠小，小到你能整顆裝進腦袋裡。但只要一個專案想要 USB、LCD、音訊、馬達控制或一套 TCP/IP 協定堆疊，328P 的時脈週期與 RAM 早在腳位用完之前就會耗盡。你需要一台更大的機器——而業界的答案就是 <strong>ARM Cortex-M</strong> 系列，由意法半導體（ST Microelectronics）封裝為 <strong>STM32</strong>。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話模型</div>
+        <p>一顆 STM32 與你 Arduino 上的 MCU 是同一個概念——單一晶片內含 CPU、記憶體與周邊——但它建構在一顆 <strong>32 位元 ARM 核心</strong>上，執行速度快上 4–10 倍，記憶體與周邊多上 10–100 倍，而且這些周邊聰明到能在 <em>不用</em> CPU 的情況下搬移資料。</p>
+      </div>
+
+      <p>具體來說，把 Uno 拿來和兩塊你只要花幾美元就能買到的 STM32 開發板比較：<strong>STM32F103C8T6</strong>（「Blue Pill」，一顆 Cortex-M3）與 <strong>STM32F411CEU6</strong>（「Black Pill」，一顆帶浮點運算單元的 Cortex-M4）。數字會說明一切。</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>資源</th><th>ATmega328P（Uno）</th><th>STM32F103（Blue Pill）</th><th>STM32F411（Black Pill）</th></tr></thead>
+        <tbody>
+          <tr><td>核心</td><td>8 位元 AVR</td><td>32 位元 Cortex-M3</td><td>32 位元 Cortex-M4 + FPU</td></tr>
+          <tr><td>最高時脈</td><td><code>16 MHz</code></td><td><code>72 MHz</code></td><td><code>100 MHz</code></td></tr>
+          <tr><td>Flash</td><td><code>32 KB</code></td><td><code>64 KB</code></td><td><code>512 KB</code></td></tr>
+          <tr><td>SRAM</td><td><code>2 KB</code></td><td><code>20 KB</code></td><td><code>128 KB</code></td></tr>
+          <tr><td>DMA 通道</td><td>無</td><td>7</td><td>16（2 個控制器）</td></tr>
+          <tr><td>硬體浮點</td><td>無</td><td>無</td><td>有（單精度）</td></tr>
+          <tr><td>價格（單顆）</td><td>約 $2（晶片）</td><td>約 $2（開發板）</td><td>約 $4（開發板）</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 真正的升級是 DMA</div>
+        <p>更多的兆赫（MHz）固然不錯，但真正改變遊戲規則的是 <strong>DMA（直接記憶體存取，Direct Memory Access）</strong>：一個專屬引擎，能 <em>自主地</em> 在周邊與記憶體之間複製位元組。在 AVR 上，讀取 1000 個 ADC 取樣意味著 CPU 必須一個一個盯著。在 STM32 上，你只要啟動一個 DMA 通道，CPU 就能空出來做其他工作——或是進入休眠以省電——而取樣會在它背後源源不絕地流進緩衝區。這正是一顆 100 MHz 晶片能勝過其時脈數字的原因。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="cortex-m-families"><span class="sec-no">2</span>Cortex-M 家族與 STM32 產品線</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>一套核心架構，多種尺寸</small></div>
+      <p>「Cortex-M」並不是某一顆晶片——它是 ARM 提供的一個 <strong>可授權的 CPU 核心設計</strong>。ST 買下這個核心，然後在它周圍包上自家的記憶體與周邊，做成一顆 STM32。知道裡面坐著哪一顆 Cortex-M，就能告訴你這顆晶片的指令集、是否帶有浮點運算單元，以及它大概多少錢。</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>核心</th><th>特點</th><th>FPU？</th><th>典型角色</th></tr></thead>
+        <tbody>
+          <tr><td><code>Cortex-M0 / M0+</code></td><td>最小、最便宜、功耗最低</td><td>無</td><td>微型低成本 MCU（STM32F0、L0）</td></tr>
+          <tr><td><code>Cortex-M3</code></td><td>完整 Thumb-2，經典的主力</td><td>無</td><td>STM32F1（Blue Pill）、F2</td></tr>
+          <tr><td><code>Cortex-M4</code></td><td>M3 + DSP 指令 + 選配 FPU</td><td>單精度</td><td>STM32F4、L4——控制與訊號處理</td></tr>
+          <tr><td><code>Cortex-M7</code></td><td>超純量、快取、非常快</td><td>單 + 雙精度</td><td>STM32F7、H7——重度運算</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p>ST 把自家晶片分成多條 <strong>產品線（line）</strong>，每條產品線建構在所選的核心上，並針對某個用途調校。一旦看出規律，命名其實很有邏輯：</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>STM32 產品線</th><th>核心</th><th>設計目的</th></tr></thead>
+        <tbody>
+          <tr><td><code>STM32F0</code></td><td>M0</td><td>入門級、對成本敏感</td></tr>
+          <tr><td><code>STM32F1</code></td><td>M3</td><td>主流通用型（F103 = Blue Pill）</td></tr>
+          <tr><td><code>STM32F4</code></td><td>M4 + FPU</td><td>高效能、DSP、控制（F401/F411）</td></tr>
+          <tr><td><code>STM32F7 / H7</code></td><td>M7</td><td>極致效能、圖形、音訊</td></tr>
+          <tr><td><code>STM32L0/L4/L5</code></td><td>M0+/M4/M33</td><td>超低功耗、電池供電裝置</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 解讀料號</div>
+        <p>在 <code>STM32F411CEU6</code> 中：<code>F4</code> = 產品線，<code>11</code> = 子家族，<code>C</code> = 48 腳，<code>E</code> = 512 KB Flash，<code>U</code> = QFN 封裝，<code>6</code> = −40…85 °C 溫度等級。一旦你知道這些欄位的含義，就能一眼解碼任何一個 STM32 料號——而且資料手冊的第一頁就會把它們全部列出來。</p>
+      </div>
+
+      <p>整個進度中，我們會固定以兩顆晶片作為貫穿全程的範例：<strong>STM32F103</strong>（便宜、M3、最具代表性的第一顆 STM32）與 <strong>STM32F4</strong> 家族（M4 + FPU、快速、我們的主力）。你學到的一切都能在整條產品線間移植——暫存器名稱與記憶體映射保持得相當一致。</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="memory-map"><span class="sec-no">3</span>32 位元記憶體映射</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>一個平坦的 4 GB 位址空間</small></div>
+      <p>這是從 AVR 跳到 ARM 時最重要的一個觀念。AVR 使用 <strong>哈佛（Harvard）</strong>架構：程式與資料活在 <em>分開</em> 的位址空間，這也是為什麼會有 <code>PROGMEM</code> 這類技巧存在。Cortex-M 翻轉為 <strong>單一、平坦的 32 位元位址空間</strong>，由所有東西共享——Flash、RAM、周邊，以及核心自己的控制暫存器，全都坐落在 <em>同一</em> 張映射的不同位址上。</p>
+
+      <p>一個 32 位元指標可以命名 <span>$2^{32}$</span> 個不同的位元組位址，這恰好是 4 GiB 的位址空間，即使這顆晶片實際上只填入其中幾百 KB：</p>
+
+      <div class="math-box">
+      $$ 2^{32} \text{ bytes} = 4{,}294{,}967{,}296 \text{ bytes} = 4\,\text{GiB} = \texttt{0x0000\,0000} \;\text{…}\; \texttt{0xFFFF\,FFFF} $$
+      </div>
+
+      <p>ARM 為這 4 GiB 定義了一個標準佈局，因此每一顆 Cortex-M 晶片用起來都很熟悉。你必須牢記的四個區域：</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>區域</th><th>基底位址</th><th>這裡住著什麼</th></tr></thead>
+        <tbody>
+          <tr><td>Flash（程式碼）</td><td><code>0x0800 0000</code></td><td>你的程式、向量表、常數</td></tr>
+          <tr><td>SRAM（資料）</td><td><code>0x2000 0000</code></td><td>變數、堆疊（stack）、堆積（heap）——揮發性</td></tr>
+          <tr><td>周邊</td><td><code>0x4000 0000</code></td><td>GPIO、計時器、UART、ADC… 的暫存器區塊</td></tr>
+          <tr><td>核心（私有）</td><td><code>0xE000 0000</code></td><td>NVIC、SysTick、SCB——Cortex-M 本身</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 一切都是位址</div>
+        <p>在 Cortex-M 上，沒有像 AVR 的 <code>OUT</code> 那種特殊的「I/O 指令」。一個周邊暫存器 <em>就只是</em> 位於 <code>0x4000 0000</code> 區域某個位址上的記憶體。要點亮一顆 LED，你就真的是把一個 32 位元的值寫到某個數字位址。整台機器都能透過同一種指標型別觸及。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>基底 + 偏移 = 暫存器位址</small></div>
+      <p>每個周邊都佔據一段連續的區塊，從一個 <strong>基底位址（base address）</strong>開始。在那個區塊內，每個暫存器坐落在參考手冊定義的固定 <strong>偏移（offset）</strong>上。任何暫存器的位址就只是：</p>
+
+      <div class="math-box">
+      $$ \text{addr}_{\text{reg}} = \text{base}_{\text{periph}} + \text{offset}_{\text{reg}} $$
+      </div>
+
+      <p>來算一個具體的例子。在 STM32F4 上，<strong>GPIO 埠 A</strong> 掛在 AHB1 匯流排上，基底位址為 <code>0x4002 0000</code>。<strong>輸出資料暫存器</strong>（<code>ODR</code>）——那個位元直接對應到腳位電位的暫存器——坐落在埠內偏移 <code>0x14</code> 處。所以：</p>
+
+      <div class="math-box">
+      $$ \texttt{GPIOA->ODR} = \underbrace{\texttt{0x4002\,0000}}_{\text{base}} + \underbrace{\texttt{0x14}}_{\text{offset}} = \texttt{0x4002\,0014} $$
+      </div>
+
+      <p>用十六進位做這個加法毫不費力：低位的 nibble <code>0x0 + 0x14 = 0x14</code>，上面的部分原封不動。你在程式裡寫的 CMSIS 結構 <code>GPIOA->ODR</code>，在編譯期就會被解析成恰好這個常數。編譯器替你做了「基底加偏移」的算術，讓你不必記得 <code>0x40020014</code>——但現在你知道它是從哪裡來的了。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——Flash 在 0x0800 0000，不在 0x0</div>
+        <p>映射最底端（<code>0x0000 0000</code>）是一個 <em>別名（alias）</em>區域，其內容取決於開機腳位（boot pins）——它通常會鏡射 Flash，好讓 CPU 能在那裡擷取它的第一條指令。但你程式碼 Flash 的 <strong>真正、固定</strong> 位址是 <code>0x0800 0000</code>。連結（link）與推理 Flash 時，永遠以 <code>0x0800 0000</code> 為準；把 <code>0x0</code> 別名只當成開機時的方便手段就好。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="registers-are-memory"><span class="sec-no">4</span>暫存器就是記憶體：<code>volatile</code> 與 CMSIS</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>每一行都要讀</small></div>
+      <p>如果一個暫存器就只是位於已知位址的記憶體，那你用一個普通的指標就能觸及它。以下先是用最原始的方式存取 GPIOA 的 <code>ODR</code>，接著是你實際上會採用的寫法：</p>
+
+      <div class="codeblock">
+        <div class="code-head">raw_register.c <span class="lang">C（裸機，bare metal）</span></div>
+<pre><code class="language-c">#include &lt;stdint.h&gt;
+
+// 我們推導出來的位址：GPIOA 基底 0x40020000 + ODR 偏移 0x14。
+// 'volatile' 是必要的：它告訴編譯器這塊記憶體會自行改變
+// （硬體！），所以絕對不可以把這個值快取在 CPU 暫存器裡，
+// 也不可以把存取最佳化掉。
+#define GPIOA_ODR  (*(volatile uint32_t *)0x40020014u)
+
+void set_pin5_high(void) {
+    GPIOA_ODR |= (1u &lt;&lt; 5);   // 設定位元 5 → 把 PA5 拉高
+}
+</code></pre>
+      </div>
+
+      <p>到處寫魔術數字（magic number）很容易出錯，所以 ARM 與 ST 提供了 <strong>CMSIS</strong>（Cortex 微控制器軟體介面標準，Cortex Microcontroller Software Interface Standard）：一組標頭檔，把每個周邊描述成一個 C <code>struct</code>，其成員 <em>恰好</em> 對齊暫存器的偏移。你只要 include 一個裝置標頭檔，位址的事就替你搞定了：</p>
+
+      <div class="codeblock">
+        <div class="code-head">cmsis_register.c <span class="lang">C（CMSIS）</span></div>
+<pre><code class="language-c">#include "stm32f4xx.h"   // ST 的 CMSIS 裝置標頭檔
+
+// GPIO_TypeDef 是一個佈局與硬體相符的 struct：
+//   typedef struct {
+//     volatile uint32_t MODER;   // 偏移 0x00
+//     volatile uint32_t OTYPER;  // 偏移 0x04
+//     volatile uint32_t OSPEEDR; // 偏移 0x08
+//     volatile uint32_t PUPDR;   // 偏移 0x0C
+//     volatile uint32_t IDR;     // 偏移 0x10
+//     volatile uint32_t ODR;     // 偏移 0x14  ← 就在這裡
+//     volatile uint32_t BSRR;    // 偏移 0x18
+//     ...
+//   } GPIO_TypeDef;
+// 並且：#define GPIOA ((GPIO_TypeDef *) 0x40020000UL)
+
+void set_pin5_high(void) {
+    GPIOA-&gt;ODR |= (1u &lt;&lt; 5);   // 與原始版本完全相同，但更易讀
+}
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 為什麼 <code>volatile</code> 不容妥協</div>
+        <p>一個普通變數住在 RAM 裡，而且只有你的程式碼會改它，所以編譯器可能把它留在 CPU 暫存器中，並略過多餘的讀取。但一個 <em>硬體</em> 暫存器可能在你的兩條指令之間就改變了（有人按了按鈕；某個位元組到達了），而且寫它會有 <em>副作用</em>（某個腳位動了）。<code>volatile</code> 強迫編譯器為 <strong>每一次</strong> 存取都產生真正的載入／儲存（load/store），並依程式順序執行。忘了它，你那個輪詢 <code>USART-&gt;SR</code> 的迴圈就可能永遠卡死，因為編譯器「以為」這個值永遠不會變。CMSIS 已經替你把每個暫存器標上 <code>volatile</code>——但你必須理解為什麼。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="toolchains"><span class="sec-no">5</span>工具鏈與 HAL / LL / CMSIS 的抉擇</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>三種抽象層級</small></div>
+      <p>在 Arduino 上，寫程式只有一種方式：Arduino core。STM32 給你的是一個 <em>光譜</em>，從「點一點 GUI 就替你生成程式碼」一路往下到「自己戳暫存器」。標準工具是 <strong>STM32CubeIDE</strong>（一個免費、以 Eclipse 為基礎的 IDE），搭配 <strong>STM32CubeMX</strong>，一個圖形化設定器，讓你用點選的方式配置腳位與時脈，然後生出一個專案。有意思的抉擇在於：你的程式碼要坐在哪一個 <em>抽象層</em> 上：</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>抽象層</th><th>它是什麼</th><th>易用度</th><th>掌控度</th><th>程式碼大小</th><th>速度</th></tr></thead>
+        <tbody>
+          <tr><td><strong>HAL</strong>（硬體抽象層，Hardware Abstraction Layer）</td><td>可移植的高階函式（<code>HAL_GPIO_TogglePin</code>）</td><td>最高</td><td>最低</td><td>最大</td><td>最慢</td></tr>
+          <tr><td><strong>LL</strong>（低階層，Low-Layer）</td><td>輕薄的 inline 包裝，與暫存器約 1:1 對應</td><td>中等</td><td>高</td><td>小</td><td>快</td></tr>
+          <tr><td><strong>CMSIS／裸暫存器</strong></td><td>你直接寫 <code>GPIOA-&gt;BSRR = …</code></td><td>最低</td><td>最高</td><td>最小</td><td>最快</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 每一層各自取捨了什麼</div>
+        <p><strong>HAL</strong> 替你換來可移植性與開發速度——同一個呼叫能跨越整條 STM32 產品線運作，內建錯誤處理與逾時機制——代價是更大、更慢的程式碼，以及在你與矽晶片之間隔著一疊函式呼叫。<strong>LL</strong> 讓你保持可讀性，但編譯下來幾乎與手寫的暫存器存取是同一批指令。<strong>裸 CMSIS</strong> 給你最終極的掌控與最精簡的程式碼，但你得自己扛下每一個資料手冊細節，而且沒有任何安全網。多數產品從 HAL 起步，只在真正需要的熱路徑（hot path）上才降到 LL／暫存器。</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——開機載入程式裡的 HAL 肥大</div>
+        <p>一個必須塞進 Flash 前 16 KB 的開機載入程式（bootloader），往往 <em>負擔不起</em> HAL：把 <code>HAL_GPIO</code>、<code>HAL_RCC</code> 與 SysTick 那套機制全拉進來，可能在你做出任何有用的事情之前就先把預算炸掉。團隊們經常正是基於這個理由，用純 CMSIS 暫存器程式碼來寫開機載入程式，然後在 Flash 預算寬裕的主應用程式裡再切換回 HAL。按 <em>元件（component）</em> 而非按 <em>專案</em> 來選擇抽象層，是一位資深韌體工程師的標誌。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="boot-process"><span class="sec-no">6</span>STM32 如何開機</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>在 main() 執行之前</small></div>
+      <p>在 Uno 上，是一個開機載入程式把你的程式複製進去，然後跳到它。在 STM32 上，預設並沒有 Arduino 那種開機載入程式——晶片是依照一套小巧的、由 ARM 定義的儀式 <em>直接</em> 從 Flash 開機。理解它，就能破解你這輩子會遇到的每一個「我的全域變數明明設成 5，怎麼會是 0」的 bug。</p>
+
+      <p>在 <code>0x0800 0000</code>，Flash 最前面那幾個字（word）並不是程式碼——它們是 <strong>向量表（vector table）</strong>。第一個 32 位元的字是 <strong>初始堆疊指標（initial stack pointer）</strong>；第二個字是 <strong>重置向量（reset vector）</strong>，也就是要執行的第一條指令的位址。CPU 在執行任何東西之前，會在上電時載入這兩個值：</p>
+
+      <div class="codeblock">
+        <div class="code-head">vector_table（概念示意） <span class="lang">C（CMSIS）</span></div>
+<pre><code class="language-c">// 向量表的最前面幾個項目，由連結器（linker）放在 0x08000000。
+// CPU 把 word[0] 讀進 SP，然後跳到 word[1]（Reset_Handler）。
+__attribute__((section(".isr_vector")))
+const uint32_t vector_table[] = {
+    (uint32_t)&amp;_estack,          // [0] 0x08000000：初始主堆疊指標（MSP）
+    (uint32_t)Reset_Handler,     // [1] 0x08000004：重置向量 → 第一段程式碼
+    (uint32_t)NMI_Handler,       // [2] 0x08000008：不可遮罩中斷（NMI）
+    (uint32_t)HardFault_Handler, // [3] 0x0800000C：硬錯誤（hard fault）
+    // ... SysTick，接著每個周邊 IRQ 各一個項目 ...
+};
+</code></pre>
+      </div>
+
+      <p>重置向量指向 <code>Reset_Handler</code>，這是一段啟動程式（通常是 <code>startup_stm32f4xx.s</code>），它會在你的 <code>main()</code> 能安全執行 <em>之前</em>，先把 C 執行期環境（runtime）準備好。它依序做四件事：</p>
+
+      <div class="mermaid">
+flowchart TB
+    P([上電 / 重置]) --&gt; SP["載入 SP ← word[0]<br/>位於 0x08000000"]
+    SP --&gt; RV["跳到 Reset_Handler<br/>（word[1] @ 0x08000004）"]
+    RV --&gt; DATA["複製 .data<br/>Flash → SRAM<br/>（已初始化的全域變數）"]
+    DATA --&gt; BSS["將 .bss 清零<br/>於 SRAM 中<br/>（未初始化的全域變數）"]
+    BSS --&gt; SI["呼叫 SystemInit()<br/>設定時脈 / FPU"]
+    SI --&gt; MAIN["呼叫 main()"]
+    MAIN --&gt; LOOP(["你的 while(1) 迴圈"])
+  </div>
+
+  <div class="callout key">
+    <div class="c-title"><span class="ico">🔑</span> 為什麼全域變數會以正確的值起始</div>
+    <p>像 <code>int speed = 5;</code> 這樣一個已初始化的全域變數，它的 <em>值</em>（5）儲存在 Flash 中，但在執行期住在 SRAM 裡。啟動程式的 <strong>.data 複製</strong> 把那些位元組從 Flash 搬到 SRAM。像 <code>int count;</code> 這樣一個未初始化的全域變數，依 C 標準必須讀作 0——那就是 <strong>.bss 清零</strong> 這一步。如果你曾跳過或弄壞啟動流程（自己手刻一個裸機專案時很常見），全域變數就會裝著垃圾值，而你會去追一個幽靈。這就是韌體版的「在我的機器上明明可以跑」。</p>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ico">⚠️</span> 陷阱——SystemInit 在 main 之前執行</div>
+    <p><code>SystemInit()</code> 通常會設定 PLL，好讓晶片真正以 72/84/100 MHz 運行，而非它緩慢的內部預設值。如果你的時序莫名其妙地慢了 8 倍，那就是你的時脈樹（clock tree）從來沒被設定起來——檢查一下 <code>SystemInit()</code> 是否有執行，以及 <code>SystemCoreClock</code> 是否與現實相符。</p>
+  </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="blink-two-ways"><span class="sec-no">7</span>兩種方式閃爍：HAL 對上裸暫存器</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>同一個閃爍，兩種抽象層級</small></div>
+      <p>是時候把這個對比變得具體了。兩支程式都讓 STM32F4 Nucleo／Black Pill 上的使用者 LED（PA5）閃爍。先看 <strong>HAL</strong> 版本——短小、可移植，也正是 CubeMX 生成的東西：</p>
+
+      <div class="codeblock">
+        <div class="code-head">blink_hal.c <span class="lang">C（HAL）</span></div>
+<pre><code class="language-c">#include "stm32f4xx_hal.h"
+
+int main(void) {
+    HAL_Init();                       // 設定 SysTick、flash 延遲等等
+    __HAL_RCC_GPIOA_CLK_ENABLE();     // 開啟通往 GPIO 埠 A 的時脈
+
+    GPIO_InitTypeDef io = {0};
+    io.Pin   = GPIO_PIN_5;            // PA5
+    io.Mode  = GPIO_MODE_OUTPUT_PP;   // 推挽（push-pull）輸出
+    io.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOA, &amp;io);
+
+    while (1) {
+        HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5); // 翻轉腳位
+        HAL_Delay(500);                        // 500 毫秒，由 SysTick 驅動
+    }
+}
+</code></pre>
+      </div>
+
+      <p>現在用 <strong>裸暫存器</strong> 程式碼做同一個閃爍。除了 CMSIS 的結構定義外不用任何函式庫——每一行都對應到一個資料手冊欄位。讀讀那些註解；這正是本章的重點所在：</p>
+
+      <div class="codeblock">
+        <div class="code-head">blink_registers.c <span class="lang">C（CMSIS／裸機）</span></div>
+<pre><code class="language-c">#include "stm32f4xx.h"   // 只用暫存器結構定義
+
+int main(void) {
+    // 1) 周邊在重置時被時脈閘控（clock-gated）為關閉以省電。
+    //    透過 RCC->AHB1ENR 的位元 0（GPIOAEN）啟用通往 GPIOA 的時脈。
+    RCC-&gt;AHB1ENR |= (1u &lt;&lt; 0);                 // RCC_AHB1ENR_GPIOAEN
+
+    // 2) MODER 每個腳位佔 2 個位元。把 PA5 設成 '01' = 通用輸出。
+    //    先清除這 2 位元的欄位，再寫入 01。
+    GPIOA-&gt;MODER &amp;= ~(3u &lt;&lt; (5 * 2));          // 清除位元 11:10
+    GPIOA-&gt;MODER |=  (1u &lt;&lt; (5 * 2));          // 設成 01 → 輸出
+
+    while (1) {
+        // 3) BSRR 是原子的設定/重置暫存器。對 LOW 半部的某位元寫 1
+        //    會「設定」該腳位；對 HIGH 半部（位元 + 16）寫 1 則「重置」它。
+        //    沒有讀-改-寫，因此沒有中斷能破壞它。
+        GPIOA-&gt;BSRR = (1u &lt;&lt; 5);               // PA5 = HIGH
+        for (volatile uint32_t d = 0; d &lt; 800000; d++) { }   // 粗略的延遲
+
+        GPIOA-&gt;BSRR = (1u &lt;&lt; (5 + 16));        // PA5 = LOW（重置半部）
+        for (volatile uint32_t d = 0; d &lt; 800000; d++) { }
+    }
+}
+</code></pre>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 這個對比教會我們什麼</div>
+        <p>HAL 版本讀起來像散文，而且能在任何 STM32 上運作；暫存器版本讀起來像資料手冊，而且短短幾條指令就完事。有三個只有原始版本才會曝露出來的細節：周邊在你於 <code>RCC</code> 中啟用它們之前，都被 <strong>時脈閘控為關閉</strong>（這是「我的 GPIO 毫無動靜」的頭號原因——AVR 從來不會逼你做這件事）；<code>MODER</code> 每個腳位用 <strong>兩個位元</strong>，所以你要先遮罩再設定；而 <code>BSRR</code> 讓你能 <strong>原子地（atomically）</strong> 設定或重置一個腳位，不需要可能被中斷破壞的讀-改-寫。HAL 替你做了這三件事——現在你知道它藏起了什麼。</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——忘了啟用 RCC 時脈</div>
+        <p>STM32 上最常見的初學者 bug：你把 <code>MODER</code> 設定得完美無缺、也把 <code>BSRR</code> 寫得漂漂亮亮，結果什麼都沒發生——因為你從來沒在 <code>RCC-&gt;AHB1ENR</code> 裡設定那個 <code>GPIOAEN</code> 位元。一個被時脈閘控的周邊會默默無視所有寫入。永遠要 <em>先</em> 啟用時脈。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="why-industry"><span class="sec-no">8</span>真實案例：業界為何統一在 STM32 上</h2>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>這出貨於數以百萬計的產品中</small></div>
+      <p>拆解幾乎任何一款現代電子產品——無人機飛控、3D 印表機主板、電動自行車控制器、工業感測器——你都會一再發現 STM32 晶片。這種主導地位並非偶然；它是四股力量疊加的結果。</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>力量</th><th>為何它鎖住了採用率</th></tr></thead>
+        <tbody>
+          <tr><td><strong>周邊</strong></td><td>一份龐大而一致的目錄：計時器、ADC/DAC、USB、CAN、SPI/I²C/UART、DMA——挑一顆恰好具備你所需功能的料件，而且程式碼能跨整條產品線移植。</td></tr>
+          <tr><td><strong>效能</strong></td><td>Cortex-M 從幾分錢的 M0，一路擴展到 480 MHz 的雙核心 M7（H7），全部在原始碼層級二進位相容。從小起步，無需重寫就能向上擴展。</td></tr>
+          <tr><td><strong>生態系</strong></td><td>免費的 CubeIDE/CubeMX、CMSIS、堆積如山的社群程式碼，以及整個業界都在用的同一套 ARM 工具鏈（<code>arm-none-eabi-gcc</code>）。招募人才與工具鏈都是已解決的問題。</td></tr>
+          <tr><td><strong>價格與供貨</strong></td><td>多重貨源、廣泛的供貨，加上美元等級的開發板，讓打樣與量產兩頭都便宜。</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——你無人機裡的飛控</div>
+        <p>像 Betaflight 與 ArduPilot 這類開源飛控堆疊，幾乎只鎖定 STM32 F4/F7/H7。原因很具體：一架四旋翼需要透過 SPI 讀取陀螺儀、用硬體計時器驅動四顆馬達電調（ESC）、透過 UART 與遙控接收機通訊，並執行一個緊湊的 PID 迴圈——而且是 <em>同時</em>、以數百赫茲的頻率進行。M4 的 FPU 讓 PID 數學運算飛快，DMA 串流感測器資料，而計時器周邊以零 CPU 抖動（jitter）產生馬達訊號。正是這種周邊、效能與免費工具鏈的精確組合，讓一整個興趣與產業圈都坐落在 STM32 之上。你正在學習那架無人機賴以飛行的平台。</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>⑤ 換你上場</h2>
+      <div class="layer"><span class="step">⑤</span> 練習 <small>由你來寫、由你來決定</small></div>
+      <p>三道檢核。點選一個答案、輸入一個數字，或揭開一道程式挑戰。你的進度會儲存在這台裝置上，並顯示於首頁。</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="stm01-memory-region">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢核</div>
+        <div class="ex-q">你在一顆 STM32F4 上存取 <code>GPIOA-&gt;ODR</code> 來讀取腳位狀態。這個暫存器位址位於 32 位元記憶體映射的哪個區域，以及選擇 <strong>HAL</strong> 而非裸暫存器，主要犧牲掉的是什麼？</div>
+        <ul class="ex-options">
+          <li data-correct="false">SRAM 區域（<code>0x2000 0000</code>）；HAL 犧牲掉可移植性。</li>
+          <li data-correct="true">周邊區域（<code>0x4000 0000</code>）；HAL 犧牲掉程式碼大小與速度。</li>
+          <li data-correct="false">Flash 區域（<code>0x0800 0000</code>）；HAL 什麼都沒犧牲。</li>
+          <li data-correct="false">核心／私有區域（<code>0xE000 0000</code>）；HAL 犧牲掉可移植性。</li>
+        </ul>
+        <div class="ex-explain">GPIO 暫存器區塊坐落在 <code>0x4000 0000</code> 的 <strong>周邊區域</strong>（GPIOA 的基底是 <code>0x40020000</code>）。HAL 替你換來易用性與可移植性；它付出的代價是 <strong>程式碼大小與速度</strong>——比起一行就搞定的暫存器寫入，它多了好幾層函式呼叫與更大的二進位檔。Flash 裝程式碼，SRAM 裝變數，而 <code>0xE000 0000</code> 是核心自己的 NVIC/SysTick。</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="stm01-reg-address" data-answer="0x40020014" data-tol="0">
+        <div class="ex-head"><span class="badge">Q2</span> 算出來</div>
+        <div class="ex-q">在 STM32F4 上，GPIO 埠 A 的基底位址為 <code>0x40020000</code>，輸出資料暫存器 <code>ODR</code> 坐落在偏移 <code>0x14</code> 處。使用 $\text{addr}_{\text{reg}} = \text{base} + \text{offset}$，<code>GPIOA-&gt;ODR</code> 的絕對位址是多少？以十六進位輸入（例如 <code>0x40020014</code>）或以十進位整數輸入。</div>
+        <input class="ex-input" type="text" inputmode="text" placeholder="0x........"><span class="ex-unit">addr</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$\texttt{0x40020000} + \texttt{0x14} = \texttt{0x40020014}$（十進位 $1073872916$）。在十六進位中只有最低位元組改變：$\texttt{0x00} + \texttt{0x14} = \texttt{0x14}$，上面的部分原封不動。這正是 CMSIS 結構 <code>GPIOA-&gt;ODR</code> 編譯下來的確切常數。</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="stm01-register-blink">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰——在 Blue Pill 上做暫存器層級的閃爍</div>
+        <div class="ex-q">STM32F103「Blue Pill」的板載 LED 接在 <strong>PC13</strong> 上（而且它是 <em>低電位有效（active-low）</em>——把腳位拉 LOW 才會點亮它）。F1 家族使用的 GPIO 暫存器與 F4 不同：腳位 8–15 用 <strong>CRH</strong>（高位設定暫存器，configuration register high），GPIOC 的時脈啟用用 <strong>APB2ENR</strong>，還有一對 <strong>BSRR</strong>／<strong>BRR</strong>。請為 PC13 寫一支裸暫存器的閃爍程式。想一想：哪條時脈匯流排、哪個設定欄位、如何切換。</div>
+        <details class="ex-acc">
+          <summary>提示</summary>
+          <div class="acc-body">在 F1 上，GPIOC 在 <strong>APB2</strong> 匯流排上：在 <code>RCC-&gt;APB2ENR</code> 中設定 <code>IOPCEN</code> 位元（位元 4）。PC13 由 <code>GPIOC-&gt;CRH</code> 設定：每個腳位用一個 4 位元的欄位，而 PC13 的欄位起始於位元 <code>(13 − 8) × 4 = 20</code>。在那裡寫入 <code>0b0010</code> 代表「輸出、2 MHz、推挽」。用 <code>BSRR</code> 來設定腳位（LED 熄滅，因為是低電位有效），用 <code>BSRR</code> 的上半部——也就是 <code>BRR</code> 或 位元+16——來重置它（LED 點亮）。</div>
+        </details>
+        <details class="ex-acc">
+          <summary>顯示一種解答</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">blink_pc13.c <span class="lang">C（CMSIS／裸機）</span></div>
+<pre><code class="language-c">#include "stm32f1xx.h"
+
+int main(void) {
+    // 1) GPIOC 在 APB2 上。啟用它的時脈（IOPCEN = 位元 4）。
+    RCC-&gt;APB2ENR |= (1u &lt;&lt; 4);                 // RCC_APB2ENR_IOPCEN
+
+    // 2) PC13 位於 CRH（腳位 8..15）。它的 4 位元欄位起始於
+    //    位元 (13-8)*4 = 20。先清除它，再寫入 0010 =
+    //    MODE=10（輸出 2 MHz）、CNF=00（推挽）。
+    GPIOC-&gt;CRH &amp;= ~(0xFu &lt;&lt; 20);               // 清除 PC13 的 4 位元欄位
+    GPIOC-&gt;CRH |=  (0x2u &lt;&lt; 20);               // 0010：輸出、推挽
+
+    while (1) {
+        // PC13 是低電位有效：重置 = LED 亮，設定 = LED 滅。
+        GPIOC-&gt;BSRR = (1u &lt;&lt; (13 + 16));       // 重置 PC13 → LED 亮
+        for (volatile uint32_t d = 0; d &lt; 300000; d++) { }
+
+        GPIOC-&gt;BSRR = (1u &lt;&lt; 13);              // 設定 PC13   → LED 滅
+        for (volatile uint32_t d = 0; d &lt; 300000; d++) { }
+    }
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">這裡有兩個體會。第一，<strong>暫存器映射因家族而異</strong>：F1 用 <code>CRH</code>/<code>CRL</code> 搭配 4 位元欄位與 APB2 時脈，而 F4 用 <code>MODER</code> 搭配 2 位元欄位與 AHB1——然而其工作流程（啟用時脈 → 設定模式 → 透過 <code>BSRR</code> 切換）卻完全相同。第二，<strong>低電位有效</strong> 的硬體會把你的邏輯反過來：重置腳位反而點亮 LED。這正是 HAL 存在的理由——但也正是為什麼「讀參考手冊」是一項你現在已經具備的技能。</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> 本章回顧</div>
+        <p>你已經從 8 位元 AVR 跨到 32 位元 ARM Cortex-M。你現在能定位出四個記憶體區域——Flash <code>0x0800 0000</code>、SRAM <code>0x2000 0000</code>、周邊 <code>0x4000 0000</code>、核心 <code>0xE000 0000</code>——並以 <strong>基底 + 偏移</strong> 計算任何暫存器位址（我們推導出 <code>GPIOA-&gt;ODR = 0x40020014</code>）。你知道為什麼硬體暫存器必須是 <code>volatile</code>、CMSIS 結構如何對映到它們，以及 HAL / LL / CMSIS 在易用性、掌控度、大小與速度之間的取捨。你能追蹤開機儀式——堆疊指標、重置向量、<code>.data</code> 複製、<code>.bss</code> 清零、<code>SystemInit</code>，然後 <code>main</code>——而且你已經分別用 HAL 與用裸 <code>RCC</code>/<code>MODER</code>/<code>BSRR</code> 寫入，讓一顆 LED 閃爍。接下來我們會更深入時脈樹與 GPIO，好讓那些暫存器欄位的每一個都化為你的第二天性。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="回到頂端">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../../../assets/vendor/highlight.min.js"></script>
+<script src="../../../assets/katex/katex.min.js"></script>
+<script src="../../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../../assets/vendor/mermaid.min.js"></script>
+<script src="../../../assets/app.js"></script>
+</body>
+</html>

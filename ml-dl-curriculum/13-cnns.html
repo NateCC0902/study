@@ -72,6 +72,9 @@
         <p>Imagine a dark map and a small stencil-shaped flashlight. You drag the flashlight across the whole map in a raster scan. Wherever the terrain under the light matches the stencil's shape, it lights up bright; elsewhere it stays dim. The lit-up pattern you trace out is a <strong>feature map</strong>: a new image showing <em>where</em> that particular feature occurs. A CNN learns a stack of stencils (kernels), each tuned to a different feature, and re-applies each one everywhere.</p>
       </div>
 
+      <div class="sim"><div class="sim-title"><span>🧪</span> Convolution kernels</div><canvas id="demo-conv"></canvas></div>
+      <p>Switch kernels (edge, blur, sharpen, Sobel) and watch the output grid — this is one CNN filter.</p>
+
       <div class="mermaid">
 graph LR
     A["Input image&lt;br/&gt;3×32×32"] --&gt; B["Conv 3→32, 3×3&lt;br/&gt;+ ReLU"]
@@ -442,5 +445,7 @@ class HazardCNN(SmallCNN):
 <script src="../assets/katex/contrib/auto-render.min.js"></script>
 <script src="../assets/vendor/mermaid.min.js"></script>
 <script src="../assets/app.js"></script>
+<script src="../assets/ml-demos.js"></script>
+<script>EM.mlDemo.conv("demo-conv");</script>
 </body>
 </html>

@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>把中斷做對：NVIC、EXTI 與優先權 — Embedded Mastery</title>
+<link rel="stylesheet" href="../../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../../assets/styles.css">
+</head>
+<body class="track-stm32" data-course="embedded" data-track="stm32" data-chapter="04-nvic-exti">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">STM32 · 第 04 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">STM32 學習軌 · 第 04 章 · 中階→進階</div>
+        <h1>把中斷做對：NVIC、EXTI 與優先權</h1>
+        <p>輪詢（polling）會讓 CPU 每秒問「有東西了嗎？」上百萬次，白白燒掉運算資源。<strong>中斷（interrupt）</strong>則讓硬體只在真正發生事情時，才拍一下 CPU 的肩膀。這件事做錯，你的韌體就會卡死、無限重複觸發，或是餓死某個關鍵任務；做對了，你就能打造出在微安級電流下休眠、又能在微秒內甦醒的系統。</p>
+        <div class="meta">
+          <span>⏱ 約 45 分鐘</span><span>🧠 NVIC 與向量表</span><span>⚡ GPIO 上的 EXTI</span><span>🔢 優先權數學</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="polling-vs-interrupts"><span class="sec-no">1</span>輪詢 vs. 中斷：是誰在發問？</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先把畫面建立起來</small></div>
+      <p>想像你正在等一個包裹。<strong>輪詢</strong>就是每隔十秒走到大門去看包裹到了沒——既累人又浪費，而且兩次查看之間還是可能漏掉。<strong>中斷</strong>則像門鈴：你想做什麼就做什麼，包裹一落地的瞬間，鈴聲就把你的注意力拉到門口。處理完之後，你立刻回到原本在做的事。</p>
+
+      <p>在程式裡，輪詢一顆按鈕看起來像這樣——一個緊湊迴圈不斷讀取腳位，幾乎所有週期都耗在「還沒、還沒」上：</p>
+
+      <div class="codeblock">
+        <div class="code-head">polling.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">while (1) {
+  // CPU 永遠在這裡空轉，每秒讀取腳位上百萬次。
+  // 其中 99.999% 的讀取結果都是「還沒被按下」。
+  if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) {
+    do_something();
+  }
+}
+</code></pre>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話的心智模型</div>
+        <p>中斷就是<strong>一段硬體：它暫停你的主程式、執行一小段處理常式（handler），然後從原本停下的地方精確地接續執行</strong>——而你的 <code>main()</code> 迴圈完全不知道這件事發生過。</p>
+      </div>
+
+      <p>在 Cortex-M 上，協調這一切的晶片區塊就是 <strong>NVIC</strong>——<strong>N</strong>ested <strong>V</strong>ectored <strong>I</strong>nterrupt <strong>C</strong>ontroller（巢狀向量中斷控制器）。它是 CPU 核心內部的一個專用區塊（不是你外接上去的周邊），它唯一的工作就是監看數十個中斷來源、判斷哪一個最緊急，並把控制權交給正確的處理常式。稱為「巢狀（Nested）」是因為更緊急的中斷可以打斷正在執行的較不緊急中斷；稱為「向量（Vectored）」是因為每個來源都直接跳到自己的處理常式位址，不需要任何軟體分派（dispatch）。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 為什麼這很重要</div>
+        <p>中斷決定了一顆 CPU 是<strong>忙碌</strong>還是<strong>有用</strong>。輪詢會把你的核心釘死在 100% 負載，並禁止真正的休眠。中斷讓核心可以閒置（甚至斷電省電），並以有界、可預測的延遲做出回應。每一個反應靈敏、低功耗的嵌入式產品，都是建立在它之上的。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="vector-table"><span class="sec-no">2</span>向量表與例外模型</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>一本處理常式的電話簿</small></div>
+      <p>當中斷觸發時，CPU 需要知道<em>該往哪裡跳</em>。答案就放在<strong>向量表（vector table）</strong>裡：一個函式指標的陣列，停放在 Flash 的最起始處（在 STM32F4 上是位址 <code>0x0800_0000</code>）。每個槽位存放著某個例外或中斷對應之處理常式的位址。NVIC 只要用中斷編號去索引這張表，把它載入程式計數器（program counter）就好——不需要 <code>switch</code> 敘述，也沒有額外開銷。</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>偏移量</th><th>向量</th><th>它是什麼</th></tr></thead>
+        <tbody>
+          <tr><td><code>0x00</code></td><td>初始 <code>SP</code></td><td>重置時載入的堆疊頂端值</td></tr>
+          <tr><td><code>0x04</code></td><td>Reset</td><td>上電後的第一道指令</td></tr>
+          <tr><td><code>0x08</code></td><td>NMI</td><td>不可遮罩中斷（Non-maskable interrupt）</td></tr>
+          <tr><td><code>0x0C</code></td><td>HardFault</td><td>「出了大問題」的萬用攔截器</td></tr>
+          <tr><td><code>…</code></td><td>SysTick</td><td>1 kHz 的 RTOS / <code>HAL_Delay</code> 滴答（tick）</td></tr>
+          <tr><td><code>0x40+</code></td><td>IRQ0…IRQn</td><td>周邊中斷：EXTI、計時器、UART、DMA…</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p>具有<em>負</em>例外編號的例外（Reset、NMI、HardFault、SysTick）是核心的「系統例外（system exceptions）」。所有具非負 IRQ 編號的項目——<code>EXTI0_IRQn</code>、<code>TIM2_IRQn</code>、<code>USART2_IRQn</code>——都是由 NVIC 管理的外部中斷。你在 <code>startup_stm32f4xx.s</code> 裡看到的處理常式名稱（例如 <code>EXTI0_IRQHandler</code>）都是<em>弱（weak）</em>符號：只要在你的 C 檔裡定義一個同名函式，連結器就會自動把你的版本接進向量表。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——名稱必須完全一致</div>
+        <p>如果你把處理常式拼成 <code>EXTI0_IRQ_Handler</code>（多了一個底線）而不是 <code>EXTI0_IRQHandler</code>，連結器不會抱怨——它只會繼續沿用預設的弱處理常式，而那通常是一個無限的 <code>while(1)</code> 迴圈。你的中斷觸發後跳進那個陷阱，韌體就無聲無息地凍結了。請直接從啟動檔（startup file）裡複製名稱。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="exti-lines"><span class="sec-no">3</span>EXTI：把一個腳位邊緣變成中斷</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>從腳位到 NVIC 的接線</small></div>
+      <p>一個 GPIO 腳位無法直接和 NVIC 對話。介於兩者之間的是 <strong>EXTI</strong>——<strong>EXT</strong>ernal <strong>I</strong>nterrupt/event controller（外部中斷／事件控制器）。EXTI 有一組獨立的<em>線路（line）</em>；第 0 條到第 15 條是 GPIO 線路（更高的線路服務內部來源，如 RTC 鬧鐘與 USB 喚醒）。要讓按鈕上的一個下降邊緣（falling edge）產生中斷，你必須依序設定四件事：</p>
+
+      <ol>
+        <li><strong>SYSCFG</strong>——把某個埠（port）繞接到線路上。<code>SYSCFG-&gt;EXTICR[]</code> 決定<em>哪個埠</em>（A、B、C…）驅動某一條 EXTI 線路編號。</li>
+        <li><strong>邊緣選擇</strong>——為該線路設定上升觸發暫存器 <code>EXTI-&gt;RTSR</code> 和／或下降觸發暫存器 <code>EXTI-&gt;FTSR</code>。</li>
+        <li><strong>解除遮罩（Unmask）</strong>——在中斷遮罩暫存器 <code>EXTI-&gt;IMR</code> 中設定該線路的位元，邊緣才會真正以中斷的形式傳播出去（若維持遮罩狀態，邊緣會被偵測到但被忽略）。</li>
+        <li><strong>在 NVIC 中啟用</strong>——為擁有該線路的 IRQ 呼叫 <code>NVIC_EnableIRQ()</code>。</li>
+      </ol>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——線路共用的坑</div>
+        <p>EXTI 線路 <em>N</em> 由所有埠中編號為 <em>N</em> 的每個腳位共用。<code>PA0</code>、<code>PB0</code>、<code>PC0</code>… 全都對映到 <strong>EXTI0</strong>。<code>SYSCFG-&gt;EXTICR</code> 一次只允許<em>一個</em>埠擁有線路 0——你無法同時在 <code>PA0</code> 和 <code>PB0</code> 上各設一個中斷。更糟的是，線路 5–9 共用單一個 IRQ（<code>EXTI9_5_IRQn</code>），線路 10–15 又共用另一個（<code>EXTI15_10_IRQn</code>），因此單一個處理常式必須去檢查待處理（pending）暫存器，才能知道<em>究竟是哪個</em>腳位觸發。</p>
+      </div>
+
+      <p>以下是針對 <code>PA0</code> 上一顆按鈕、以下降邊緣觸發的暫存器層級設定。這正是 HAL 在背後所做的事：</p>
+
+      <div class="codeblock">
+        <div class="code-head">exti_setup.c <span class="lang">C / STM32F4 CMSIS</span></div>
+<pre><code class="language-c">// 假設 GPIOA 與 SYSCFG 的時脈已啟用、PA0 已設為輸入。
+// 1) 把 EXTI 線路 0 繞接到埠 A（EXTICR[0] 的位元 [3:0] = 0b0000 = 埠 A）
+SYSCFG-&gt;EXTICR[0] &amp;= ~SYSCFG_EXTICR1_EXTI0;     // 清除 -&gt; 選擇埠 A
+
+// 2) 僅在「下降」邊緣觸發（按鈕把腳位拉到 GND）
+EXTI-&gt;FTSR |=  (1U &lt;&lt; 0);   // 為線路 0 啟用下降邊緣
+EXTI-&gt;RTSR &amp;= ~(1U &lt;&lt; 0);   // 確保上升邊緣是關閉的
+
+// 3) 解除線路 0 的遮罩，讓邊緣成為真正的中斷請求
+EXTI-&gt;IMR  |=  (1U &lt;&lt; 0);
+
+// 4) 在 NVIC 中啟用 EXTI0 並給它一個優先權（見 §4）
+NVIC_SetPriority(EXTI0_IRQn, 5);
+NVIC_EnableIRQ(EXTI0_IRQn);
+</code></pre>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    PIN["PA0 腳位<br/>（按鈕）"] --> SYS["SYSCFG<br/>EXTICR → 埠選擇"]
+    SYS --> EDGE["EXTI 邊緣偵測<br/>RTSR / FTSR"]
+    EDGE --> MASK{"IMR<br/>已解除遮罩？"}
+    MASK -- 否 --> DROP["邊緣被忽略"]
+    MASK -- 是 --> NVIC["NVIC<br/>排優先權 + 分派"]
+    NVIC --> ISR["EXTI0_IRQHandler()"]
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="priority-math"><span class="sec-no">4</span>優先權：搶佔、次優先權與位元數學</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>推導出層級數量</small></div>
+      <p>並非所有中斷都同等重要。馬達過電流故障必須被允許去打斷一個慵懶的 UART 位元組。NVIC 把每個中斷的緊急程度，編碼成每個來源各一個 8 位元的優先權欄位——但特定晶片只會<em>實作</em>最高的那幾個位元。STM32F4 實作了 <strong>4 個位元</strong>：</p>
+
+      <div class="math-box">
+        $$ \text{levels} = 2^{N_{\text{prio}}} = 2^{4} = 16 $$
+      </div>
+
+      <p>所以你會得到 <code>0</code> 到 <code>15</code> 的優先權值。那條關鍵又違反直覺的規則：</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 數字越小 = 優先權越高</div>
+        <p>優先權 <code>0</code> 是<strong>最</strong>緊急的；優先權 <code>15</code> 是<strong>最不</strong>緊急的。每個人都會在這裡栽一次跟頭。把它想成「名次」——第 0 名（rank 0）獲勝。Reset、NMI 與 HardFault 位於固定的負優先權，因此它們的位階高於<em>任何</em>你能設定的中斷。</p>
+      </div>
+
+      <p>那 4 個位元會被<strong>優先權分組（priority grouping）</strong>設定切成兩個欄位：一個<strong>搶佔（群組）優先權</strong>和一個<strong>次優先權（sub-priority）</strong>。這個切分在開機時用 <code>NVIC_SetPriorityGrouping(g)</code> 設定一次。分組編號 <span>$g$</span> 決定了低位元中有幾個會變成次優先權。在 4 個實作位元的情況下，各欄位的數量為：</p>
+
+      <div class="math-box">
+        $$ N_{\text{sub}} = \max\!\bigl(0,\; (g+1) - (8 - N_{\text{prio}})\bigr), \qquad N_{\text{pre}} = N_{\text{prio}} - N_{\text{sub}} $$
+      </div>
+
+      <p>這條公式看起來很龜毛，是因為欄位在 8 位元暫存器中是靠左對齊（left-aligned）儲存的；STM32F4（<span>$N_{\text{prio}}=4$</span>）的實際結果其實就是一張你可以背起來的表：</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>分組常數</th><th>搶佔位元數</th><th>次優先權位元數</th><th>搶佔層級數</th><th>次優先權層級數</th></tr></thead>
+        <tbody>
+          <tr><td><code>NVIC_PRIORITYGROUP_0</code></td><td>0</td><td>4</td><td>1</td><td>16</td></tr>
+          <tr><td><code>NVIC_PRIORITYGROUP_2</code></td><td>2</td><td>2</td><td>4</td><td>4</td></tr>
+          <tr><td><code>NVIC_PRIORITYGROUP_4</code></td><td>4</td><td>0</td><td>16</td><td>1</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p>這兩個欄位各司其職：</p>
+      <ul>
+        <li><strong>搶佔優先權（Preemption priority）</strong>決定<em>巢狀（nesting）</em>。一個搶佔優先權較高（數字較小）的中斷<strong>可以打斷</strong>目前正在執行、搶佔優先權較低的處理常式。這就是 NVIC 裡「巢狀」的意思。</li>
+        <li><strong>次優先權（Sub-priority）</strong>只用來打破平手：如果兩個搶佔層級<em>相同</em>的中斷同時待處理，次優先權較小的會先執行——但它<strong>不會</strong>去搶佔一個搶佔層級相等、且已在執行中的處理常式。</li>
+      </ul>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 具體範例</div>
+        <p>假設 IRQ&nbsp;A 的搶佔優先權是 <code>1</code>，IRQ&nbsp;B 的搶佔優先權是 <code>3</code>。當 B 的處理常式正在執行時 A 觸發了——因為 <span>$1 &lt; 3$</span>，A 會<strong>搶佔</strong> B、執行到完成，然後 B 才接續執行。若改成兩者搶佔優先權都是 <code>2</code> 但次優先權不同，則正在執行的那個會繼續執行；另一個得等到輪到它。</p>
+      </div>
+
+      <p>HAL 把編碼與設定的步驟包進單一個呼叫，讓你永遠不必親手位移（shift）位元：</p>
+
+      <div class="codeblock">
+        <div class="code-head">priority.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">// 為整個系統選擇 4 個搶佔層級 + 4 個次優先權層級。
+HAL_NVIC_SetPriorityGrouping(NVIC_PRIORITYGROUP_2);
+
+// EXTI0：搶佔優先權 = 1（相當緊急），次優先權 = 0
+HAL_NVIC_SetPriority(EXTI0_IRQn, /*preempt*/ 1, /*sub*/ 0);
+HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+
+// 一個比較吵、較不緊急的 UART：搶佔優先權 = 3，次優先權 = 0
+HAL_NVIC_SetPriority(USART2_IRQn, /*preempt*/ 3, /*sub*/ 0);
+HAL_NVIC_EnableIRQ(USART2_IRQn);
+// 現在按鈕邊緣會打斷正在進行的 UART ISR，但反過來不行。
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——分組只設定一次</div>
+        <p>HAL 的 <code>HAL_Init()</code> 預設已經呼叫了 <code>HAL_NVIC_SetPriorityGrouping(NVIC_PRIORITYGROUP_4)</code>——全部 4 個位元都變成搶佔優先權，沒有任何次優先權。如果你稍後重新分組，你先前設定過的每一個優先權數字的意義都會無聲地改變。在啟動時挑定一種分組，然後就別再動它。要混用 FreeRTOS 嗎？核心<em>要求</em>使用 <code>NVIC_PRIORITYGROUP_4</code>——別跟它對著幹。</p>
+      </div>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-prio-wrap">
+        <div class="sim-title">🔬 即時：A 會搶佔 B 嗎？</div>
+        <canvas id="sim-prio"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">設定每個中斷的搶佔層級（0 = 最緊急）。時間軸顯示 B 正在執行、A 在處理常式進行到一半時觸發，以及 A 是否被允許巢狀疊在 B 之上。</p>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="the-flow"><span class="sec-no">5</span>完整流程——以及你「務必」要清除的那個位元</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>追蹤單一個邊緣從頭到尾</small></div>
+      <p>讓我們追蹤一次按鈕按壓，從銅線一路到處理常式。初學者會跳過、然後付出慘痛代價的那一步，正是最後一步：<strong>清除待處理位元（pending bit）</strong>。</p>
+
+      <div class="mermaid">
+flowchart TD
+    A["PA0 上的邊緣"] --> B["EXTI 偵測到邊緣<br/>設定待處理位元 EXTI→PR.0"]
+    B --> C["NVIC 看到請求<br/>檢查優先權"]
+    C --> D["CPU 推入情境（context）<br/>向量跳到 EXTI0_IRQHandler"]
+    D --> E["你的 ISR 執行<br/>做該做的工作"]
+    E --> F{"清除 EXTI→PR.0？"}
+    F -- "否" --> B
+    F -- "是（寫入 1）" --> G["返回 → 接續主程式"]
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 待處理位元是「rc_w1」——靠寫入 1 來清除</div>
+        <p>當邊緣觸發時，EXTI 會在 <code>EXTI-&gt;PR</code> 裡鎖存（latch）一個<strong>待處理（pending）</strong>旗標。正是這個旗標告訴 NVIC 來呼叫你的。如果你的處理常式<em>沒有清除它就返回</em>，NVIC 會看到請求仍然處於宣告（asserted）狀態，並立刻重新進入你的 ISR——永無止境。你要靠對該位元寫入一個 <strong>1</strong> 來清除它（寫入 0 不會有任何作用）。這是一個刻意設計得很奇怪的「寫 1 清除（write-1-to-clear）」暫存器，這樣兩個處理常式才不會不小心清掉彼此的旗標。</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>逐行讀過</small></div>
+      <p>裸機（bare-metal）ISR——注意那個寫 1 清除，以及「這真的是我的線路嗎？」的守衛（guard）：</p>
+
+      <div class="codeblock">
+        <div class="code-head">isr_baremetal.c <span class="lang">C / STM32F4 CMSIS</span></div>
+<pre><code class="language-c">void EXTI0_IRQHandler(void) {
+  // 守衛：確認待處理的「這一條」線路就是它。
+  if (EXTI-&gt;PR &amp; (1U &lt;&lt; 0)) {
+    EXTI-&gt;PR = (1U &lt;&lt; 0);          // 寫 1 清除。要最先或盡早做這件事。
+
+    GPIOC-&gt;ODR ^= (1U &lt;&lt; 13);      // 切換 PC13 上的 LED——快速、不可分割（atomic）。
+  }
+  // ISR 要保持「短」：別在這裡用 printf、HAL_Delay 或沉重的迴圈。
+}
+</code></pre>
+      </div>
+
+      <p>如果你偏好 HAL，這些底層接線會被藏進兩個函式裡。HAL 的 IRQ 處理常式會讀取 <code>EXTI-&gt;PR</code>、替你清除旗標，然後呼叫一個你可以覆寫的<em>弱（weak）</em>回呼（callback）：</p>
+
+      <div class="codeblock">
+        <div class="code-head">isr_hal.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">// 1) 真正的向量表進入點。讓 HAL 去解析並清除待處理位元。
+void EXTI0_IRQHandler(void) {
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_0);   // 內部清除 EXTI→PR.0
+}
+
+// 2) 接著 HAL 會呼叫「這個」弱回呼。用你的邏輯覆寫它。
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+  if (GPIO_Pin == GPIO_PIN_0) {
+    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);   // 你的工作寫在這裡
+  }
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——讓 ISR 保持簡短</div>
+        <p>ISR 執行時你的主程式是暫停的，而且（依優先權而定）其他中斷會被擋住。只做最低限度的事：清除旗標、設定一個 <code>volatile</code> 旗標或推入佇列（queue），然後馬上離開。在 ISR 裡呼叫 <code>HAL_Delay()</code> 是一個經典的卡死：它等待 SysTick 中斷，而 SysTick 的優先權可能<em>低於</em>你的處理常式，因此永遠無法觸發。結果就是看起來什麼事都沒發生的永久凍結。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="real-case"><span class="sec-no">6</span>實戰案例：微秒級擷取與從睡眠中喚醒</h2>
+
+      <div class="layer"><span class="step">④</span> 實戰案例 <small>這些都會出貨到產品裡</small></div>
+      <p>有兩種量產模式完全仰賴 EXTI + NVIC。</p>
+
+      <p><strong>低延遲事件擷取。</strong>光學編碼器、霍爾感測器，或通訊用的 PHY，每秒可能產生數千次邊緣，並帶有嚴格的時序要求。輪詢會漏掉兩次讀取之間的邊緣；而一個 EXTI 中斷則能在邊緣發生的瞬間，於 ISR 內部讀取一個自由運行（free-running）的計時器，為每個邊緣打上時間戳記。在 STM32F4 上，從邊緣到 ISR 第一道指令的延遲，是確定性（deterministic）的硬體推入約 12 個 CPU 週期，再加上你的優先權等待——是奈秒等級，而非毫秒。</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 實戰案例——用一個腳位從睡眠中喚醒</div>
+        <p>這是 EXTI 安靜的超能力。把一顆 STM32 置入 <strong>Stop 模式</strong>，CPU 時脈就會停下——核心的耗電降到個位數微安，對於要休眠數天的電池感測器來說再完美不過。但 EXTI 區塊在 Stop 模式下仍然存活。把一顆喚醒按鈕（或某個感測器的中斷線路）設定為 EXTI 來源、呼叫 <code>HAL_PWR_EnterSTOPMode(...)</code>，晶片就會待在近乎零功耗的睡眠裡，直到一個邊緣到來。那個邊緣觸發 EXTI、喚醒核心、執行你的處理常式，然後再回到深層睡眠。一個門鈴感測器、一支電視遙控器、一台血糖機——全都靠著正是這個機制，用一顆鈕扣電池運作好幾年。</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 去彈跳（debounce）該放在 ISR 之外</div>
+        <p>機械式按鈕會彈跳（bounce）：一次按壓可能在短短幾毫秒內產生數十個邊緣，把你的 ISR 觸發十幾次。別在處理常式裡用 <code>delay()</code> 來去彈跳——那會把一切都擋住。正確做法是：在第一個邊緣時記錄一個時間戳記，並在接下來約 20 ms 內忽略後續邊緣（在 ISR 裡做，或是停用該線路、再用一個計時器把它重新武裝）。軟體去彈跳本身是一整個主題；你只要先知道 ISR 是個不適合<em>等待</em>的地方就好。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="latency-math"><span class="sec-no">7</span>延遲數學：CPU 反應有多快？</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>把週期換算成時間</small></div>
+      <p>「中斷很快」是一種感覺；工程需要一個數字。在 Cortex-M4 上，硬體需要固定的 <strong>12 個週期</strong>來堆疊情境並向量跳到你的處理常式（假設是零等待狀態的 Flash）。在 STM32F4 典型的 <span>$f_{\text{clk}} = 168\,\text{MHz}$</span> 下，週期時間為</p>
+
+      <div class="math-box">
+        $$ T_{\text{cycle}} = \frac{1}{f_{\text{clk}}} = \frac{1}{168\times10^{6}\,\text{Hz}} \approx 5.95\,\text{ns} $$
+      </div>
+
+      <p>因此最佳情況下的<strong>中斷進入延遲</strong>——從邊緣被接受到你 ISR 的第一道指令——為</p>
+
+      <div class="math-box">
+        $$ t_{\text{latency}} = 12 \cdot T_{\text{cycle}} = 12 \times 5.95\,\text{ns} \approx 71\,\text{ns} $$
+      </div>
+
+      <p>這是下限。真實的最壞情況延遲還會加上兩件你能掌控的事：任何<em>搶佔優先權更高或相等</em>且已在執行的 ISR（你必須等它跑完——把你的優先權設計成讓緊急線路勝出），以及任何你用 <code>__disable_irq()</code> 停用中斷的區域。把那些臨界區段（critical sections）控制在寥寥幾道指令內，系統就能保持靈敏。如此一來，最大可接受的事件速率便直接得出：如果你的 ISR 加上開銷耗時 <span>$t_{\text{isr}}$</span>，你最多能持續承受</p>
+
+      <div class="math-box">
+        $$ f_{\max} = \frac{1}{t_{\text{isr}}} $$
+      </div>
+
+      <p>每秒這麼多個邊緣，超過這個速率，ISR 就會開始堆積、而你就跟不上了。一個 1&nbsp;µs 的 ISR 把你的上限封在接近 1&nbsp;MHz 的事件——對按鈕來說綽綽有餘，對高速編碼器則相當吃緊，而那正是你該從 EXTI 升級到硬體計時器擷取（timer-capture）周邊的時機。</p>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>⑤ 換你上場</h2>
+      <div class="layer"><span class="step">⑤</span> 練習 <small>你來寫、你來決定</small></div>
+      <p>三道檢核。點一個答案、輸入一個數字，或揭開一個程式挑戰。你的進度會儲存在這台裝置上，並顯示在首頁。</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="stm04-pending-priority">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢核</div>
+        <div class="ex-q">你的 <code>EXTI0_IRQHandler</code> 在按下按鈕時跑了一次，然後 CPU 看起來就鎖死了——處理常式不斷地無止境重新進入。你還注意到，你設為優先權 <code>2</code> 的某個中斷，從來不會去搶佔一個優先權 <code>9</code> 的中斷。哪兩個敘述<strong>同時</strong>正確？</div>
+        <ul class="ex-options">
+          <li data-correct="false">你忘了 <code>NVIC_EnableIRQ</code>，而且數字較大代表優先權較高。</li>
+          <li data-correct="true">你忘了清除 <code>EXTI-&gt;PR</code> 中的待處理位元，而且數字<em>較小</em>代表優先權較高（所以 2 應該搶佔 9）。</li>
+          <li data-correct="false">向量表壞掉了，而且優先權 9 的位階高於優先權 2。</li>
+          <li data-correct="false">EXTI 會自動清除它的旗標，而且相等的次優先權永遠不會搶佔。</li>
+        </ul>
+        <div class="ex-explain">無止境重新進入是「沒有清除 <code>EXTI-&gt;PR</code>」的招牌徵兆（要對該線路的位元寫入一個 1）。而 Cortex-M 的優先權是「第 0 名（rank 0）獲勝」：<strong>數字較小 = 優先權較高</strong>，所以優先權 2 的中斷<em>應該</em>搶佔優先權 9 的。如果沒有，那你的優先權<em>分組</em>八成把那些位元放進了次優先權，而次優先權只負責打破平手、永遠不會搶佔。</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="stm04-prio-levels" data-answer="16" data-tol="0">
+        <div class="ex-head"><span class="badge">Q2</span> 算出來</div>
+        <div class="ex-q">STM32F4 在 NVIC 中實作了 <strong>4</strong> 個優先權位元。這給了你多少個不同的中斷優先權<strong>層級</strong>？（回想 $\text{levels} = 2^{N_{\text{prio}}}$。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="層級數"><span class="ex-unit">層級</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$2^{4} = 16$ 個層級，從 0（最緊急）編號到 15（最不緊急）。只實作 3 個位元的晶片會給出 $2^3 = 8$ 個層級；實作 8 個位元的高階零件則給出 $2^8 = 256$ 個。重點在於<em>實作的</em>位元數——而非完整的 8 位元欄位。</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="stm04-button-led">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰——按鈕 EXTI 切換一顆 LED</div>
+        <div class="ex-q">使用 HAL，把 <code>PA0</code> 上的板載使用者按鈕設定為下降邊緣的 EXTI 來源，並在每次按壓時切換 <code>PC13</code> 上的 LED。請寫出 GPIO/NVIC 初始化以及中斷處理常式 + 回呼。記住：處理常式必須清除待處理旗標（或交給 HAL 去做），LED 切換放在回呼裡，而且 ISR 要保持簡短。</div>
+        <details class="ex-acc">
+          <summary>提示</summary>
+          <div class="acc-body">先啟用 <code>GPIOA</code>、<code>GPIOC</code> 和 <code>SYSCFG</code> 的時脈。用 <code>GPIO_MODE_IT_FALLING</code> 設定 <code>PA0</code>（HAL 的「下降邊緣中斷」模式會替你完成 SYSCFG/EXTI 的接線）。接著為 <code>EXTI0_IRQn</code> 呼叫 <code>HAL_NVIC_SetPriority</code> + <code>HAL_NVIC_EnableIRQ</code>。向量進入點呼叫 <code>HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_0)</code>；你的切換動作放在 <code>HAL_GPIO_EXTI_Callback</code> 裡。</div>
+        </details>
+        <details class="ex-acc">
+          <summary>顯示一種解答</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">button_exti.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">void EXTI_Button_Init(void) {
+  __HAL_RCC_GPIOA_CLK_ENABLE();   // 按鈕所在的埠
+  __HAL_RCC_GPIOC_CLK_ENABLE();   // LED 所在的埠
+  __HAL_RCC_SYSCFG_CLK_ENABLE();  // EXTI 埠繞接所必需
+
+  // PC13 上的 LED：推挽（push-pull）輸出
+  GPIO_InitTypeDef led = {0};
+  led.Pin   = GPIO_PIN_13;
+  led.Mode  = GPIO_MODE_OUTPUT_PP;
+  led.Pull  = GPIO_NOPULL;
+  led.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &amp;led);
+
+  // PA0 上的按鈕：在「下降」邊緣中斷，並帶上拉（pull-up）
+  GPIO_InitTypeDef btn = {0};
+  btn.Pin  = GPIO_PIN_0;
+  btn.Mode = GPIO_MODE_IT_FALLING;   // 接好 SYSCFG + EXTI FTSR + IMR
+  btn.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOA, &amp;btn);
+
+  // NVIC：啟用 EXTI0，給個適中的優先權
+  HAL_NVIC_SetPriority(EXTI0_IRQn, /*preempt*/ 2, /*sub*/ 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+}
+
+// 向量表進入點——讓 HAL 替我們解析並清除 EXTI→PR。
+void EXTI0_IRQHandler(void) {
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_0);
+}
+
+// HAL 在清除旗標後呼叫這個。保持簡短。
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+  if (GPIO_Pin == GPIO_PIN_0) {
+    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+  }
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">注意這裡的分工：<code>GPIO_MODE_IT_FALLING</code> 處理所有 SYSCFG/EXTI 暫存器寫入，NVIC 的呼叫是明確寫出的，而實際工作就是回呼裡的一次切換。在量產中你還會加上軟體去彈跳，這樣單一次按壓才不會被記成好幾次——但中斷的骨架就正是這樣。</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> 本章回顧</div>
+        <p>現在你能夠解釋：為什麼中斷勝過輪詢、NVIC 如何透過向量表進行分派，以及四步驟的 EXTI 路徑（SYSCFG 繞接 → 邊緣選擇 → IMR 解除遮罩 → NVIC 啟用）——包括那個線路共用的坑，<code>PA0</code> 和 <code>PB0</code> 都落在 EXTI0 上。你知道 STM32F4 的 4 個優先權位元給出 <span>$2^4=16$</span> 個層級，其中<strong>數字較小 = 優先權較高</strong>，而且搶佔優先權啟用巢狀、次優先權只負責打破平手。最重要的是，你再也不會忘記對 <code>EXTI-&gt;PR</code> 寫 1 清除——那個一旦放著不管，就會讓你的 ISR 永遠重複觸發的位元。接下來，我們會用這套機制，以硬體精度去擷取計時器事件。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="回到頂端">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../../../assets/vendor/highlight.min.js"></script>
+<script src="../../../assets/katex/katex.min.js"></script>
+<script src="../../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../../assets/vendor/mermaid.min.js"></script>
+<script src="../../../assets/app.js"></script>
+
+<!-- chapter-specific simulator -->
+<script>
+EM.sim("sim-prio", {
+  height: 240,
+  params: [
+    { key: "preA", label: "IRQ A 搶佔優先權", min: 0, max: 7, step: 1, value: 1, unit: "" },
+    { key: "preB", label: "IRQ B 搶佔優先權", min: 0, max: 7, step: 1, value: 3, unit: "" }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h, pad = 46 * dpr;
+    var laneB = H * 0.62, laneA = H * 0.30, hLane = 22 * dpr;
+    var x0 = pad, x1 = W - 14 * dpr, span = x1 - x0;
+    // A 在 B 的處理常式進行到一半時觸發
+    var tFire = 0.42, tEnd = 0.78;
+    var nests = v.preA < v.preB;   // 數字較小 = 優先權較高，會搶佔
+
+    ctx.font = (12 * dpr) + "px monospace";
+    ctx.fillStyle = "#6e7681";
+    ctx.fillText("B (搶佔 " + v.preB + ")", 6 * dpr, laneB - 6 * dpr);
+    ctx.fillText("A (搶佔 " + v.preA + ")", 6 * dpr, laneA - 6 * dpr);
+
+    // 標記：A 的邊緣到達
+    var xFire = x0 + span * tFire;
+    ctx.strokeStyle = "#475066"; ctx.lineWidth = 1 * dpr;
+    ctx.setLineDash([4 * dpr, 4 * dpr]);
+    ctx.beginPath(); ctx.moveTo(xFire, 14 * dpr); ctx.lineTo(xFire, H - 14 * dpr); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#9aa4b2"; ctx.fillText("A 觸發", xFire + 4 * dpr, 22 * dpr);
+
+    function bar(x, w, y, col) {
+      ctx.fillStyle = col;
+      ctx.fillRect(x, y, w, hLane);
+    }
+
+    if (nests) {
+      // B 執行、在 A 期間暫停、然後接續
+      bar(x0, xFire - x0, laneB, "#3b4a63");                 // A 之前的 B
+      bar(xFire, span * (tEnd - tFire), laneA, "#2ec4b6");   // A 巢狀疊在上面
+      var xResume = x0 + span * tEnd;
+      bar(xResume, x1 - xResume, laneB, "#3b4a63");          // B 接續執行
+      // A 執行期間 B 變灰的空檔
+      ctx.fillStyle = "#222a38";
+      ctx.fillRect(xFire, laneB, span * (tEnd - tFire), hLane);
+    } else {
+      // A 無法搶佔：B 執行到完成，A 等待，然後 A 執行
+      var xBend = x0 + span * tEnd;
+      bar(x0, xBend - x0, laneB, "#3b4a63");                 // B 不受打斷
+      bar(xBend, x1 - xBend, laneA, "#e0a44a");              // A 在 B 之後才執行
+      // 在觸發到 B 結束之間顯示 A 待處理（斜紋）
+      ctx.fillStyle = "#3a2f1c";
+      ctx.fillRect(xFire, laneA, xBend - xFire, hLane);
+    }
+
+    return nests
+      ? "A (" + v.preA + ") &lt; B (" + v.preB + ") → <b>A 搶佔 B</b> &nbsp;·&nbsp; B 暫停、A 執行、B 接續。"
+      : "A (" + v.preA + ") ≥ B (" + v.preB + ") → <b>不搶佔</b> &nbsp;·&nbsp; A 等 B 跑完，然後才執行。";
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>微分衝擊與感測器雜訊 — USV 的 PID 控制</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-pid" data-course="pid" data-track="main" data-chapter="06-derivative-noise">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> PID&nbsp;·&nbsp;USV</a>
+  <span class="spacer"></span>
+  <span class="track-pill">PID · 第 06 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">PID 課程 · 第 06 章 · 微分項，反過來咬你一口</div>
+        <h1>微分衝擊與感測器雜訊</h1>
+        <p>D 項是整個迴圈裡最有用、也最脆弱的部分。兩件日常事件就能把它變成負擔：<strong>移動設定值（setpoint）</strong>（一個約 600° 的舵尖峰，卻什麼都沒達成）以及<strong>羅盤雜訊（compass noise）</strong>（讓伺服機（servo）把自己磨到報廢）。兩者都有一行就能解的修法——但前提是你得搞懂微分（derivative）到底在對什麼東西作微分。</p>
+        <div class="meta"><span>⏱ 約 30 分鐘</span><span>🧭 對量測值微分</span><span>🔇 低通濾波器</span><span>⚡ 即時模擬</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="what-d-differentiates"><span class="sec-no">1</span>微分到底在對什麼東西作微分</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>怪罪輸出之前，先說清楚輸入是什麼</small></div>
+      <p>教科書上的 D 項是 $k_d\,\dfrac{de}{dt}$——也就是<em>誤差（error）</em>的變化率。這種講法藏了一個陷阱。誤差是 $e = \psi_\text{set} - \psi$，所以誤差會改變有兩個完全不同的原因：船動了（$\psi$ 變了），或是<em>你</em>把目標挪走了（$\psi_\text{set}$ 變了）。微分分不出這兩者；它只看到 $e$ 跳動，然後就反應。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話講完整章</div>
+        <p>D 被請來對抗船的<em>擺動</em>。對誤差作微分卻讓它也對<em>你的命令</em>和<em>感測器的謊言</em>起反應。兩個修法都歸結為：對正確的訊號作微分，而且別太死板地相信它。</p>
+      </div>
+
+      <p>當設定值靜止不動時，$\dot e = -\dot\psi$，兩種寫法完全等價——D 對抗船的轉向速率，正如它的設計（重讀第 03 章的實作範例：P 項與 D 項在接近過程中互相抵消，<em>那就是</em>阻尼（damping））。麻煩是在設定值移動、或量測（measurement）變得有雜訊的那一刻開始的。我們會先碰上這兩種故障，再把兩者都修好。</p>
+
+      <div class="mermaid">
+flowchart LR
+    SP["設定值 psi_set<br/>你移動它"] --> E["誤差 e = psi_set - psi"]
+    PSI["航向 psi<br/>有雜訊的羅盤"] --> E
+    E -->|"d(e)/dt"| DA["對誤差微分<br/>兩種輸入都會引發衝擊"]
+    PSI -->|"-d(psi)/dt"| DB["對量測值微分<br/>忽略設定值跳動"]
+</div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>兩個訊號，只差一個符號翻轉</small></div>
+      <p>把離散微分用兩種方式寫出來，兩者的關係是精確的：</p>
+      <div class="math-box">$$ \underbrace{\frac{e_n - e_{n-1}}{dt}}_{\text{對誤差微分}} \;=\; \frac{(\psi_{\text{set},n}-\psi_n)-(\psi_{\text{set},n-1}-\psi_{n-1})}{dt} \;=\; \underbrace{-\frac{\psi_n - \psi_{n-1}}{dt}}_{\text{對量測值微分}} \;+\; \frac{\Delta\psi_\text{set}}{dt} $$</div>
+      <p>它們恰好只差一項：$\Delta\psi_\text{set}/dt$，也就是你的<em>命令</em>的變化率。讓設定值保持固定，這一項就是零——兩者完全相同。對設定值施加階躍，這一項就會爆炸，因為 $dt = 0.05$ s 非常小，而階躍按定義就是一個瞬間的變化。<strong>那個多出來的項就是微分衝擊（derivative kick）。</strong></p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="derivative-kick"><span class="sec-no">2</span>案例 6 — 微分衝擊</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>一個新航點到了</small></div>
+      <p>船正開心地以 90° 巡航。一個新航點（waypoint）進來了，你的任務程式做了最理所當然的事：<code>setpoint = 100</code>。航向一毫米都沒動——但<em>誤差</em>在單一個 0.05 s 的取樣點（sample）內就跳了 10°。對誤差作微分卻把它看成一個尖叫般的轉向速率：</p>
+
+      <div class="math-box">$$ \dot e = \frac{10°}{0.05\text{ s}} = 200\ \tfrac{\circ}{\text{s}} = 3.49\ \tfrac{\text{rad}}{\text{s}}, \qquad D = k_d\,\dot e = 3 \times 3.49 \approx 10.5\text{ rad} \approx \mathbf{600°\ 的舵} $$</div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 在一個 ±35° 的致動器上命令 600° 的舵</div>
+        <p>有一個取樣點，命令會狠狠頂死在 +35° 的舵止（rudder stop）上，接著在下一個取樣點塌回正常（衝擊只持續恰好一步——之後 $\Delta\psi_\text{set}=0$ 又成立了）。船幾乎察覺不到一個取樣點的抽搐，但伺服機卻被無謂地從一頭甩到另一頭。<strong>船並沒有開始擺動——是你的設定值移動了。</strong>D 把一個命令當成擾動（disturbance）來反應。</p>
+      </div>
+
+      <p>這並不是一個刻意設計出來的邊角案例。每一次航點交接、每一次操作員撥動航向旋鈕、每一段任務規劃器的航段轉換，都會對設定值施加階躍。用對誤差微分（derivative-on-error），你會在<em>每一次</em>都得到一個舵尖峰。</p>
+
+      <div class="layer"><span class="step">③</span> 程式 <small>一行就能解的修法</small></div>
+      <p>改成對<strong>量測值</strong>作微分，而不是對誤差。由 §1 的恆等式，當設定值固定時兩個訊號在數值上相等——所以在正常操作下你什麼都不會損失——但量測值裡根本不含設定值的階躍，所以衝擊永遠不可能出現。</p>
+
+      <div class="codeblock">
+        <div class="code-head">pid_controller.py — update() 內部 <span class="lang">Python</span></div>
+<pre><code class="language-python"># 修改前 — 對誤差微分：設定值移動時會引發衝擊
+derivative = (error - self.prev_error) / dt
+
+# 修改後 — 對量測值微分：對設定值的階躍視而不見
+# 設定值固定時 d(e)/dt = -d(psi)/dt，所以翻一個符號
+derivative = -(measurement - self.prev_measurement) / dt
+self.prev_measurement = measurement      # 記住 psi，而不是 e
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 那個符號翻轉不是可選的</div>
+        <p>$e = \psi_\text{set} - \psi$，所以當 $\psi_\text{set}$ 固定時 $\dfrac{de}{dt} = -\dfrac{d\psi}{dt}$。忘掉那個負號，D 就會變成對擺動的<em>正</em>回授（feedback）——它會把船<em>朝著</em>它已經在轉的方向推。那不是個溫和的小 bug；那是一台振盪器。要保留負號。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="live-sim"><span class="sec-no">3</span>現場看兩種故障</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先弄壞它，再用你的拇指把它修好</small></div>
+      <p>這就是第 01 章那艘一模一樣的船（Nomoto 模型，$K=0.6$、$T=2.5$ s），跑著已整定（tuning）好的增益 $k_p=2,\ k_i=0.2,\ k_d=3$。在 $t=30$ s 時設定值跳到一個新航向，而你可以把羅盤雜訊調高調低。兩個開關讓你各自獨立地開啟與關閉每個修法——所以你可以先看到 bug，再看著它消失。</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>🧭</span> 在 t=30 s 時設定值跳動＋可調雜訊；切換「對量測值微分」與「D 低通濾波」</div>
+        <canvas id="sim-dn"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 該拖曳什麼，又該看什麼</div>
+        <p><strong>1. 衝擊。</strong>把雜訊設為 0。在<em>「對量測值微分」關閉</em>時，盯著 $t=30$ s 時的舵子圖（panel）——設定值一跳動，命令就在一個取樣點內衝到 +35° 的舵止。切換<em>「對量測值微分」開啟</em>：尖峰消失了，而航向對這次跳動的響應（response）毫無改變。那就是案例 6。</p>
+        <p><strong>2. 抖動。</strong>現在把<em>雜訊</em>滑桿往上拉（朝 σ = 0.5° 走）。在<em>「D 低通濾波」關閉</em>時，舵的命令會變成白雜訊般的碎渣猛撞舵止，而伺服機的軌跡會在它的速率限制（slew rate）上磨。切換<em>「低通濾波」開啟</em>（α ≈ 0.85）：碎渣塌縮到只剩一小部分。仔細看，航向會衰減得稍微遲鈍一點點——那就是濾波器讓你付出的延遲（lag）。那就是案例 7。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="noise"><span class="sec-no">4</span>案例 7 — 雜訊，微分的另一個黑暗面</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>一個真實的羅盤，而非完美的羅盤</small></div>
+      <p>你修好了衝擊。現在你把完美的模擬器航向換成一個真實的磁力計，它每次取樣讀數帶有約 $\sigma = 0.5°$ 的雜訊（noise）。船穩穩地維持在航線上——但 D 正在作微分，而雜訊的微分是殘酷的。相鄰兩次獨立讀數平均相差約 $\sigma\sqrt2$，再除以那個微小的時間步（timestep）：</p>
+
+      <div class="math-box">$$ \text{微分雜訊} \approx \frac{\sigma\sqrt2}{dt} = \frac{0.5°\times 1.414}{0.05\text{ s}} \approx 14\ \tfrac{\circ}{\text{s}} \quad\Longrightarrow\quad k_d \times 14\tfrac{\circ}{\text{s}} = 3 \times 14 \approx \mathbf{42°\ 的垃圾舵角} $$</div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 船好端端的。是你的硬體在垂死掙扎。</div>
+        <p>殘酷的地方在這裡：命令子圖是白雜訊在猛撞 ±35° 的舵止，伺服機在它 25 °/s 的速率限制上不停地磨——而<em>航向卻維持航線維持得好好的</em>。受控體（plant）把垃圾低通掉了（它是一個遲鈍的船體（hull）；±42° 的 10 Hz 碎渣平均掉了）。所以這個迴圈「能用」。與此同時，你的伺服機一週就磨壞，電池一小時就耗乾。這是一種你要用電流表、而不是用航向圖才找得到的 bug。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>為什麼微分會放大高頻</small></div>
+      <p>這不是運氣不好——這就是微分<em>本來會做的事</em>。一個正弦波 $\sin(\omega t)$ 微分後變成 $\omega\cos(\omega t)$：振幅被乘上了頻率 $\omega$。慢訊號（船真正的擺動，零點幾 Hz）幾乎不變；快訊號（感測器雜訊，逼近 10 Hz 的奈奎斯特頻率）則被乘上一個巨大的 $\omega$。微分是一個高通濾波器，而雜訊正好就住在增益最高的那一帶。這是結構性的——你沒辦法只靠調 $k_d$ 把它整定掉，那同時也會把你的阻尼掏空。</p>
+
+      <div class="layer"><span class="step">③</span> 程式 <small>對微分作低通濾波</small></div>
+      <p>修法是在你算出微分<em>之後</em>，對它套上一個一階（first-order）低通濾波器（low-pass filter）（一個指數移動平均）。每一步都把絕大部分的舊濾波值，混上一點點新的原始值：</p>
+
+      <div class="codeblock">
+        <div class="code-head">pid_controller.py — 濾波後的對量測值微分 <span class="lang">Python</span></div>
+<pre><code class="language-python">ALPHA = 0.85     # 0 = 不濾波（原始），1 = 凍結（無限延遲）
+
+# 對「量測值」的原始微分（案例 6 的修法已套用）
+d_raw = -(measurement - self.prev_measurement) / dt
+self.prev_measurement = measurement
+
+# 案例 7 的修法：對微分作指數低通濾波
+self.d_filt = ALPHA * self.d_filt + (1.0 - ALPHA) * d_raw
+derivative  = self.d_filt           # 把「這個」餵給 k_d，而不是 d_raw
+</code></pre>
+      </div>
+
+      <p>在 $\alpha = 0.85$ 時，每一個新的有雜訊取樣只貢獻它自身數值的 $1-\alpha = 0.15$，而不相關的雜訊在混合過程中會向零平均。對於標準差為 $\sigma_d$ 的白雜訊餵入一個 EMA，其數學為：</p>
+      <div class="math-box">$$ \sigma_\text{out} = \sigma_d\sqrt{\frac{1-\alpha}{1+\alpha}} = \sigma_d\sqrt{\frac{0.15}{1.85}} \approx 0.285\,\sigma_d $$</div>
+      <p>所以微分的抖動掉到約原始大小的 28%——±42° 的碎渣變成約 ±12°，伺服機也不再亂甩。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>天下沒有白吃的午餐——延遲的取捨</small></div>
+      <p>濾波器不只是衰減雜訊；它也<em>延遲</em>了微分。一個係數為 $\alpha$、步長為 $dt$ 的 EMA，其有效時間常數（time constant）為</p>
+      <div class="math-box">$$ \tau_\text{filt} = \frac{\alpha}{1-\alpha}\,dt = \frac{0.85}{0.15}\times 0.05\text{ s} \approx 0.28\text{ s} $$</div>
+      <p>那 0.28 s 的延遲被加到了 D 訊號上，所以 D 對船的擺動反應慢了零點幾秒。遲到的阻尼就是較弱的阻尼——把 $\alpha$ 推得太高，你就會把 D 本該消滅的超調（overshoot）重新引回來。這是逃不掉的：<strong>更多的雜訊抑制要付出更多的相位延遲（phase lag），而相位延遲正是讓一個迴圈不穩定的元凶（第 09 章）。</strong>對這艘船而言，$\alpha \approx 0.85$ 是甜蜜點——足以馴服 $\sigma=0.5°$，又小到讓阻尼幾乎察覺不到。</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🛰️</span> 現實世界的逃生口：往上游修</div>
+        <p>對付航向雜訊，老實的答案不是一個更肥的 D 濾波器——而是一個<em>更好的量測值</em>。陀螺儀（gyro）安靜又快，但會漂移；羅盤有雜訊，但是絕對的。把它們融合起來（互補濾波器（complementary filter），或一個 EKF），你就得到一個既平滑又無漂移的航向估計，於是 D 就有乾淨的資料可以微分。那正是你飛控板（flight controller）上的 IMU 融合早就在做的事，也是為什麼第 01 章告訴你要從 <code>/odometry/filtered</code> 取航向，而不是從原始磁力計取。對微分濾波是當後備防線；融合感測器才是真正的修法。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="both-fixes-together"><span class="sec-no">5</span>兩個修法，集於一個誠實的 update()</h2>
+
+      <div class="layer"><span class="step">③</span> 程式 <small>微分區塊，完成版</small></div>
+      <p>這裡是 <code>update()</code> 的微分那一半，兩個修法都套用了——用對量測值微分解衝擊，用 EMA 解雜訊。注意那兩個新的持續狀態：<code>prev_measurement</code>（我們現在記住的是 $\psi$，而非 $e$）和 <code>d_filt</code>（濾波器的記憶）。兩者都必須跨呼叫存活，也都必須在 <code>reset()</code> 裡清掉。</p>
+
+      <div class="codeblock">
+        <div class="code-head">pid_controller.py <span class="lang">Python</span></div>
+<pre><code class="language-python">class PID:
+    def __init__(self, kp, ki, kd, alpha=0.85, output_limits=(-1.0, 1.0)):
+        self.kp, self.ki, self.kd = kp, ki, kd
+        self.alpha = alpha                      # 微分低通濾波係數
+        self.out_min, self.out_max = output_limits
+        self.integral = 0.0
+        self.prev_measurement = None            # 我們現在對 psi 微分，而非 e
+        self.d_filt = 0.0                       # 微分的 EMA 記憶
+
+    def reset(self):
+        self.integral = 0.0
+        self.prev_measurement = None
+        self.d_filt = 0.0
+
+    def update(self, error, measurement, dt):
+        """error = wrap(setpoint - measurement); measurement = 航向 psi (rad)。"""
+        p = self.kp * error
+        self.integral += error * dt
+        i = self.ki * self.integral
+
+        # --- 微分：案例 6（對量測值）+ 案例 7（低通濾波）---
+        if self.prev_measurement is None:
+            d_raw = 0.0                          # 還沒有歷史 -> 不引發衝擊
+        else:
+            d_raw = -(measurement - self.prev_measurement) / dt   # 注意那個負號
+        self.prev_measurement = measurement
+        self.d_filt = self.alpha * self.d_filt + (1.0 - self.alpha) * d_raw
+        d = self.kd * self.d_filt
+
+        u = p + i + d
+        return max(self.out_min, min(self.out_max, u))            # 箝位
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 兩個值得再看一眼的細微之處</div>
+        <p>第一，<code>prev_measurement is None</code> 這個守衛：在 <code>reset()</code> 之後的第一個取樣點上沒有前一個航向，所以我們輸出 $d=0$，而不是拿垃圾去作微分——這跟第 01 章骨架對 <code>prev_error</code> 用的守衛一模一樣。第二，濾波器坐落在<em>原始微分</em>上，在 $k_d$ 之前——所以改變 $k_d$ 會重新縮放阻尼，卻不會動到濾波器的雜訊行為。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="recipe"><span class="sec-no">6</span>決策配方</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>何時該伸手去轉哪個旋鈕</small></div>
+      <p>這兩個修法並不是可有可無的修飾——它們是「一個會幫忙的 D 項」與「一個會傷害你的 D 項」之間的分野。決策樹很短：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>症狀</th><th>原因</th><th>修法</th><th>代價</th></tr></thead>
+        <tbody>
+          <tr><td>每當設定值改變就出現一個取樣點的舵尖峰</td><td>微分衝擊——D 對設定值的階躍作了微分</td><td>對量測值（翻過符號）作微分，而非對誤差</td><td>無——設定值穩定時兩者完全相同</td></tr>
+          <tr><td>維持穩定航向時，舵抖動／伺服機磨損</td><td>D 放大了感測器雜訊（高通行為）</td><td>對微分作低通濾波，$\alpha\approx 0.85$</td><td>對 D 加約 0.28 s 延遲 → 阻尼略微變弱</td></tr>
+          <tr><td>濾波之後還是太吵</td><td>量測值本身就壞掉了</td><td>在上游融合陀螺儀＋羅盤（互補濾波／EKF）</td><td>程式變多，但這才是對的答案</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 兩個修法共享同一個想法</div>
+        <p>每個修法都是關於<em>你讓微分看見什麼</em>。衝擊的修法把設定值從 D 的輸入中移除；雜訊的修法把高頻內容從 D 的輸入中移除。同一套哲學，兩個頻帶：不要去微分那些不屬於船真實運動的東西。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>換你了</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="pid06-why-no-kick">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">為什麼對<em>量測值</em>而不是對<em>誤差</em>作微分，能消除微分衝擊，又不改變控制器的正常行為？</div>
+        <ul class="ex-options">
+          <li data-correct="false">因為量測值永遠比誤差小，所以它的微分也比較小。</li>
+          <li data-correct="true">當設定值固定時，$de/dt = -d\psi/dt$，所以兩者完全相同——但量測值不含設定值的階躍，所以設定值的跳動進不了 D。</li>
+          <li data-correct="false">因為低通濾波器反正會把尖峰除掉，所以選哪個訊號都無所謂。</li>
+          <li data-correct="false">因為量測值的更新比設定值慢。</li>
+        </ul>
+        <div class="ex-explain">由恆等式 $\frac{de}{dt} = -\frac{d\psi}{dt} + \frac{\Delta\psi_\text{set}}{dt}$，兩種寫法之間唯一的差別就是 $\Delta\psi_\text{set}/dt$ 那一項。讓設定值靜止，它就是零——兩個訊號完全吻合，所以你什麼都不損失。對設定值施加階躍，那一項就是衝擊——而它完全住在<em>誤差</em>裡，從不住在量測值裡。對 $\psi$ 微分（連同符號翻轉）保住了阻尼，又甩掉了衝擊。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="pid06-kick-degrees" data-answer="600" data-tol="20">
+        <div class="ex-head"><span class="badge">Q2</span> 算一算</div>
+        <div class="ex-q">在對誤差微分且 $k_d = 3$ 的情況下，設定值在一個 $dt = 0.05$ s 的取樣點內階躍了 10°。D 的貢獻大小是多少，以<strong>命令舵角的度數</strong>表示？（提示：$\dot e = 10°/0.05$ s，換成 rad/s，乘上 $k_d$，再換回度數。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">° 舵</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$\dot e = 10°/0.05\text{ s} = 200\,°/\text{s} = 3.49\,\text{rad/s}$。接著 $D = k_d\,\dot e = 3 \times 3.49 = 10.47\,\text{rad} = 600°$。在一個 ±35° 的舵上，這會在一個取樣點內瞬間飽和——一個會把伺服機操壞、卻毫無用處的衝擊。那正是你在模擬器裡可以切換掉的那個尖峰。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="pid06-alpha-tradeoff">
+        <div class="ex-head"><span class="badge">Q3</span> 推導 — 濾波器的延遲</div>
+        <div class="ex-q">你很想把微分濾波器推到 $\alpha = 0.95$ 以進一步壓碎雜訊。估算這會給 D 加上多少有效延遲，並用控制的語言解釋為什麼那很危險。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">一個 EMA 的有效時間常數是 $\tau_\text{filt} = \dfrac{\alpha}{1-\alpha}\,dt$。在 $dt = 0.05$ s 下，把 $\alpha = 0.85$ 和 $\alpha = 0.95$ 比一比，然後想想對<em>阻尼</em>項施加額外延遲，會對一個迴圈造成什麼後果。</div></details>
+        <details class="ex-acc"><summary>顯示一個解法</summary><div class="acc-body">
+          <p>在 $\alpha = 0.85$ 時：$\tau_\text{filt} = \frac{0.85}{0.15}\times 0.05 \approx 0.28$ s。在 $\alpha = 0.95$ 時：$\tau_\text{filt} = \frac{0.95}{0.05}\times 0.05 = 0.95$ s——延遲<strong>超過三倍</strong>，而換來的卻只是一點點額外的雜訊降低（輸出雜訊從 $\approx 0.285\sigma_d$ 降到 $\approx 0.16\sigma_d$）。</p>
+          <p>為什麼那很危險：D 項存在的目的是<em>預判</em>船的擺動並提早對抗它。把 D 延遲約 1 s，意味著它對抗的是船一秒鐘前的擺動，而不是此刻正在發生的——遲到的阻尼就是微弱的阻尼，D 本來在消滅的超調又悄悄爬回來了。更糟的是，額外的相位延遲是高增益下通往不穩定的萬用路徑（第 09 章）。當 0.85 還不夠時，正確的做法是去修<em>量測值</em>——融合陀螺儀＋羅盤——而不是一直猛拉 $\alpha$，把你的阻尼餓得失去及時性。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章回顧</div>
+        <p>誤差會改變有兩個原因——船動了，或你移動了設定值——而單純的 $de/dt$ 對兩者都起反應。一個設定值的階躍給出 $\dot e = 200\,°/\text{s} \Rightarrow$ 在一個取樣點內約 600° 的舵：那就是<strong>微分衝擊</strong>。修法是對<em>量測值</em>作微分（翻過符號）；它在設定值穩定時完全相同，又對設定值的跳動視而不見。另外，D 是一個高通，所以一個 $\sigma=0.5°$ 的羅盤會產生約 42° 的舵碎渣，在船維持航線的同時把伺服機磨壞。修法是對微分作低通濾波，$\alpha\approx0.85$，把抖動降到約 28%——代價是約 0.28 s 的延遲與略微變弱的阻尼。對付雜訊更深層的修法是在上游做感測器融合（sensor fusion）。下一章：角度纏繞（angle wrapping）——那個會讓船朝錯誤方向轉 340° 的經典載具 bug。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+<script src="../../assets/pid-sim.js"></script>
+<script>EM.pidSim("sim-dn", EM.pidPresets.derivative());</script>
+</body>
+</html>

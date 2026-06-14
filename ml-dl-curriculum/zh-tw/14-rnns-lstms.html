@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>序列模型：RNN 與 LSTM — 機器學習與深度學習</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="14-rnns-lstms">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 14</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL 課程 · 14</div>
+        <h1>序列模型：RNN 與 LSTM</h1>
+        <p>你的機器人吐出的不是影像——而是<em>串流 (stream)</em>：IMU 樣本、GPS 軌跡、聲納回波，其中順序就是一切的關鍵。我們會打造一個一次讀一步、並且會<strong>記住</strong>的網路，親眼看清為何天真的記憶在長視野下會崩潰，接著用閘控單元修正它，並訓練一個真正的 LSTM 預測器。</p>
+        <div class="meta"><span>⏱ 約 45 分鐘</span><span>🧠 隱藏狀態與 BPTT</span><span>🚪 LSTM/GRU 閘門</span><span>🐍 PyTorch nn.LSTM</span></div>
+      </section>
+
+      <p class="lead"><strong>第 4 部分 · 第 14 課 · 程式技術棧：PyTorch</strong></p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 先備知識</div>
+        <p>本課建立在 <a href="13-cnns.html">13 — 卷積神經網路</a> 之上，你也會用到 <a href="11-pytorch-fundamentals.html">11 — PyTorch 基礎</a>、<a href="10-backpropagation.html">10 — 從零實作反向傳播</a>，以及 <a href="09-neural-networks-mlp.html">09 — 神經網路與前向傳播</a> 裡的前向傳播機制。</p>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎯</span> 學完本課你能</div>
+        <ul>
+          <li>解釋<strong>循環的核心想法 (recurrent idea)</strong>——同一組權重在每一個時間步上反覆套用，並攜帶一個<strong>隱藏狀態 (hidden state)</strong> 作為記憶。</li>
+          <li>將 RNN 沿時間<strong>展開 (unroll)</strong>，並說明為何<strong>時間反向傳播 (backprop-through-time, BPTT)</strong> 會讓長序列產生<strong>梯度消失/爆炸 (vanishing/exploding gradient)</strong> 的問題。</li>
+          <li>讀懂 <strong>LSTM</strong> 與 <strong>GRU</strong> 的閘門方程式，並用文字說出每個閘門在決定什麼。</li>
+          <li>區分<strong>序列對單一 (sequence-to-one)</strong>（分類/預測）與<strong>序列對序列 (sequence-to-sequence)</strong> 的問題框架。</li>
+          <li>在 PyTorch 中對一個帶雜訊的感測器訊號，建立並訓練一個小型 <strong>LSTM 預測器 (forecaster)</strong>，並繪製預測值與真實值的對照圖。</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>直覺理解</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺理解 <small>先建立畫面</small></div>
+      <p>CNN（第 13 課）在影像上滑動一個濾波器，對每個位置一視同仁。這之所以可行，是因為空間結構是固定的。但你的機器人產生的是<strong>序列 (sequence)</strong>：IMU 以 200 Hz 串流 <code>(ax, ay, az, gx, gy, gz)</code>、GPS 軌跡是隨時間排列的一連串位置、一次聲納回波是時間上的一維訊號。序列的決定性特徵在於<strong>順序很重要，而且過去會影響現在</strong>。一個速度讀數只有相對於它前面的讀數才有意義。</p>
+
+      <p>單純的 MLP 沒有「之前」的概念。如果你把一個 1000 步的視窗攤平成一個巨大的輸入向量，你會（a）把長度永遠固定死，而且（b）逼迫網路在每一個位移處重新學習同一個模式。我們想要一個能一次處理一步、並且能<strong>記住</strong>它看過什麼的模型。</p>
+
+      <p>那個記憶就是<strong>隱藏狀態</strong> $h_t$——一個由網路向前攜帶、並在每一步更新的向量。一個<strong>循環神經網路 (recurrent neural network, RNN)</strong> 其實就是一個小網路<em>一遍又一遍</em>地套用，把自己的輸出回饋給自己：</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話的模型</div>
+        <p>「看一眼當前的輸入，把它和你記得的東西結合起來，產生一份新的記憶，然後重複。」</p>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">📖</span> 類比——讀一個句子</div>
+        <p>你不會靠一次記住所有字來讀一個句子。你由左讀到右，腦中持有一份不斷更新的理解（隱藏狀態），並隨著每個字更新它。讀到結尾時，那份不斷更新的狀態就總結了整個句子。RNN 讀一段時間序列也是同樣的方式：一次一個樣本，更新一個記憶向量。</p>
+      </div>
+
+      <p>同一組權重在每一步都被重複使用——這就是<strong>跨時間的權重共享 (weight sharing across time)</strong>，恰好類比於 CNN 在空間上共享同一個濾波器。正是這一點讓 RNN 能用<em>固定</em>數量的參數處理<em>任意</em>長度的序列。</p>
+
+      <div class="mermaid">
+flowchart LR
+    x1["x₁"] --> C1((RNN 單元))
+    x2["x₂"] --> C2((RNN 單元))
+    x3["x₃"] --> C3((RNN 單元))
+    h0["h₀"] --> C1
+    C1 -- "h₁" --> C2
+    C2 -- "h₂" --> C3
+    C3 --> hT["h₃ → 輸出"]
+    C1 -.-> y1["y₁"]
+    C2 -.-> y2["y₂"]
+    C3 -.-> y3["y₃"]
+</div>
+
+      <p>那條把 $h$ 向右傳遞的水平箭頭<em>就是</em>記憶。圖中顯示的是網路被<strong>展開</strong>後的樣子：它看起來像一個深層網路，但每個單元都是<em>同一個</em>單元、用著<em>同一組</em>權重。</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>數學原理</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>推導這個單元</small></div>
+
+      <h3 id="vanilla-rnn-cell">標準版 RNN 單元</h3>
+      <p>在每一個時間步 $t$，單元接收當前輸入 $\mathbf{x}_t \in \mathbb{R}^{d}$ 與前一個隱藏狀態 $\mathbf{h}_{t-1} \in \mathbb{R}^{H}$，並產生一個新的隱藏狀態：</p>
+
+      <div class="math-box">$$ \mathbf{h}_t = \tanh\!\big(W_{xh}\,\mathbf{x}_t + W_{hh}\,\mathbf{h}_{t-1} + \mathbf{b}_h\big) $$</div>
+
+      <ul>
+        <li>$\mathbf{x}_t$ —— 第 $t$ 步的輸入（例如一個 IMU 樣本），維度為 $d$。</li>
+        <li>$\mathbf{h}_t$ —— 第 $t$ 步的隱藏狀態/記憶，維度為 $H$（$H$ 由你決定）。</li>
+        <li>$W_{xh} \in \mathbb{R}^{H\times d}$ —— 把輸入映射到隱藏空間的權重。</li>
+        <li>$W_{hh} \in \mathbb{R}^{H\times H}$ —— <strong>循環 (recurrent)</strong> 權重，把舊記憶映射成新記憶。</li>
+        <li>$\mathbf{b}_h \in \mathbb{R}^{H}$ —— 偏值。$\tanh$ 把值壓縮到 $(-1,1)$，所以狀態不會在一步之內爆掉。</li>
+      </ul>
+
+      <p><strong>它從何而來：</strong> 它其實就是一個單一的密集層（第 09 課），只是它的輸入是<em>串接</em> $[\mathbf{x}_t;\,\mathbf{h}_{t-1}]$。沒有什麼新東西——只差在我們把輸出回饋了進來。輸出的預測是作用在隱藏狀態上的第二個線性頭：</p>
+
+      <div class="math-box">$$ \hat{\mathbf{y}}_t = W_{hy}\,\mathbf{h}_t + \mathbf{b}_y $$</div>
+
+      <p>關鍵重點：$W_{xh}, W_{hh}, W_{hy}$ <strong>在每一個 $t$ 都相同</strong>。訓練學的是一個適用於所有位置的單元。</p>
+
+      <h3 id="bptt">時間反向傳播 (BPTT)</h3>
+      <p>要訓練，我們把這個迴圈展開到長度 $T$，得到一個 $T$ 層深的前饋圖，然後在它上面跑普通的反向傳播（第 10 課）。因為 $W_{hh}$ 被重複使用，它的梯度是它<strong>在每一步貢獻的總和</strong>：</p>
+
+      <div class="math-box">$$ \frac{\partial \mathcal{L}}{\partial W_{hh}} = \sum_{t=1}^{T} \frac{\partial \mathcal{L}_t}{\partial W_{hh}} $$</div>
+
+      <h3 id="vanishing-exploding">為何長序列會壞掉：梯度消失/爆炸</h3>
+      <p>要把誤差從第 $T$ 步往回送到第 $k$ 步，連鎖律會在每一步乘上一個雅可比矩陣 (Jacobian)：</p>
+
+      <div class="math-box">$$ \frac{\partial \mathbf{h}_T}{\partial \mathbf{h}_k} = \prod_{t=k+1}^{T} \frac{\partial \mathbf{h}_t}{\partial \mathbf{h}_{t-1}} = \prod_{t=k+1}^{T} \operatorname{diag}\!\big(\tanh'(\cdot)\big)\, W_{hh} $$</div>
+
+      <p>那是<strong>同一個矩陣被乘了 $T-k$ 次</strong>。許多份同一矩陣相乘的結果，其行為就像它的主特徵值 $\lambda$ 被升到那個次方：</p>
+
+      <div class="math-box">$$ \left\|\frac{\partial \mathbf{h}_T}{\partial \mathbf{h}_k}\right\| \sim |\lambda|^{\,T-k} $$</div>
+
+      <ul>
+        <li>若 $|\lambda| &lt; 1$ → 梯度會以指數方式<strong>消失</strong>。遠在過去的步驟得到的梯度約等於零，所以 RNN <strong>學不到長距離的依賴關係</strong>。（$\tanh' \le 1$ 讓這成為常見情況。）</li>
+        <li>若 $|\lambda| &gt; 1$ → 梯度會<strong>爆炸</strong>成 NaN。</li>
+      </ul>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 標準版 RNN 最核心的問題</div>
+        <p>來自 50 步以前的資訊無法影響學習。解方不是在最佳化器上耍什麼花招——而是換一個更好的單元。</p>
+      </div>
+
+      <h3 id="lstm-cell">LSTM：一種可學習的閘控記憶</h3>
+      <p><strong>長短期記憶 (Long Short-Term Memory, LSTM)</strong> 單元加入了第二個狀態，也就是<strong>細胞狀態 (cell state)</strong> $\mathbf{c}_t$，它的作用像一條記憶的輸送帶，資訊可以<em>幾乎原封不動地</em>在上面搭乘前進。三個<strong>閘門 (gate)</strong>（每個都是一個 sigmoid $\sigma \in (0,1)$，亦即一個柔性的 0–1 開關）決定要抹除、寫入與讀取什麼：</p>
+
+      <div class="math-box">$$
+\begin{aligned}
+\mathbf{f}_t &amp;= \sigma\big(W_f[\mathbf{h}_{t-1};\mathbf{x}_t] + \mathbf{b}_f\big) &amp;&amp; \textbf{遺忘}\ \text{閘：保留或抹除舊記憶}\\
+\mathbf{i}_t &amp;= \sigma\big(W_i[\mathbf{h}_{t-1};\mathbf{x}_t] + \mathbf{b}_i\big) &amp;&amp; \textbf{輸入}\ \text{閘：要寫入多少新資訊}\\
+\tilde{\mathbf{c}}_t &amp;= \tanh\big(W_c[\mathbf{h}_{t-1};\mathbf{x}_t] + \mathbf{b}_c\big) &amp;&amp; \text{可能要寫入的候選記憶}\\
+\mathbf{c}_t &amp;= \mathbf{f}_t \odot \mathbf{c}_{t-1} + \mathbf{i}_t \odot \tilde{\mathbf{c}}_t &amp;&amp; \text{更新這條輸送帶}\\
+\mathbf{o}_t &amp;= \sigma\big(W_o[\mathbf{h}_{t-1};\mathbf{x}_t] + \mathbf{b}_o\big) &amp;&amp; \textbf{輸出}\ \text{閘：要揭露什麼}\\
+\mathbf{h}_t &amp;= \mathbf{o}_t \odot \tanh(\mathbf{c}_t) &amp;&amp; \text{可讀取的隱藏狀態}
+\end{aligned}
+$$</div>
+
+      <p>這裡 $\odot$ 是逐元素相乘，$[\,;\,]$ 是串接。<strong>別去死背這些——把每個閘門當成一個決策來讀。</strong> 神奇之處在於 $\mathbf{c}_t$ 的更新那一行：它是<strong>加法式的</strong>，不是重複的矩陣相乘。當遺忘閘 $\mathbf{f}_t \approx 1$ 而輸入閘 $\approx 0$ 時，細胞狀態會<em>原封不動</em>地通過，因此 $\partial \mathbf{c}_t / \partial \mathbf{c}_{t-1} \approx 1$。梯度往回流動時不會縮小——<strong>梯度消失問題就此解決</strong>。網路會<em>學會</em>什麼時候該記住、什麼時候該遺忘。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 最關鍵的那一行</div>
+        <p>$\mathbf{c}_t = \mathbf{f}_t \odot \mathbf{c}_{t-1} + \mathbf{i}_t \odot \tilde{\mathbf{c}}_t$ 是一個<em>加法式</em>的更新。在 $\mathbf{f}_t\approx 1$ 時，它是一條穿越時間、近乎恆等的路徑——一條學來的「穿越時間的跳躍連接」，能毫髮無傷地承載梯度。</p>
+      </div>
+
+      <h3 id="gru-cell">GRU：精簡版的表親</h3>
+      <p><strong>閘控循環單元 (Gated Recurrent Unit, GRU)</strong> 把細胞狀態與隱藏狀態合而為一，並使用兩個閘門——一個<strong>重置 (reset)</strong> 閘 $\mathbf{r}_t$ 與一個<strong>更新 (update)</strong> 閘 $\mathbf{z}_t$：</p>
+
+      <div class="math-box">$$
+\begin{aligned}
+\mathbf{z}_t &amp;= \sigma(W_z[\mathbf{h}_{t-1};\mathbf{x}_t]), \quad
+\mathbf{r}_t = \sigma(W_r[\mathbf{h}_{t-1};\mathbf{x}_t])\\
+\tilde{\mathbf{h}}_t &amp;= \tanh\big(W_h[\mathbf{r}_t \odot \mathbf{h}_{t-1};\,\mathbf{x}_t]\big)\\
+\mathbf{h}_t &amp;= (1-\mathbf{z}_t)\odot \mathbf{h}_{t-1} + \mathbf{z}_t \odot \tilde{\mathbf{h}}_t
+\end{aligned}
+$$</div>
+
+      <p>參數較少、準確率常常相近、速度略快。經驗法則：<strong>先試 GRU；如果你需要再多一點容量，再改用 LSTM。</strong></p>
+
+      <h3 id="seq2one-seq2seq">序列對單一 vs. 序列對序列</h3>
+      <p>你如何讀出答案，定義了問題的框架：</p>
+
+      <div class="mermaid">
+flowchart TB
+    subgraph S2O["序列對單一（分類 / 預測下一個值）"]
+        a1[x₁]-->a2[x₂]-->a3[x₃]-->aout["只取最後的 hₜ → ŷ"]
+    end
+    subgraph S2S["序列對序列（每一步標註 / 翻譯）"]
+        b1[x₁]-->by1[ŷ₁]
+        b2[x₂]-->by2[ŷ₂]
+        b3[x₃]-->by3[ŷ₃]
+    end
+</div>
+
+      <ul>
+        <li><strong>序列對單一：</strong> 吃進整個視窗，使用<em>最後</em>的隱藏狀態 → 一個預測。（從 IMU 做手勢分類、「載具正在轉彎嗎？」、預測下一個位置。）</li>
+        <li><strong>序列對序列：</strong> 在<em>每一步</em>都吐出一個輸出。（逐時間步的地形標註、訊號去雜訊，或用於可變長度翻譯的編碼器–解碼器。）</li>
+      </ul>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>程式碼</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>逐行讀過</small></div>
+      <p>我們要預測一個<strong>帶雜訊的感測器訊號</strong>——把它想成一個阻尼且漂移的振盪，就像 USV 在波浪中的橫搖角度。這個任務是<strong>序列對單一</strong>：給定最後 <code>seq_len</code> 個樣本，預測下一個。我們使用 PyTorch 的 <code>nn.LSTM</code>。</p>
+
+      <div class="codeblock">
+        <div class="code-head">make_data.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+import matplotlib.pyplot as plt
+
+torch.manual_seed(0)
+np.random.seed(0)
+
+# ----- 1. 製作一個合成的「感測器」訊號 -------------------------------
+# 阻尼 + 緩慢漂移的正弦波：看起來逼真，但完全可重現。
+N = 1500
+t = np.linspace(0, 60, N)
+signal = (np.sin(2 * np.pi * 0.15 * t)            # 主振盪
+          + 0.3 * np.sin(2 * np.pi * 0.4 * t)     # 較高頻的漣漪
+          + 0.02 * t)                             # 緩慢向上的漂移
+signal += 0.10 * np.random.randn(N)               # 感測器雜訊
+signal = signal.astype(np.float32)
+
+# ----- 2. 把序列切成（輸入視窗 -&gt; 下一個值）的視窗 -------------
+SEQ_LEN = 40                                       # 模型能看到多少個過去的步驟
+def make_windows(series, seq_len):
+    X, y = [], []
+    for i in range(len(series) - seq_len):
+        X.append(series[i:i + seq_len])            # 過去的 40 個樣本
+        y.append(series[i + seq_len])              # 緊接著的下一個樣本
+    X = np.array(X)[..., None]                     # (samples, seq_len, 1 feature)
+    y = np.array(y)[..., None]                     # (samples, 1)
+    return torch.from_numpy(X), torch.from_numpy(y)
+
+X, y = make_windows(signal, SEQ_LEN)
+
+# 依時間順序切分——預測任務的切分「絕對不要」打亂（見常見陷阱）。
+split = int(0.7 * len(X))
+X_tr, y_tr = X[:split], y[:split]
+X_te, y_te = X[split:], y[split:]
+print(X_tr.shape, y_tr.shape)   # -&gt; torch.Size([1021, 40, 1]) torch.Size([1021, 1])
+</code></pre>
+      </div>
+
+      <p>現在來看模型。<code>nn.LSTM</code> 會回傳每一步的輸出，外加最終的 <code>(h, c)</code> 狀態；對序列對單一而言，我們取<strong>最後一步</strong>的隱藏輸出，並把它送過一個線性頭。</p>
+
+      <div class="codeblock">
+        <div class="code-head">model.py <span class="lang">Python</span></div>
+<pre><code class="language-python">class LSTMForecaster(nn.Module):
+    def __init__(self, input_size=1, hidden_size=32, num_layers=1):
+        super().__init__()
+        # batch_first=True -&gt; 張量的形狀是 (batch, seq_len, features)
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers,
+                            batch_first=True)
+        self.head = nn.Linear(hidden_size, 1)      # 隱藏狀態 -&gt; 純量預測
+
+    def forward(self, x):
+        # out: (batch, seq_len, hidden) —— 每一步的隱藏狀態
+        out, (h_n, c_n) = self.lstm(x)
+        last = out[:, -1, :]                       # 取最後一個時間步
+        return self.head(last)                     # (batch, 1)
+
+model = LSTMForecaster(hidden_size=32)
+opt = torch.optim.Adam(model.parameters(), lr=1e-2)
+loss_fn = nn.MSELoss()                             # 迴歸 -&gt; 均方誤差
+</code></pre>
+      </div>
+
+      <p>用小批次與<strong>梯度裁剪 (gradient clipping)</strong> 來訓練（這是防範梯度爆炸的廉價保險）：</p>
+
+      <div class="codeblock">
+        <div class="code-head">train.py <span class="lang">Python</span></div>
+<pre><code class="language-python">EPOCHS = 60
+BATCH = 64
+n = len(X_tr)
+
+for epoch in range(EPOCHS):
+    model.train()
+    perm = torch.randperm(n)                       # 打亂「視窗」（沒問題——每個視窗都是 i.i.d.）
+    epoch_loss = 0.0
+    for i in range(0, n, BATCH):
+        idx = perm[i:i + BATCH]
+        xb, yb = X_tr[idx], y_tr[idx]
+        opt.zero_grad()
+        pred = model(xb)
+        loss = loss_fn(pred, yb)
+        loss.backward()                            # 這就是時間反向傳播
+        nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # 裁剪爆炸的梯度
+        opt.step()
+        epoch_loss += loss.item() * len(idx)
+    if epoch % 10 == 0 or epoch == EPOCHS - 1:
+        print(f"epoch {epoch:2d}  train MSE {epoch_loss / n:.4f}")
+# -&gt; epoch  0  train MSE 0.2216
+# -&gt; epoch 50  train MSE 0.0134
+# -&gt; epoch 59  train MSE 0.0143   （你的數字會很接近，但不會完全相同）
+</code></pre>
+      </div>
+
+      <p>在保留的尾段資料上評估，並繪製預測值與真實值的對照圖：</p>
+
+      <div class="codeblock">
+        <div class="code-head">evaluate.py <span class="lang">Python</span></div>
+<pre><code class="language-python">model.eval()
+with torch.no_grad():
+    pred_te = model(X_te).squeeze().numpy()
+truth_te = y_te.squeeze().numpy()
+test_mse = np.mean((pred_te - truth_te) ** 2)
+print(f"test MSE {test_mse:.4f}")   # -&gt; test MSE 0.0136
+
+plt.figure(figsize=(11, 4))
+plt.plot(truth_te, label="truth", lw=2)
+plt.plot(pred_te, label="LSTM 1-step forecast", lw=1.2, alpha=0.85)
+plt.xlabel("time step (test region)")
+plt.ylabel("sensor value")
+plt.legend(); plt.title("LSTM one-step-ahead forecast"); plt.tight_layout()
+plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 你應該看到</div>
+        <p>橘色的預測緊緊跟著藍色的真實值穿過各個振盪，並跟上那緩慢向上的漂移，唯一可見的誤差是在尖銳的波峰/波谷處略有滯後——這是 1 步預測器的經典特徵，它會傾向於賭「明天看起來像今天」。</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🧪</span> 試試看</div>
+        <p>把 <code>nn.LSTM</code> 換成 <code>nn.GRU</code>（解包時去掉 <code>c_n</code>：GRU 回傳的是 <code>out, h_n</code>）。你通常會用更少的參數得到相當的 MSE。然後把 <code>SEQ_LEN = 4</code>，看看擬合如何劣化——模型再也看不到一個完整的振盪週期了。</p>
+      </div>
+
+      <h3 id="multi-step-rollout">多步（閉迴路）預測</h3>
+      <p>預測<em>一</em>步很容易；誠實的考驗是靠<strong>把預測值餵回去</strong>來往前滾動：</p>
+
+      <div class="codeblock">
+        <div class="code-head">rollout.py <span class="lang">Python</span></div>
+<pre><code class="language-python">def rollout(model, seed_window, steps):
+    """自迴歸預測：預測、附加、滑動、重複。"""
+    model.eval()
+    window = seed_window.clone()                   # (1, seq_len, 1)
+    preds = []
+    with torch.no_grad():
+        for _ in range(steps):
+            nxt = model(window)                    # (1, 1)
+            preds.append(nxt.item())
+            # 滑動視窗：丟掉最舊的，附加上預測值
+            window = torch.cat([window[:, 1:, :], nxt[:, None, :]], dim=1)
+    return np.array(preds)
+
+seed = X_te[0:1]                                   # 用一個視窗來起頭
+future = rollout(model, seed, steps=120)
+# 誤差在此處會累積——長視野下要預期會有漂移（見常見陷阱）。
+</code></pre>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>實際案例</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>為何這很重要</small></div>
+      <p><strong>載具軌跡 / IMU 航位推算預測。</strong> 在 USV 上，GPS 約以 1–10 Hz 抵達，但 IMU 卻以約 100–200 Hz 運行。在兩次 GPS 定位之間，你需要為路徑跟隨控制器<strong>預測船會在哪裡</strong>。一個短視野的預測器可以直接從記錄下來的序列中學到船的動力學——慣性、轉向率、波浪引起的橫擺——完全不需要手工推導的運動模型。</p>
+
+      <p><strong>具體來說：</strong></p>
+      <ul>
+        <li><strong>每一步的輸入：</strong> 一個來自 IMU + 里程計的特徵向量 $\mathbf{x}_t = (v_x, v_y, \text{yaw}, \dot{\text{yaw}}, a_x, a_y)$。所以 <code>input_size=6</code> 而不是 1。</li>
+        <li><strong>視窗：</strong> 最後 0.5 秒（例如 50–100 個樣本）——長到足以捕捉當前的操縱動作。</li>
+        <li><strong>目標（序列對單一）：</strong> 下一個位置增量 $(\Delta x, \Delta y)$，亦即 <code>head = nn.Linear(hidden, 2)</code>。把這些增量積分起來就能延伸軌跡。</li>
+        <li><strong>為何用 LSTM 而不用 MLP：</strong> 船<em>未來</em>的運動取決於它<em>近期的歷史</em>（你正在轉彎途中、正在減速，或正在乘浪）。隱藏/細胞狀態編碼了「我正處於什麼操縱動作中」，這是一個在單一樣本上無狀態的 MLP 做不到的。</li>
+      </ul>
+
+      <p>一個很相近的表親是<strong>異常 / 故障偵測</strong>：在你的 IMU 串流上跑一個序列對單一的預測器；當預測誤差暴增時，代表訊號不再表現得像正常運作了——可能是感測器卡死、一次碰撞，或推進器故障。</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🌊</span> 一個可供練習、有名稱的公開資料集</div>
+        <p><strong>UCI 人類活動辨識 (Human Activity Recognition, HAR)</strong> 資料集——智慧型手機的加速度計 + 陀螺儀序列，標註著走路 / 坐著 / 爬樓梯等等。它的形狀和你機器人的 IMU 串流一模一樣，是教科書級的<strong>序列對單一分類</strong>目標：餵進視窗、讀出最終的隱藏狀態、<code>nn.Linear(hidden, n_classes)</code> + 交叉熵（第 04 課）。把迴歸頭換成分類頭，是相對於上面程式碼<em>唯一</em>要改的地方。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>常見陷阱與技巧</h2>
+
+      <ul>
+        <li><strong>在時間序列中，絕對不要打亂訓練/測試的<em>切分</em>。</strong> 隨機切分會讓未來洩漏到過去，給你一個幻想中的測試分數。要依時間切分（我們就是這麼做的：前 70% 訓練、後 30% 測試）。訓練時打亂<em>視窗</em>是沒問題的——每個視窗都是一個獨立的樣本。</li>
+        <li><strong>留意張量的形狀慣例。</strong> 用 <code>batch_first=True</code> 時一切都是 <code>(batch, seq, feature)</code>；預設則是 <code>(seq, batch, feature)</code>。這裡若發生一次無聲的轉置，訓練出來的模型就會學到一堆垃圾。永遠記得 <code>print(x.shape)</code>。</li>
+        <li><strong>裁剪梯度。</strong> 即使是 LSTM，在長而不規律的序列上也可能遇到梯度爆炸。<code>clip_grad_norm_(..., 1.0)</code> 不花什麼成本，卻能防止 NaN 暴掉。</li>
+        <li><strong>正規化你的輸入。</strong> IMU 各通道的尺度差異極大（rad/s vs m/s²）。用<strong>僅來自訓練集的統計量</strong>對每個特徵做標準化（第 05 課），否則 LSTM 會把容量浪費在處理縮放上。</li>
+        <li><strong>1 步預測會奉承你；多步才是真相。</strong> 一個只預測「下一個 ≈ 當前」的模型，可以拿到很低的 1 步 MSE，卻毫無用處。永遠要在你真正的規劃視野上評估<strong>滾動 (rollout)</strong> 的誤差——它會累積。</li>
+        <li><strong>更多層數/單元 ≠ 更好。</strong> RNN 過度擬合得很快，訓練得很慢（時間迴圈是循序的，所以無法像 CNN 那樣平行化）。先從 1 層、32–64 個隱藏單元開始，在加深之前先加上丟棄法（<code>nn.LSTM(..., dropout=0.2, num_layers=2)</code>）。</li>
+      </ul>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>自我檢測</h2>
+
+      <p><strong>Q1.</strong> 為什麼標準版 RNN 很難把第 5 步的事件連結到第 200 步的目標？而 LSTM 具體靠什麼修正了這一點？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>BPTT 在每一步乘上一個雅可比矩陣；歷經 195 步，那就是循環矩陣被升到一個很高的次方，於是梯度像 $|\lambda|^{195}\to 0$ 一樣縮小（消失）——早期的事件得到約等於零的學習訊號。LSTM 的細胞狀態更新 $\mathbf{c}_t = \mathbf{f}_t\odot\mathbf{c}_{t-1} + \mathbf{i}_t\odot\tilde{\mathbf{c}}_t$ 是<strong>加法式的</strong>。當遺忘閘接近 1 時，$\partial\mathbf{c}_t/\partial\mathbf{c}_{t-1}\approx 1$，所以梯度能往回流經許多步而不衰減——這是一條學來的「穿越時間的跳躍連接」。</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> 你有 50,000 個固定長度的 IMU 視窗，每個都標註著 6 種活動之一。這是序列對單一還是序列對序列？最後一層 + 損失該用什麼？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>序列對單一：整個視窗對應一個標籤。取<strong>最後</strong>的隱藏狀態，把它餵給 <code>nn.Linear(hidden_size, 6)</code>，並用 <code>nn.CrossEntropyLoss</code> 訓練。（若是逐步的標籤，那就會變成序列對序列。）</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> 在 LSTM 方程式中，如果遺忘閘的輸出在每一步都卡在全零，細胞會怎麼樣？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>$\mathbf{f}_t\odot\mathbf{c}_{t-1}=0$，所以細胞狀態每一步都被完全覆寫——所有長期記憶都被抹除，LSTM 退化成一個無記憶的單元。遺忘閘是可學習的（在好的實作中初始化時還會偏向 1），正是這一點保住了長距離的記憶。</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> 你的 1 步測試 MSE 非常出色，但使用 120 步滾動的控制器卻表現得很糟。發生了什麼事？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p><strong>累積誤差 / 暴露偏差 (exposure bias)。</strong> 訓練時每個預測都是以<em>真實的</em>過去值為條件；但在滾動中，它是以它<em>自己</em>（略有偏差）的預測為條件，於是小誤差回饋並累積。要在控制器實際使用的多步視野上評估，必要時也在其上訓練（例如排程取樣 scheduled sampling）。</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> 為什麼 CNN 能平行處理其輸入的所有位置，而 RNN 不能？這對下一課為何重要？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>CNN 對每個位置獨立地套用它的濾波器——完全平行。RNN 的第 $t$ 步需要 $\mathbf{h}_{t-1}$，所以它必須在時間上<strong>循序地</strong>運行；這在長序列上限制了吞吐量。Transformer（第 15 課）以<strong>注意力</strong>徹底移除了循環，重新取得平行性，並直接建模長距離的依賴關係——這就是它為何已大致取代了 RNN。</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>換你了</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml14-additive-path">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">LSTM 細胞狀態更新中，是哪一個單一的結構性特性，讓梯度能存活跨越數百個時間步？</div>
+        <ul class="ex-options">
+          <li data-correct="false">$\tilde{\mathbf{c}}_t$ 裡的 $\tanh$ 讓值保持有界，所以它們永遠不會溢位。</li>
+          <li data-correct="true">更新式 $\mathbf{c}_t = \mathbf{f}_t\odot\mathbf{c}_{t-1} + \mathbf{i}_t\odot\tilde{\mathbf{c}}_t$ 是<strong>加法式的</strong>，當遺忘閘接近 1 時，給出一條近乎恆等的路徑（$\partial\mathbf{c}_t/\partial\mathbf{c}_{t-1}\approx 1$）。</li>
+          <li data-correct="false">輸出閘 $\mathbf{o}_t$ 在每一步都把梯度乘上一個大於 1 的常數。</li>
+          <li data-correct="false">三個閘門都用 sigmoid，而它比 $\tanh$ 的導數還大。</li>
+        </ul>
+        <div class="ex-explain">標準版 RNN 在每一步把循環雅可比矩陣相乘一次，所以長距離的梯度行為像 $|\lambda|^{T-k}$ 一樣消失。LSTM 把那個重複的相乘換成了一個<em>加法</em>：當 $\mathbf{f}_t\approx 1$ 而 $\mathbf{i}_t\approx 0$ 時，細胞狀態原封不動地穿過，且 $\partial\mathbf{c}_t/\partial\mathbf{c}_{t-1}\approx 1$，於是梯度既不縮小也不爆炸——一條學來的穿越時間的跳躍連接。其他選項都點名了單元裡真實存在的成分，但沒有一個是保存梯度的機制。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml14-vanishing-factor" data-answer="0.000133" data-tol="0.00005">
+        <div class="ex-head"><span class="badge">Q2</span> 算算看</div>
+        <div class="ex-q">標準版 RNN 的長距離梯度大小會以 $|\lambda|^{T-k}$ 的方式縮放。當主特徵值 $|\lambda| = 0.9$、間隔為 $T-k = 85$ 步時，梯度縮小因子 $|\lambda|^{T-k}$ 是多少？（計算 $0.9^{85}$。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">×</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$0.9^{85} = e^{85\ln 0.9} = e^{85\times(-0.10536)} = e^{-8.956} \approx 1.29\times 10^{-4} \approx 0.000133$。來自 85 步以前的訊號，抵達時被乘上了約 $1.3\times 10^{-4}$——實際上等於零的學習量。那個指數衰減正是梯度消失問題；LSTM 的加法式細胞路徑避開了它。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml14-output-shape">
+        <div class="ex-head"><span class="badge">Q3</span> 推導——挑出正確的隱藏狀態</div>
+        <div class="ex-q">在 <code>LSTMForecaster.forward</code> 裡，<code>nn.LSTM</code> 回傳形狀為 <code>(batch, seq_len, hidden)</code> 的 <code>out</code>。對於<strong>序列對單一</strong>的預測，你要把哪一個切片餵給線性頭？為什麼是那一個？而對於<strong>序列對序列</strong>的任務又會有什麼改變？</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">第 $t$ 步的隱藏狀態總結了單元到第 $t$ 步（含）為止所看到的一切。對於一個預測，你想要的是已經看過<em>整個</em>視窗的那個狀態。</div></details>
+        <details class="ex-acc"><summary>顯示一個解法</summary><div class="acc-body">
+          <p>取 <code>last = out[:, -1, :]</code>——也就是<strong>最後</strong>一個時間步的隱藏狀態，形狀為 <code>(batch, hidden)</code>。那個狀態已經吃進了全部 <code>seq_len</code> 個樣本，所以它是單元對整個視窗的完整總結；<code>self.head(last)</code> 把它映射成單一的下一個值預測 <code>(batch, 1)</code>。（等價地，你也可以用 <code>h_n[-1]</code>，即最後一層的最終隱藏狀態。）對於<strong>序列對序列</strong>的任務，你則改為保留<em>整個</em> <code>out</code> 張量，並在每一步都套用那個頭——例如 <code>self.head(out)</code> 得到 <code>(batch, seq_len, out_dim)</code>——對每一個時間步而非每一個視窗各產生一個輸出。</p>
+        </div></details>
+      </div>
+
+      <!-- ============================================================ recap -->
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本課回顧</div>
+        <p>一個 <strong>RNN</strong> 跨時間重複使用一個單元，攜帶一個<strong>隱藏狀態</strong>作為記憶；訓練是在展開後的圖上做<strong>時間反向傳播</strong>。每一步乘上一個雅可比矩陣，會讓長距離的梯度<strong>消失或爆炸</strong>——標準版 RNN 學不到長依賴關係。<strong>LSTM/GRU 閘門</strong>加入了一個加法式、閘控的<strong>細胞狀態</strong>，讓記憶（與梯度）能流經許多步；網路會<em>學會</em>要記住、寫入與讀取什麼。框架很重要：<strong>序列對單一</strong>（從最終狀態得出一個預測）vs <strong>序列對序列</strong>（每一步一個預測）。在實務上：依時間切分、逐特徵正規化、裁剪梯度，並用<strong>多步滾動</strong>而非 1 步 MSE 來評斷自己。RNN 是循序的，超過數百步就會吃力——接下來，<a href="15-attention-transformers.html">15 — 注意力與 Transformer</a> 以注意力一次處理整個序列。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

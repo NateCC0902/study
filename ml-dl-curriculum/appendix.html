@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Appendix: Math Cheatsheet — Machine Learning &amp; Deep Learning</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="appendix">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · A</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL Course · Appendix · Reference</div>
+        <h1>Appendix: Math Cheatsheet</h1>
+        <p>A scannable quick-reference for the formulas used throughout the 22-lesson ML/DL course. Each entry has a one-line <strong>what/when</strong> note and a pointer back to the lesson where it's taught. This is a lookup table, not a tutorial — see the lessons for derivations and intuition.</p>
+        <div class="meta"><span>⏱ ~quick lookup</span><span>🧩 All lessons</span><span>∑ Formula reference</span></div>
+      </section>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🧭</span> Appendix · Reference card · Notation</div>
+        <p><strong>Notation:</strong> scalars $a$, vectors $\mathbf{x}$ (column), matrices $X$, $\odot$ = elementwise (Hadamard) product, $\hat{y}$ = prediction, $m$ or $N$ = number of examples, $\alpha$ = learning rate.</p>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="linear-algebra"><span class="sec-no">1</span>Linear Algebra Essentials</h2>
+
+      <p>Taught in <strong>01 · Math Foundations</strong>; shapes recur everywhere (especially <strong>09 · Neural Networks / MLP</strong>).</p>
+
+      <p><strong>Dot product</strong> — alignment / similarity of two vectors; zero ⇒ orthogonal.</p>
+      <div class="math-box">$$ \mathbf{a}\cdot\mathbf{b} = \mathbf{a}^\top\mathbf{b} = \sum_{i=1}^{n} a_i b_i = \lVert\mathbf{a}\rVert\,\lVert\mathbf{b}\rVert\cos\theta $$</div>
+
+      <p><strong>Cosine similarity</strong> — direction-only similarity, scale-invariant; used for embeddings (<strong>17 · Transfer Learning / LLMs / MLOps</strong>).</p>
+      <div class="math-box">$$ \cos\theta = \frac{\mathbf{a}^\top\mathbf{b}}{\lVert\mathbf{a}\rVert\,\lVert\mathbf{b}\rVert} $$</div>
+
+      <p><strong>Matrix–vector / matrix–matrix product</strong> — the workhorse; inner dimensions must match.</p>
+      <div class="math-box">$$ \underbrace{A}_{m\times n}\,\underbrace{\mathbf{x}}_{n\times 1} = \underbrace{\mathbf{b}}_{m\times 1}, \qquad \underbrace{A}_{m\times n}\,\underbrace{B}_{n\times p} = \underbrace{C}_{m\times p}, \quad C_{ij}=\sum_{k=1}^{n}A_{ik}B_{kj} $$</div>
+
+      <p><strong>Transpose, identity, inverse</strong> — $I$ is the multiplicative identity; $A^{-1}$ undoes $A$ (only if square and non-singular).</p>
+      <div class="math-box">$$ (AB)^\top = B^\top A^\top,\qquad AI = IA = A,\qquad A A^{-1} = A^{-1}A = I $$</div>
+
+      <p><strong>L1 and L2 norms</strong> — vector "size"; L2 is Euclidean length, L1 is sum of absolute values (and the basis of regularization, §7).</p>
+      <div class="math-box">$$ \lVert\mathbf{x}\rVert_1 = \sum_i |x_i|, \qquad \lVert\mathbf{x}\rVert_2 = \sqrt{\sum_i x_i^2} = \sqrt{\mathbf{x}^\top\mathbf{x}} $$</div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="calculus"><span class="sec-no">2</span>Calculus for ML</h2>
+
+      <p>Taught in <strong>01 · Math Foundations</strong>; the engine behind training (<strong>03 · Gradient Descent</strong>, <strong>10 · Backpropagation</strong>).</p>
+
+      <p><strong>Derivative as slope</strong> — local rate of change; zero at minima/maxima.</p>
+      <div class="math-box">$$ f'(x) = \frac{df}{dx} = \lim_{h\to 0}\frac{f(x+h)-f(x)}{h} $$</div>
+
+      <p><strong>Gradient</strong> — vector of partials; points in the direction of steepest <strong>ascent</strong> (so we descend along $-\nabla$).</p>
+      <div class="math-box">$$ \nabla f(\mathbf{x}) = \left[\frac{\partial f}{\partial x_1},\ \frac{\partial f}{\partial x_2},\ \dots,\ \frac{\partial f}{\partial x_n}\right]^\top $$</div>
+
+      <p><strong>Chain rule</strong> — compose local gradients along a path; the seed of backpropagation.</p>
+      <div class="math-box">$$ \frac{d}{dx}f\big(g(x)\big) = f'\big(g(x)\big)\,g'(x), \qquad \frac{\partial L}{\partial x} = \sum_{k}\frac{\partial L}{\partial u_k}\frac{\partial u_k}{\partial x} $$</div>
+
+      <p><strong>Centered finite difference</strong> — numerical gradient check for verifying backprop (<strong>10 · Backpropagation</strong>).</p>
+      <div class="math-box">$$ \frac{\partial f}{\partial \theta} \approx \frac{f(\theta+\epsilon)-f(\theta-\epsilon)}{2\epsilon} $$</div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="probability"><span class="sec-no">3</span>Probability</h2>
+
+      <p>Taught in <strong>01 · Math Foundations</strong>; underpins MLE losses (§4) and generative models (<strong>16 · Generative Models</strong>).</p>
+
+      <p><strong>Expectation (mean) and variance</strong> — center and spread of a random variable.</p>
+      <div class="math-box">$$ \mathbb{E}[X] = \mu = \sum_x x\,p(x)\ \ \text{(or }\textstyle\int x\,p(x)\,dx), \qquad \operatorname{Var}(X) = \mathbb{E}\big[(X-\mu)^2\big] = \mathbb{E}[X^2]-\mu^2 $$</div>
+
+      <p><strong>Gaussian (normal) distribution</strong> — the default noise/uncertainty model; squared-error loss is its MLE.</p>
+      <div class="math-box">$$ \mathcal{N}(x\mid\mu,\sigma^2) = \frac{1}{\sqrt{2\pi\sigma^2}}\exp\!\left(-\frac{(x-\mu)^2}{2\sigma^2}\right) $$</div>
+
+      <p><strong>Conditional probability &amp; Bayes' rule</strong> — invert $p(\text{data}\mid\text{class})$ into $p(\text{class}\mid\text{data})$; the discriminative/generative link (<strong>16 · Generative Models</strong>).</p>
+      <div class="math-box">$$ P(A\mid B) = \frac{P(A\cap B)}{P(B)}, \qquad P(A\mid B) = \frac{P(B\mid A)\,P(A)}{P(B)} $$</div>
+
+      <p><strong>KL divergence</strong> — distance between distributions; the regularizer term in the VAE ELBO (<strong>16 · Generative Models</strong>).</p>
+      <div class="math-box">$$ D_{\mathrm{KL}}(p\,\Vert\,q) = \sum_x p(x)\log\frac{p(x)}{q(x)} $$</div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="loss-functions"><span class="sec-no">4</span>Loss Functions</h2>
+
+      <p>Regression losses in <strong>02 · Linear Regression</strong> / <strong>05 · Overfitting &amp; Evaluation</strong>; classification losses in <strong>04 · Logistic Regression</strong>; hinge in <strong>07 · SVM &amp; Kernels</strong>. The clean shared gradient $X^\top(\hat{y}-y)$ recurs in <strong>10 · Backpropagation</strong>.</p>
+
+      <p><strong>Mean Squared Error (MSE)</strong> — regression default; smooth, convex, outlier-sensitive (Gaussian MLE).</p>
+      <div class="math-box">$$ J_{\text{MSE}} = \frac{1}{m}\sum_{i=1}^{m}(\hat{y}_i - y_i)^2, \qquad \nabla_{\mathbf{w}} J = \frac{2}{m}X^\top(X\mathbf{w}-\mathbf{y}) $$</div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">📝</span> Factor-of-2 convention</div>
+        <p>The course often drops the factor 2 (absorbed into $\alpha$) and/or uses $\tfrac{1}{2m}$ to cancel it: $\nabla J = \tfrac{1}{m}X^\top(X\mathbf{w}-\mathbf{y})$.</p>
+      </div>
+
+      <p><strong>Mean Absolute Error (MAE)</strong> — robust to outliers; constant-magnitude gradient (non-smooth at 0).</p>
+      <div class="math-box">$$ J_{\text{MAE}} = \frac{1}{m}\sum_{i=1}^{m}\lvert\hat{y}_i - y_i\rvert $$</div>
+
+      <p><strong>Binary Cross-Entropy (BCE / log-loss)</strong> — two-class classification; MLE under Bernoulli. Use with sigmoid output.</p>
+      <div class="math-box">$$ J_{\text{BCE}} = -\frac{1}{m}\sum_{i=1}^{m}\Big[y_i\log\hat{y}_i + (1-y_i)\log(1-\hat{y}_i)\Big] $$</div>
+
+      <p>Sigmoid + BCE gives the clean cancelled gradient (no activation-derivative factor):</p>
+      <div class="math-box">$$ \nabla_{\mathbf{w}} J = \frac{1}{m}X^\top(\hat{\mathbf{y}}-\mathbf{y}) $$</div>
+
+      <p><strong>Categorical Cross-Entropy</strong> — multi-class; pair with softmax. $y$ is one-hot, $k$ indexes classes.</p>
+      <div class="math-box">$$ J_{\text{CCE}} = -\frac{1}{m}\sum_{i=1}^{m}\sum_{k=1}^{K} y_{ik}\log\hat{y}_{ik} $$</div>
+
+      <p>Softmax + CCE collapses to the same form: $\partial J/\partial z_k = \hat{y}_k - y_k$.</p>
+
+      <p><strong>Hinge loss (soft-margin SVM)</strong> — max-margin classification with labels $y\in\{-1,+1\}$ and score $z=\mathbf{w}^\top\mathbf{x}+b$; zero loss once a point is correctly classified beyond the margin.</p>
+      <div class="math-box">$$ J_{\text{hinge}} = \frac{1}{m}\sum_{i=1}^{m}\max\!\big(0,\ 1 - y_i z_i\big) + \frac{\lambda}{2}\lVert\mathbf{w}\rVert_2^2 $$</div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="gradient-descent"><span class="sec-no">5</span>Gradient Descent Update Rules</h2>
+
+      <p>Vanilla GD in <strong>03 · Gradient Descent</strong>; momentum / RMSProp / Adam in <strong>12 · Training Deep Nets</strong>. All minimize $J(\theta)$.</p>
+
+      <p><strong>Vanilla (batch) gradient descent</strong> — step downhill by $\alpha$ times the gradient.</p>
+      <div class="math-box">$$ \theta \leftarrow \theta - \alpha\,\nabla_\theta J(\theta) $$</div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">📝</span> Step-size stability</div>
+        <p>Stability for quadratic/MSE bowls requires $\alpha &lt; 2/\lambda_{\max}$ (largest curvature). Mini-batch/SGD uses the same rule on a batch gradient $\hat{g}$.</p>
+      </div>
+
+      <p><strong>Momentum</strong> — accumulate a velocity to roll through small bumps and dampen oscillation.</p>
+      <div class="math-box">$$ \mathbf{v} \leftarrow \beta\,\mathbf{v} + \nabla_\theta J, \qquad \theta \leftarrow \theta - \alpha\,\mathbf{v} \qquad(\beta\approx 0.9) $$</div>
+
+      <p><strong>Adam</strong> — per-parameter adaptive LR combining momentum (1st moment) + RMSProp (2nd moment), with bias correction.</p>
+      <div class="math-box">$$ \begin{aligned} \mathbf{m}_t &= \beta_1 \mathbf{m}_{t-1} + (1-\beta_1)\,\mathbf{g}_t \\ \mathbf{v}_t &= \beta_2 \mathbf{v}_{t-1} + (1-\beta_2)\,\mathbf{g}_t^2 \\ \hat{\mathbf{m}}_t &= \frac{\mathbf{m}_t}{1-\beta_1^{\,t}},\qquad \hat{\mathbf{v}}_t = \frac{\mathbf{v}_t}{1-\beta_2^{\,t}} \\ \theta_t &= \theta_{t-1} - \alpha\,\frac{\hat{\mathbf{m}}_t}{\sqrt{\hat{\mathbf{v}}_t}+\epsilon} \end{aligned} $$</div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">📝</span> Adam defaults</div>
+        <p>Defaults: $\beta_1=0.9$, $\beta_2=0.999$, $\epsilon=10^{-8}$. <strong>AdamW</strong> decouples weight decay from the gradient (see §7).</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="activations"><span class="sec-no">6</span>Activation Functions</h2>
+
+      <p>Taught in <strong>09 · Neural Networks / MLP</strong>; derivatives drive backprop (<strong>10 · Backpropagation</strong>) and the vanishing-gradient story (<strong>12 · Training Deep Nets</strong>).</p>
+
+      <p><strong>Sigmoid</strong> — squashes to $(0,1)$; probability/gate output. Saturates → vanishing gradients.</p>
+      <div class="math-box">$$ \sigma(z) = \frac{1}{1+e^{-z}}, \qquad \sigma'(z) = \sigma(z)\big(1-\sigma(z)\big) $$</div>
+
+      <p><strong>Tanh</strong> — zero-centered $(-1,1)$ version of sigmoid; also saturates.</p>
+      <div class="math-box">$$ \tanh(z) = \frac{e^{z}-e^{-z}}{e^{z}+e^{-z}}, \qquad \tanh'(z) = 1 - \tanh^2(z) $$</div>
+
+      <p><strong>ReLU</strong> — default hidden activation; cheap, non-saturating for $z>0$, fixes vanishing gradients.</p>
+      <div class="math-box">$$ \operatorname{ReLU}(z) = \max(0, z), \qquad \operatorname{ReLU}'(z) = \begin{cases}1 & z>0\\ 0 & z<0\end{cases} $$</div>
+
+      <p><strong>Softmax</strong> — turns a vector of logits into a probability distribution; multi-class output (pairs with CCE).</p>
+      <div class="math-box">$$ \operatorname{softmax}(\mathbf{z})_k = \frac{e^{z_k}}{\sum_{j=1}^{K} e^{z_j}} $$</div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">📝</span> Softmax Jacobian</div>
+        <p>Jacobian: $\partial\,\text{softmax}_i/\partial z_j = \hat{y}_i(\delta_{ij}-\hat{y}_j)$. With CCE it simplifies to $\hat{y}_k - y_k$.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="regularization"><span class="sec-no">7</span>Regularization Terms</h2>
+
+      <p>Taught in <strong>05 · Overfitting &amp; Evaluation</strong>; weight decay revisited in <strong>12 · Training Deep Nets</strong>. Added to the loss to penalize large weights and curb overfitting.</p>
+
+      <p><strong>L2 (Ridge / weight decay)</strong> — shrinks all weights smoothly toward zero; differentiable.</p>
+      <div class="math-box">$$ J_{\text{total}} = J_{\text{data}} + \frac{\lambda}{2}\lVert\mathbf{w}\rVert_2^2, \qquad \nabla\!\left(\tfrac{\lambda}{2}\lVert\mathbf{w}\rVert_2^2\right) = \lambda\mathbf{w} $$</div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">📝</span> Why L2 ≡ weight decay</div>
+        <p>The $\lambda\mathbf{w}$ gradient is why L2 ≡ "weight decay": each step also multiplies $\mathbf{w}$ by $(1-\alpha\lambda)$. <strong>AdamW</strong> applies this decay directly rather than through the gradient.</p>
+      </div>
+
+      <p><strong>L1 (Lasso)</strong> — drives weights exactly to zero → sparse feature selection; non-smooth at 0.</p>
+      <div class="math-box">$$ J_{\text{total}} = J_{\text{data}} + \lambda\lVert\mathbf{w}\rVert_1, \qquad \nabla\!\big(\lambda\lVert\mathbf{w}\rVert_1\big) = \lambda\,\operatorname{sign}(\mathbf{w}) $$</div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="metrics"><span class="sec-no">8</span>Key Metrics</h2>
+
+      <p>Taught in <strong>05 · Overfitting &amp; Evaluation</strong>. From the confusion matrix: TP, FP, FN, TN. Use when accuracy lies on imbalanced data.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Metric</th><th>What it measures</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Precision</strong></td><td>Of predicted positives, how many are correct (penalizes false alarms).</td></tr>
+          <tr><td><strong>Recall (sensitivity / TPR)</strong></td><td>Of actual positives, how many were caught (penalizes misses).</td></tr>
+          <tr><td><strong>F1 score</strong></td><td>Harmonic mean balancing precision and recall.</td></tr>
+          <tr><td><strong>Accuracy</strong></td><td>Overall fraction correct; misleading on imbalanced data.</td></tr>
+          <tr><td><strong>R²</strong></td><td>Regression: fraction of variance explained; $1$ perfect, $0$ = predicting the mean.</td></tr>
+          <tr><td><strong>RMSE</strong></td><td>Regression error in the target's own units.</td></tr>
+        </tbody>
+      </table></div>
+
+      <p><strong>Precision</strong> — of predicted positives, how many are correct (penalizes false alarms).</p>
+      <div class="math-box">$$ \text{Precision} = \frac{TP}{TP + FP} $$</div>
+
+      <p><strong>Recall (sensitivity / TPR)</strong> — of actual positives, how many were caught (penalizes misses).</p>
+      <div class="math-box">$$ \text{Recall} = \frac{TP}{TP + FN} $$</div>
+
+      <p><strong>F1 score</strong> — harmonic mean balancing precision and recall.</p>
+      <div class="math-box">$$ F_1 = \frac{2\,\cdot\,\text{Precision}\cdot\text{Recall}}{\text{Precision} + \text{Recall}} $$</div>
+
+      <p><strong>Accuracy</strong> — overall fraction correct; misleading on imbalanced data.</p>
+      <div class="math-box">$$ \text{Accuracy} = \frac{TP + TN}{TP + TN + FP + FN} $$</div>
+
+      <p><strong>R² (coefficient of determination)</strong> — regression: fraction of variance explained; $1$ is perfect, $0$ = predicting the mean.</p>
+      <div class="math-box">$$ R^2 = 1 - \frac{\sum_i (y_i - \hat{y}_i)^2}{\sum_i (y_i - \bar{y})^2} = 1 - \frac{SS_{\text{res}}}{SS_{\text{tot}}} $$</div>
+
+      <p><strong>RMSE</strong> — regression error in the target's own units.</p>
+      <div class="math-box">$$ \text{RMSE} = \sqrt{\frac{1}{m}\sum_{i=1}^{m}(\hat{y}_i - y_i)^2} $$</div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="attention"><span class="sec-no">9</span>Attention</h2>
+
+      <p>Taught in <strong>15 · Attention &amp; Transformers</strong>. The core operation of Transformers and LLMs.</p>
+
+      <p><strong>Scaled dot-product attention</strong> — a soft, differentiable database lookup: queries $Q$ score against keys $K$, the softmax weights retrieve a blend of values $V$. The $\sqrt{d_k}$ scaling keeps softmax gradients from vanishing at large dimension.</p>
+      <div class="math-box">$$ \operatorname{Attention}(Q, K, V) = \operatorname{softmax}\!\left(\frac{Q K^\top}{\sqrt{d_k}}\right) V $$</div>
+
+      <p><strong>Multi-head attention</strong> — run $h$ attentions in parallel subspaces, then concatenate and project.</p>
+      <div class="math-box">$$ \operatorname{MultiHead}(Q,K,V) = \operatorname{Concat}(\text{head}_1,\dots,\text{head}_h)\,W^O, \quad \text{head}_i = \operatorname{Attention}(QW_i^Q, KW_i^K, VW_i^V) $$</div>
+
+      <p><strong>Sinusoidal positional encoding</strong> — injects order, since attention is permutation-blind. Added to token embeddings.</p>
+      <div class="math-box">$$ PE_{(pos,\,2i)} = \sin\!\left(\frac{pos}{10000^{2i/d}}\right), \qquad PE_{(pos,\,2i+1)} = \cos\!\left(\frac{pos}{10000^{2i/d}}\right) $$</div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Causal mask &amp; cost</div>
+        <p><strong>Causal mask:</strong> set scores for future positions to $-\infty$ before softmax so a decoder token can't see ahead. Cost is $O(n^2)$ in sequence length $n$, traded for full parallelism and constant-length long-range paths.</p>
+      </div>
+
+      <!-- ============================================================ §10 -->
+      <h2 id="reinforcement-learning"><span class="sec-no">10</span>Reinforcement Learning</h2>
+
+      <p>Taught in <strong>18 · Reinforcement Learning</strong>. The agent learns a policy by maximizing expected discounted reward — the paradigm behind vehicle control.</p>
+
+      <p><strong>Discounted return</strong> — what the agent maximizes; $\gamma\in[0,1)$ trades immediate vs future reward, $r_t$ = reward at step $t$.</p>
+      <div class="math-box">$$ G_t = \sum_{k=0}^{\infty}\gamma^{k}\, r_{t+k+1} $$</div>
+
+      <p><strong>Bellman optimality (action-value)</strong> — the optimal $Q^\star(s,a)$ is self-consistent: take $a$, then act greedily forever after.</p>
+      <div class="math-box">$$ Q^\star(s,a) = \mathbb{E}\big[\, r + \gamma \max_{a'} Q^\star(s',a') \,\big] $$</div>
+
+      <p><strong>Q-learning update</strong> — off-policy temporal-difference step toward the Bellman target ($\alpha$ = learning rate, $s'$ = next state).</p>
+      <div class="math-box">$$ Q(s,a) \leftarrow Q(s,a) + \alpha\big[\, r + \gamma \max_{a'} Q(s',a') - Q(s,a) \,\big] $$</div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">📝</span> Exploration &amp; DQN</div>
+        <p>Behavior is <strong>ε-greedy</strong>: random action w.p. $\epsilon$ (explore), else $\arg\max_a Q(s,a)$ (exploit). <strong>DQN</strong> swaps the table for a network + replay buffer + target net.</p>
+      </div>
+
+      <p><strong>Policy gradient (REINFORCE)</strong> — directly push up the log-probability of actions weighted by the return they earned.</p>
+      <div class="math-box">$$ \nabla_\theta J(\theta) = \mathbb{E}_{\pi_\theta}\big[\, \nabla_\theta \log \pi_\theta(a\mid s)\, G_t \,\big] $$</div>
+
+      <!-- ============================================================ §11 -->
+      <h2 id="detection-segmentation"><span class="sec-no">11</span>Detection &amp; Segmentation Metrics</h2>
+
+      <p>Taught in <strong>19 · Detection &amp; Segmentation</strong>. Localization quality, not just the class label.</p>
+
+      <p><strong>Intersection over Union (IoU / Jaccard)</strong> — box/mask overlap; a detection counts as correct when IoU with the ground truth $\geq$ a threshold (commonly 0.5).</p>
+      <div class="math-box">$$ \text{IoU}(A,B) = \frac{|A \cap B|}{|A \cup B|} $$</div>
+
+      <p><strong>Average Precision / mAP</strong> — AP is the area under the precision–recall curve for one class; <strong>mAP</strong> averages AP over all $C$ classes (and often over IoU thresholds).</p>
+      <div class="math-box">$$ \text{AP} = \int_0^1 p(r)\,dr, \qquad \text{mAP} = \frac{1}{C}\sum_{c=1}^{C}\text{AP}_c $$</div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">📝</span> Non-max suppression</div>
+        <p><strong>NMS</strong> (non-max suppression): keep the highest-scoring box, drop overlapping boxes with IoU above a threshold — removes duplicate detections of the same object.</p>
+      </div>
+
+      <!-- ============================================================ §12 -->
+      <h2 id="data-model-selection"><span class="sec-no">12</span>Data &amp; Model Selection</h2>
+
+      <p>Data prep in <strong>20 · Data &amp; Feature Engineering</strong>; tuning in <strong>21 · Hyperparameter Optimization</strong>.</p>
+
+      <p><strong>Balanced class weight</strong> — up-weight rare classes so the loss stops ignoring them ($N$ samples, $K$ classes, $n_c$ in class $c$).</p>
+      <div class="math-box">$$ w_c = \frac{N}{K\,n_c} $$</div>
+
+      <p><strong>Random-search coverage</strong> — probability that $n$ random trials land in the best fraction $f$ of configs; why ~60 trials beats a coarse grid (e.g. $f=0.05,\ n=60 \Rightarrow \approx 95\%$).</p>
+      <div class="math-box">$$ P(\text{hit}) = 1 - (1-f)^{n} $$</div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">📝</span> Nested cross-validation</div>
+        <p><strong>Nested CV:</strong> the inner loop selects hyperparameters, the outer loop estimates performance — the only honest way to tune <em>and</em> report. Tune on your test set and every number you publish is optimistically biased.</p>
+      </div>
+
+      <!-- ============================================================ quiz -->
+      <h2 id="your-turn"><span class="sec-no">13</span>Your turn</h2>
+
+      <div class="exercise" data-ex="numeric" data-id="appendix-random-search" data-answer="0.9539" data-tol="0.005">
+        <div class="ex-head"><span class="badge">Q1</span> Random-search coverage</div>
+        <div class="ex-q">Using $P(\text{hit}) = 1 - (1-f)^{n}$ from §12, compute the probability that $n = 60$ random trials land in the best fraction $f = 0.05$ of configurations. Give the probability as a decimal (4 places).</div>
+        <input class="ex-input" type="number" step="any" placeholder="value">
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$P = 1 - (1-0.05)^{60} = 1 - 0.95^{60}$. Now $0.95^{60} \approx 0.0461$, so $P \approx 1 - 0.0461 = 0.9539 \approx 0.954$. That is why roughly 60 random trials give ~95% coverage of the top 5% of configs — the result that motivates random search over a coarse grid.</div>
+      </div>
+
+      <!-- ============================================================ recap -->
+      <h2 id="recap"><span class="sec-no">14</span>Key Recap</h2>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Cheatsheet recap</div>
+        <ul>
+          <li><strong>Linear algebra &amp; calculus</strong> (§1–2) are the substrate: dot products and matrix shapes for the forward pass, the gradient and chain rule for the backward pass.</li>
+          <li><strong>Probability</strong> (§3) explains <em>why</em> the losses look the way they do — MSE is Gaussian MLE, cross-entropy is Bernoulli/categorical MLE, KL drives the VAE.</li>
+          <li><strong>Losses</strong> (§4) and <strong>activations</strong> (§6) pair up cleanly: sigmoid+BCE and softmax+CCE both collapse to the same gradient $\hat{y}-y$.</li>
+          <li><strong>Optimizers</strong> (§5) all reuse $\theta \leftarrow \theta - \alpha\,\nabla J$; momentum and Adam just shape the step. <strong>Regularization</strong> (§7) adds a weight penalty to fight overfitting.</li>
+          <li><strong>Metrics</strong> (§8, §11) tell the honest story on imbalanced or localization tasks; <strong>attention</strong> (§9), <strong>RL</strong> (§10), and <strong>model selection</strong> (§12) round out the advanced toolbox.</li>
+          <li>This page is a lookup, not a derivation — when a formula is unclear, jump to the lesson named at the top of its section.</li>
+        </ul>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

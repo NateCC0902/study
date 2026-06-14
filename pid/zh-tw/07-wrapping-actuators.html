@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>角度纏繞與真實致動器 — USV 的 PID 控制</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-pid" data-course="pid" data-track="main" data-chapter="07-wrapping-actuators">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> PID&nbsp;·&nbsp;USV</a>
+  <span class="spacer"></span>
+  <span class="track-pill">PID · 第 07 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">PID 課程 · 第 07 章 · 現實的反咬</div>
+        <h1>角度纏繞與真實致動器</h1>
+        <p>有兩個 bug 永遠不會在乾淨的數學裡冒出來，卻永遠會在水上現身。第一個：一個 PID 算得完美無瑕的控制器，卻仍舊繞了 340° 走遠路，因為沒人告訴它 350° 和 10° 其實是鄰居。第二個：「把 $k_p$ 拉到開始振盪」之所以在真實的船上真的有效——而我們的理想化模型卻信誓旦旦說它絕不會振盪。</p>
+        <div class="meta"><span>⏱ 約 25 分鐘</span><span>🧭 角度纏繞</span><span>⚡ 即時模擬</span><span>🐌 伺服機變化率與相位延遲</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="the-340-degree-bug"><span class="sec-no">1</span>340° bug：當相減在說謊</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>想像那個羅盤</small></div>
+      <p>船目前航向是 <strong>350°</strong>——剛好在正北偏西一點。你給它一個新的設定值（setpoint）：<strong>10°</strong>——剛好在正北偏東一點。對一位水手來說這再簡單不過：把船首（bow）往右舷推 20° 就完事了。但對一個天真的控制器（controller）來說這是一場災難，因為控制器不知道羅盤是一個<em>圓</em>。它只會做它唯一會做的事——相減。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 整個 bug 濃縮成一行</div>
+        <p>$e = 10° - 350° = -340°$。控制器把它讀成「順時針轉 340°」，於是一頭栽進那條觀光路線——繞遍整個羅盤——只為了抵達一個其實只在<em>20° 之外</em>的航向（heading）。</p>
+      </div>
+
+      <p>這就是筆記裡的案例 8，也是載具控制中最有名的單一 bug。它藏得天衣無縫：每一次不跨越正北的測試都乾淨通過。然後在某一天，當一個航點（waypoint）剛好坐落在 360°／0° 接縫的另一側時，船就像一隻搞不清楚狀況、追著自己尾巴跑的狗一樣原地打轉。在開闊水域那是喜劇；在離碼頭十公尺的地方那就是一筆船殼維修費。</p>
+
+      <div class="mermaid">
+flowchart LR
+    SP["設定值 10°"] --> SUB["原始相減<br/>10 − 350"]
+    H["航向 350°"] --> SUB
+    SUB --> RAW["e = −340°<br/>（走遠路轉）"]
+    SUB --> WR["wrap(·) → (−π, π]"]
+    WR --> OK["e = +20°<br/>（走近路轉）"]
+</div>
+
+      <p>注意誤差（error）此時還沒有進到船的任何地方——這純粹是控制器在第一個 P、I 或 D 項<em>之前</em>所做的算術。把這一步搞錯，一個整定（tuning）完美的 PID 就會忠實地執行一道災難性的命令。增益（gain）是無辜的；<em>誤差的定義</em>才是那個 bug。</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="wrap-to-pi"><span class="sec-no">2</span>纏繞到 (−π, π]：修好它的數學</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>一次取模，正確地做</small></div>
+      <p>航向活在一個圓上，所以 $-340°$ 的誤差和 $+20°$ 的誤差讓船首指向的是完全相同的地方——它們之間差了整整一圈，$360°$。修法是：取這個角度落在半開區間 $(-\pi, \pi]$ 內的那個代表值。那個區間正是「最短帶號轉向」的集合：往任一側最多轉半圈。</p>
+
+      <div class="math-box">$$ \mathrm{wrap}(\theta) \;=\; \big((\theta + \pi)\bmod 2\pi\big) - \pi \;\in\; (-\pi,\,\pi] $$</div>
+
+      <p>用我們的數字走一遍。原始誤差是 $\theta = -340° = -5.934$ rad。加上 $\pi$，對 $2\pi$ 取模，再減去 $\pi$：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>步驟</th><th>計算</th><th>結果</th></tr></thead>
+        <tbody>
+          <tr><td>原始誤差</td><td>$10° - 350°$</td><td>$-340° = -5.9341$ rad</td></tr>
+          <tr><td>平移 $\pi$</td><td>$-5.9341 + 3.1416$</td><td>$-2.7925$ rad</td></tr>
+          <tr><td>$\bmod\,2\pi$</td><td>$-2.7925 \bmod 6.2832$</td><td>$3.4907$ rad</td></tr>
+          <tr><td>平移回去</td><td>$3.4907 - 3.1416$</td><td><strong>$0.3491$ rad $= +20°$</strong></td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 為什麼要 $+\pi \ldots -\pi$ 這個三明治</div>
+        <p>單純的 $\theta \bmod 2\pi$ 會把所有東西映射到 $[0, 2\pi)$——所以 $-340°$ 變成 $+20°$ ✅，但 $+190°$ 卻維持 $+190°$ 而沒有收斂成 $-170°$ ❌，你只修好了一半的情況。先平移 $\pi$ 會把纏繞視窗<em>置中</em>在零，於是不論過度還是不足，都會折疊到最接近的等價值。但有一個但書：所用語言的取模對負數輸入必須回傳非負結果。Python 的 <code>%</code> 會；C 的 <code>fmod</code> 與 JavaScript 的 <code>%</code> 則<em>不會</em>——對那些情況，請加上 $2\pi$ 再取一次模，或改用 <code>atan2(sin θ, cos θ)</code>，它沒有分支、而且會自動替你處理正負號。</p>
+      </div>
+
+      <p>最後這招值得背起來。由於 $\sin$ 與 $\cos$ 都是週期函數，$\operatorname{atan2}(\sin\theta, \cos\theta)$ 不論 $\theta$ 已經累積了多少圈，都會回傳落在 $(-\pi, \pi]$ 內的正規角度，而且不會有取模正負號的意外：</p>
+
+      <div class="math-box">$$ \mathrm{wrap}(\theta) \;=\; \operatorname{atan2}\!\big(\sin\theta,\; \cos\theta\big) $$</div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="see-it-spin"><span class="sec-no">3</span>看它打轉：即時的船</h2>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>先看 bug，再宰掉它</small></div>
+      <p>這裡是案例 8 的完整情境：船從 <strong>350° 航向</strong>起步，設定值是 <strong>10°</strong>，而你可以把角度纏繞修正切換開或關。修正<em>關閉</em>時你看到的是一個天真的控制器；修正<em>開啟</em>時，同樣的增益就會做出合情合理的事。</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>🧭</span> 從 350° 航向起步、目標 10°——切換角度纏繞修正</div>
+        <canvas id="sim-wrap"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 要拖什麼、要看什麼</div>
+        <p><strong>把纏繞修正切到關閉。</strong>誤差讀作 $-340°$，舵（rudder）猛撞它的 $-35°$ 止點，而船首<em>背離</em>10° 擺去——它磨遍整個羅盤的遠路，只為抵達一個原本只差 20° 的航向。航向曲線爬升（或俯衝）了好幾百度。<strong>現在把它切到開啟。</strong>誤差瞬間跳到 $+20°$，舵輕巧地往右舷咬一口，船在幾秒內就穩定在 10°。同樣的受控體（plant）、同樣的 $k_p,k_i,k_d$——<em>唯一</em>的差別就是對誤差做的那一行算術。</p>
+      </div>
+
+      <p>再進一步逼它：把設定值往正北兩側各推幾度，然後看著誤差在纏繞開啟後從不超過 $\pm 180°$。那個有界的誤差正是整件事的重點——控制器現在永遠都知道回家的最短路。</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="wrap-in-code"><span class="sec-no">4</span>程式裡的修法（以及它該擺在哪）</h2>
+
+      <div class="layer"><span class="step">③</span> 程式 <small>一個函式，每一週期</small></div>
+      <p>纏繞函式是四個字元的邏輯，它該套在進入 PID 之前的<em>每一個</em>誤差上——不只在設定值變動時。航向會持續漂移，所以接縫可能在任何一次取樣（sample）被跨越，不是只有在你命令新航點時。</p>
+
+      <div class="codeblock">
+        <div class="code-head">wrap.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import math
+
+def wrap(angle):
+    """把任意角度折回 (-pi, pi] — 最短的帶號轉向。"""
+    return (angle + math.pi) % (2 * math.pi) - math.pi
+
+# --- 在控制迴圈內部，每一週期 ---
+error = wrap(setpoint - heading)        # rad，永不大於 +/- pi
+u     = pid.update(error, dt)           # PID 永遠不會看到原始角度
+</code></pre>
+      </div>
+
+      <p>把 bug 和修法並排展示，能讓這個失效變得有切膚之感。下方兩個控制器除了一個有纏繞之外完全相同：</p>
+
+      <div class="codeblock">
+        <div class="code-head">demo_wrap.py <span class="lang">Python</span></div>
+<pre><code class="language-python">heading, setpoint = math.radians(350), math.radians(10)
+
+naive  = setpoint - heading                 # -5.934 rad  = -340 deg
+fixed  = wrap(setpoint - heading)           #  0.349 rad  =  +20 deg
+
+print(f"naive error: {math.degrees(naive):+.0f} deg")   # naive error: -340 deg
+print(f"wrapped err: {math.degrees(fixed):+.0f} deg")   # wrapped err:  +20 deg
+
+# 天真的船會命令 kp * (-5.934) 的舵 -> 被釘在 -35 deg 止點，
+# 然後往「錯誤」的方向轉 340 deg。纏繞過的船只要求轉 20 deg。
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 大家忘記纏繞的那些地方</div>
+        <p>纏繞一次是不夠的。要纏繞餵給 <strong>P 和 I</strong> 的誤差；如果你用對誤差微分（derivative-on-error），那個差值也必須纏繞（第 06 章已經讓你改成對量測值（measurement）微分，那做法剛好繞開了這個問題）。而在 ROS 2 裡，你從 <code>/odometry/filtered</code> 拿到的偏航（yaw），由四元數而來時本就已經落在 $(-\pi, \pi]$——但只要你對它做了任何運算，就要重新纏繞。這個 bug 在你的測試跨越正北之前都是隱形的。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="why-high-kp-oscillates"><span class="sec-no">5</span>為什麼高 $k_p$ 會在真實的船上振盪</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>一份老實的告白</small></div>
+      <p>現在輪到案例 9，它的開頭是一段對我們模型令人難堪的招認。一艘裸的一階（first-order）Nomoto 船，配上一個<em>理想的</em>舵，<strong>永遠不會單憑 $k_p$ 就變得不穩定</strong>。在早期測試裡，連 $k_p = 100$ 都穩定得好好的。所以如果你一路上都被教「把 $k_p$ 拉到它振鈴（ringing），然後退回去」——在這個理想化的受控體上，那道配方根本不該有用。可是它在每一艘真實的船上都管用。怎麼回事？</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一個字的答案</div>
+        <p><strong>延遲（lag）。</strong>真實的致動器（actuator）沒辦法瞬間移動。我們的舵伺服機（servo）以 $25°/\text{s}$ 變化——它要擺動，物理上就是要花時間。在高 $k_p$ 時，控制器要求兩端對打的翻轉速度比伺服機跟得上的還快，所以舵總是在執行船一秒鐘前需要的動作。那個過期的修正就是<em>相位延遲（phase lag）</em>，而相位延遲加上高增益，就是引發振盪的萬用配方。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>變化率限制變成延遲</small></div>
+      <p>伺服機從一頭打到另一頭的行程就是舵的整個範圍，$\pm 35° = 70°$。在 $25°/\text{s}$ 的變化率限制（slew rate）下，它做這段移動不可能快過</p>
+
+      <div class="math-box">$$ t_{\text{stop-to-stop}} \;=\; \frac{70°}{25°/\text{s}} \;=\; 2.8\ \text{s} $$</div>
+
+      <p>所以當一個過熱的 P 控制器命令一個方波——猛甩到 $+35°$，接著 $-35°$，再回來——實際的舵畫出的是一條<em>鋸齒波</em>在追它，永遠在命令再次翻轉之前都還沒抵達。船真正感受到的舵角相對於命令是延遲的。把變化率限制器近似成一個純運輸延遲 $\tau_d$；對快速振盪而言，它替迴圈加上了 $-\omega\tau_d$ 的相位。當船體延遲 $T$ 累積的相位加上這個延遲，在某個增益仍然超過 1 的頻率上達到 $-180°$ 時，迴圈就維持振盪。$k_p$ 越大，那個交越頻率越高，而在那裡延遲的相位懲罰 $-\omega\tau_d$ 也越大——所以過了某個增益它就總是會翻倒。</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 理想化模型為什麼騙了我們</div>
+        <p>單一個極點（船體的 $T = 2.5$ s 延遲）最多貢獻 $-90°$ 的相位——它<em>永遠</em>到不了一個純增益迴圈要振盪所需的 $-180°$。這就是為什麼理想的 $k_p = 100$ 會穩定。加上伺服機的運輸延遲相位 $-\omega\tau_d$，它隨著頻率上升而無上限地增長，你終於能到 $-180°$。現實永遠帶來額外的延遲：感測器濾波、通訊延遲時間（latency）、推進器（thruster）起轉、船體水動力。<strong>延遲越多 → 可用的 $k_p$ 越低。</strong></p>
+      </div>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>那道吃伺服機的鋸齒波</small></div>
+      <p>這正是案例 9 的那張圖：命令（細線）是方波；實際的舵（粗線）是一條落在後面的鋸齒波。船會振盪不是因為數學不穩定，而是因為致動器永遠慢半拍。這也是為什麼我們的模擬器把 $25°/\text{s}$ 的變化率限制內建進去了——對著一個不切實際、完美無瑕的受控體去整定，教給你的增益一下水就會分崩離析。</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 整定上的實用心得</div>
+        <p>「把 $k_p$ 拉到出現持續振盪（sustained oscillation）」這道配方（臨界增益法）<em>之所以有效，正是因為</em>你的真實致動器補上了那段缺失的相位延遲。在這艘船上那個臨界增益是 $K_u \approx 5$、週期 $T_u \approx 9$ s；退回一半，$k_p \approx 2$–$2.5$。對著真實的受控體去整定——連變化率限制全部算進去——絕對不要對著課本裡的理想去整定。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="two-bugs-one-lesson"><span class="sec-no">6</span>兩個 bug，同一堂課</h2>
+      <p>這兩個案例看起來毫不相干——一個是算術，一個是硬體——但它們教的是同一件事：<strong>乾淨的模型是一種選擇性省略的謊言，而那些被省略的東西會反咬。</strong></p>
+      <ol>
+        <li><strong>角度纏繞</strong>是模型忘了航向是<em>圓形的</em>。修法：對每一個誤差、每一週期套上 $\mathrm{wrap}(\theta) \in (-\pi,\pi]$。</li>
+        <li><strong>致動器變化率</strong>是模型忘了舵是<em>實體的</em>。它加上相位延遲，而相位延遲正是讓高 $k_p$ 振盪的原因——也是讓那道整定配方成立的原因。</li>
+      </ol>
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 元 bug</div>
+        <p>這兩個失效都<em>在乾淨的測試裡隱形</em>。纏繞 bug 藏到你跨越正北為止；變化率 bug 藏到你對著一個真實伺服機整定為止。該有的紀律是把現實放進你的測試裡——刻意跨越接縫，並對著你實際會部署的那個受控體去整定。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>換你了</h2>
+
+      <div class="layer"><span class="step">⑤</span> 練習 <small>證明你能揪出這兩個 bug</small></div>
+
+      <div class="exercise" data-ex="quiz" data-id="pid07-why-wrap">
+        <div class="ex-head"><span class="badge">Q1</span> 概念檢查</div>
+        <div class="ex-q">一艘船在 350°，被命令保持 10°。在沒有角度纏繞的情況下，天真的控制器會做什麼，<em>而且為什麼</em>？</div>
+        <ul class="ex-options">
+          <li data-correct="false">正確地穩定在 10°——相減永遠給出正確的轉向。</li>
+          <li data-correct="true">算出 $e=-340°$，於是它幾乎繞遍整個羅盤、走遠路去抵達一個只在 20° 之外的航向。</li>
+          <li data-correct="false">炸掉，因為 Nomoto 模型在任何靠近正北的設定值附近都不穩定。</li>
+          <li data-correct="false">熄火——誤差大到積分飽和把 P 項抵消掉了。</li>
+        </ul>
+        <div class="ex-explain">原始相減給出 $10°-350°=-340°$。控制器完全不知道航向是圓形的，於是它命令一個巨大的負向修正——往錯誤方向全舵——然後磨了 340° 一圈，去抵達一個其實只要往右舷推 20° 的點。纏繞到 $(-\pi,\pi]$ 會把那個 $-340°$ 變成 $+20°$。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="pid07-slew-time" data-answer="2.8" data-tol="0.1">
+        <div class="ex-head"><span class="badge">Q2</span> 算一算</div>
+        <div class="ex-q">舵的行程是 $\pm 35°$（所以一頭到另一頭是 $70°$），以 $25°/\text{s}$ 變化。伺服機從一個止點擺到另一個止點要花多少<strong>秒</strong>？（這個延遲就是讓高 $k_p$ 振盪的相位延遲。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">s</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$t = \dfrac{70°}{25°/\text{s}} = 2.8$ s。當一個過熱的 P 控制器把命令在兩端對打的速度快過這個時間時，實際的舵畫出一條落在後面的鋸齒波——永遠在做船將近三秒前需要的事。那個運輸延遲正是一個理想單極點受控體從來沒有過的、缺失的相位，也是為什麼「把 $k_p$ 拉到它振鈴」在真實硬體上有效。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="pid07-wrap-derive">
+        <div class="ex-head"><span class="badge">Q3</span> 推導——手算纏繞 200°</div>
+        <div class="ex-q">用 $\mathrm{wrap}(\theta) = \big((\theta+\pi)\bmod 2\pi\big)-\pi$，纏繞一個 $+200°$ 的誤差。把每一步寫出來，以度為單位給出答案，並解釋為什麼天真的 $\theta \bmod 2\pi$ 會把這個情況做錯。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">以度為單位來算，$\pi \to 180°$、$2\pi \to 360°$：加 $180$，對 $360$ 取模（結果必須非負），再減 $180$。然後問自己：$200° \bmod 360°$ 會給出什麼，那是<em>最短</em>的轉向嗎？</div></details>
+        <details class="ex-acc"><summary>顯示一份解答</summary><div class="acc-body">
+          <p>以度為單位逐步走：平移，$200 + 180 = 380$；取模，$380 \bmod 360 = 20$；平移回去，$20 - 180 = \mathbf{-160°}$。所以一個 $+200°$ 的誤差纏繞成 $\mathbf{-160°}$——往<em>另一</em>個方向轉 $160°$，比 $200°$ 更短。</p>
+          <p>天真的 $\theta \bmod 2\pi$ 會給出 $200° \bmod 360° = 200°$——原封不動，而且<em>不是</em>最短轉向（船會擺 $200°$，但往另一邊轉 $160°$ 就能抵達同一個航向）。$+\pi\ldots-\pi$ 這個三明治把纏繞視窗置中在零，於是像這樣的過度量就會折疊到近的一側。這就是那兩個額外平移的全部理由。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章回顧</div>
+        <p>航向是圓形的，所以把誤差定義成 $\mathrm{wrap}(\text{設定值}-\psi) \in (-\pi,\pi]$——每一週期、在 P／I／D 之前，否則一個完美的 PID 也會往錯誤方向轉 340°（案例 8）。而「把 $k_p$ 拉到它開始振盪」之所以有效，不在於理想模型——單一個船體極點到不了 $-180°$ 相位。原因在於真實的致動器：那個 $25°/\text{s}$ 的伺服機要花 $2.8$ s 才能從一頭打到另一頭，而那個延遲就是讓高增益失穩的相位延遲（案例 9）。這兩個 bug 都藏在乾淨的測試裡；把現實放進你的測試，並對著你會部署的那個受控體去整定。這替一個能在水上存活下來的控制器收了尾——接下來，是完整的整定演練。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+<script src="../../assets/pid-sim.js"></script>
+<script>EM.pidSim("sim-wrap", EM.pidPresets.wrap());</script>
+</body>
+</html>

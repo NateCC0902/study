@@ -70,6 +70,9 @@ flowchart LR
 
       <p>For the <strong>MSE loss of linear regression</strong>, the landscape is a perfect bowl (a convex paraboloid) — one valley, no traps. That's the gift we exploit in this lesson: we can watch GD work without worrying about getting stuck. Lesson 09+ is where the terrain gets nasty.</p>
 
+      <div class="sim"><div class="sim-title"><span>🧪</span> Gradient descent on a convex bowl</div><canvas id="demo-gd"></canvas></div>
+      <p>Increase the learning rate until it overshoots and diverges (stable needs α &lt; 1); add steps to watch it converge.</p>
+
       <!-- ============================================================ §2 -->
       <h2 id="the-math"><span class="sec-no">2</span>The Math</h2>
 
@@ -405,5 +408,7 @@ n, m_big = 50_000, 200_000
 <script src="../assets/katex/contrib/auto-render.min.js"></script>
 <script src="../assets/vendor/mermaid.min.js"></script>
 <script src="../assets/app.js"></script>
+<script src="../assets/ml-demos.js"></script>
+<script>EM.mlDemo.gradientDescent("demo-gd");</script>
 </body>
 </html>

@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>I 控制：配平片 — USV 的 PID 控制</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-pid" data-course="pid" data-track="main" data-chapter="04-i-control">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> PID&nbsp;·&nbsp;USV</a>
+  <span class="spacer"></span>
+  <span class="track-pill">PID · 第 04 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">PID 課程 · 第 04 章 · 積分項</div>
+        <h1>I 控制：配平片</h1>
+        <p>你的 PD 控制器把航向（heading）守得漂漂亮亮 — 卻在自欺欺人。它停在離設定值（setpoint）差個幾度的地方就喊收工，因為那段偏差（offset）是 P 唯一能讓舵（rudder）抵著水流（current）撐住的辦法。本章談的就是那個能修好它的項：積分（integral），也就是控制器裡那個會去<em>學會</em>擾動（disturbance）、再把它配平（trim）掉，好讓誤差（error）終於能歸零的部分。</p>
+        <div class="meta"><span>⏱ 約 30 分鐘</span><span>🧭 案例 4</span><span>⚡ 即時模擬</span><span>∑ 積分項</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="the-leftover"><span class="sec-no">1</span>遺留下來的問題：PD 是靠維持錯誤來保持航向的</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>上回我們停在哪裡</small></div>
+      <p>我們已經做出了一個不錯的 PD 控制器：$k_p=2$ 帶我們到位，$k_d=3$ 讓我們不超調（overshoot）地滑進去。它就是第 03 章裡那個泊車小弟控制器。但它有個缺陷，只在出現<strong>持續性</strong>擾動時才會現形 — 一道水流、一股穩定的側風（wind）、一個配平失衡。回想一下那艘船：模型說水流的作用恰恰像一個<strong>卡住 4° 的舵</strong>在推著船首（bow）。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 配平片（trim tab）的類比</div>
+        <p>在真實的船或滑翔機上有一片小小的<strong>配平片</strong> — 一個你只設定一次的次要小面板，好讓主控制面能停在中立位置，同時仍抵著一股穩定的力撐住。積分項<em>就是</em>自動駕駛儀（autopilot）替自己調整的那片配平片。它默默地捲入恰好足夠的偏置去抵消水流，讓比例（proportional）項不必再去跟它對抗。</p>
+      </div>
+
+      <p>要維持固定航向，淨偏航（yaw）力矩必須為零。水流是一個固定的等效舵角（rudder angle）$+4°$，所以控制器裡<em>某個東西</em>必須維持一個固定的 $-4°$ 來抵消它。一個純 P 控制器只能輸出 $k_p e$ — 而它要產生 $-4°$ 的舵角，唯一的辦法就是<strong>停在一個非零的誤差上</strong>：</p>
+
+      <div class="math-box">$$ k_p\,e_{ss} = -4° \quad\Longrightarrow\quad e_{ss} = \frac{-4°}{k_p} $$</div>
+
+      <p>在 $k_p=2$ 時那就是 $e_{ss}=-2°$：你叫它去 $90°$，船卻穩定在 $92°$。D 幫不上忙 — 一旦你停住不動，微分（derivative）就是零，所以 D 毫無貢獻。<strong>PD 是靠維持錯誤來保持航向的。</strong>這不是整定（tuning）失敗；這是結構性的。誤差為零時 PD 控制器輸出零舵，而零舵贏不了水流。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 你不能只是猛拉 $k_p$</div>
+        <p>那個誘人的修法 — 把 $k_p$ 拉大來縮小偏差 — 會一頭撞上第 01–02 章的那堵牆：這艘船在 $k_p\approx5$ 附近就會變得不穩定（即臨界增益（ultimate gain, Ku）$K_u$）。用可用的增益時，這個偏差是永久性的。我們需要的是一個根本上不同的機制，而不是一根更硬的彈簧（spring）。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="what-integral-is-for"><span class="sec-no">2</span>積分到底是「為了什麼」</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>控制器長出了一份記憶</small></div>
+      <p>比例項對<em>你現在身在何處</em>作出反應。微分項對<em>你正往哪裡去</em>作出反應。兩者對過去都毫無記憶。積分項就是控制器的記憶：它隨時間累積誤差。如果一個小誤差<strong>賴著不走</strong>，積分就會持續增長，越壓越用力，直到它累積出足夠的輸出把誤差推到零 — 然後它就<em>停在那裡</em>，即使誤差已經消失，仍把那個偏置撐住。</p>
+
+      <div class="mermaid">
+flowchart LR
+    E["誤差 e = psi_set - psi"] --> P["P: kp e（現在）"]
+    E --> D["D: kd de/dt（趨勢）"]
+    E -->|"隨時間累加 e*dt"| I["I: ki 積分（歷史）"]
+    P --> U["舵 u"]
+    D --> U
+    I --> U
+    U --> B["船"]
+    C["水流 d = +4 度"] --> B
+    B -->|"航向 psi"| E
+</div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>為什麼這能逼出零誤差</small></div>
+      <p>底下這個論證說明積分讓穩態誤差（steady-state error）<em>恰好</em>為零，而不只是縮小。假設閉迴路（closed loop）穩定下來 — 每個訊號都歸於定值。積分項是 $i = k_i \int_0^t e\,d\tau$。要讓 $i$ 為定值，它的變化率必須為零：</p>
+
+      <div class="math-box">$$ \frac{di}{dt} = k_i\, e(t) = 0 \quad\Longrightarrow\quad e(t)=0 $$</div>
+
+      <p>這就是整個訣竅。<strong>積分要停止增長，唯一的辦法就是誤差為零。</strong>所以只要<em>還有任何</em>誤差殘留，積分就會持續移動舵；它只有在把誤差驅趕到一無所有時才能歸於靜止。而且關鍵在於，它歸於靜止時並不會鬆開 — 它會把累積出來的那個偏置撐住。那個被撐住的值<em>就是</em>抵消水流的配平。</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 配平最後落在哪裡</div>
+        <p>在新的穩態下船回到了 $90°$，所以 $e=0$，因此 $P=0$、$D=0$。水流仍以 $+4°$ 推著，所以舵仍必須維持 $-4°$ — 而<em>唯一</em>還剩下能供應它的項就是 I。積分已經斜坡升到恰好 $k_i\,\text{積分} = -4°$ 並停泊在那裡。積分已經<strong>把水流學會了</strong>。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="watch-it-live"><span class="sec-no">3</span>看它把水流學會</h2>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>案例 4，即時</small></div>
+      <p>這就是筆記裡的案例 4，真的跑起來。船一開始就已經穩定在 $90°$。在 <strong>$t=20$ s 時水流開啟</strong> — 一個階躍擾動，等於那個卡住 $4°$ 的舵。把航向面板和舵面板放在一起看。</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>🧭</span> PID — 擾動在 t=20 s 開啟，I 把它配平掉</div>
+        <canvas id="sim-i"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 拖什麼、看什麼</div>
+        <p>設定 $k_p=2$、$k_d=3$，並從 <strong>$k_i=0$</strong> 開始（純 PD）。在 $t=20$ s 時水流踢進來，船被推歪到約 $92°$ 然後就<em>停</em>在那裡 — 那就是 §1 裡的結構性偏差。現在把 $k_i$ 拉到 $0.2$ 再跑一次：踢進來之後，航向下探到大約 $91.7°$，然後在約 $30$ s 內慢慢爬回恰好 $90.0°$。在舵面板裡，你真的能看到那個穩定的舵偏置一路滑到 $-4°$ — 那就是積分在把配平填進去，同時比例的貢獻放鬆回到零。</p>
+      </div>
+
+      <p>一旦 $k_i=0.2$，有兩個數字可以直接從圖上讀出來：</p>
+      <ul>
+        <li><strong>恢復過程是故意慢的</strong> — 大約 $30$ s。積分本來就應該對那些<em>持續存在</em>的東西作出反應，而不是對每一道掠過的浪。慢在這裡才是對的。</li>
+        <li><strong>PD 那條軌跡永遠不會恢復</strong> — 它就一直停在 $92°$。同一艘船、同一個擾動；唯一的差別就是有沒有一個記憶項在扛著配平。</li>
+      </ul>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 現在把 $k_i$ 也拉得太過頭</div>
+        <p>把 $k_i$ 猛拉到 $2$ 再跑一次。船在恢復時超調，然後在 $90°$ 兩側緩慢來回蛇行好一陣子才安定下來。那就是積分<em>從一段短記憶裡就跳結論</em> — 它累積偏置的速度比遲緩的船體（hull）能跟上的還快，於是超調，接著只好再鬆開。這預告了 §4：$k_i$ 必須是迴圈裡最慢的東西。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="why-ki-small"><span class="sec-no">4</span>為什麼 $k_i$ 必須小 — 迴圈裡最慢的東西</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>記憶 vs. 反射</small></div>
+      <p>把這三個項想成三種不同時間尺度的決策。P 是反射 — 對當下的瞬間反應。D 是預判 — 對眼前趨勢的反應。I 是判斷 — 從累積的證據裡得出的結論。判斷應該是<em>最後</em>才改變主意的那個，而不是最先。一個記憶項抽動得跟反射一樣快的控制器，就是一個會對雜訊（noise）和短暫的暫態驚慌失措的控制器。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 積分應該是迴圈裡最慢的東西</div>
+        <p>$k_i$ 大 = 從短記憶裡就跳結論 = 超調與緩慢蛇行。$k_i$ 小 = 有耐心，只去壓那些真正<em>持續存在</em>的誤差。積分的全部價值就在於它忽略暫態、只學那個穩定的偏置。把它弄快，你就毀掉了你當初加它進來所要的那唯一一個性質。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>積分會增添延遲</small></div>
+      <p>這條經驗法則背後有個硬道理，不只是品味問題。積分會引入<strong>相位延遲（phase lag）</strong>：它的輸出落在誤差之後，因為它是過去的累積。在頻率視角下，一個積分器貢獻 $-90°$ 的相位。相位延遲正是吃掉你穩定裕度的東西 — 它跟讓高 $k_p$ 振盪（oscillation）的是同一個機制（伺服機（servo）的延遲，第 02 章）。所以積分在本質上就是一個會破壞穩定性的項。你買到了零穩態誤差，代價則付在相位裕度上。讓 $k_i$ 保持小，帳單就保持小。</p>
+
+      <div class="math-box">$$ G_I(j\omega) = \frac{k_i}{j\omega} \quad\Rightarrow\quad \angle G_I = -90°,\qquad |G_I| \propto \frac{1}{\omega} $$</div>
+
+      <p>注意那個幅值：$|G_I|\propto 1/\omega$。積分器在低頻有<em>巨大</em>的增益（這就是它能輾碎那個固定偏差的原因），而在高頻有<em>很小</em>的增益（這就是它會明智地忽略快速碎浪的原因）。那份低頻的權威是它的特色；$-90°$ 的相位是它的代價。整定的配方 — 「加上能在合理時間內消除偏差的最小 $k_i$」— 不過就是在這兩者之間取得平衡。</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>$k_i$</th><th>$t=20$ s 踢進來之後的行為</th><th>結論</th></tr></thead>
+        <tbody>
+          <tr><td>0</td><td>永久 $2°$ 偏差，永遠不恢復</td><td>這就是那個 bug</td></tr>
+          <tr><td>0.2</td><td>約 $30$ s 內恢復到 $90.0°$，不蛇行</td><td>選定的增益</td></tr>
+          <tr><td>2</td><td>超調，蛇行數十秒</td><td>太熱 — 記憶太愛跳結論</td></tr>
+        </tbody>
+      </table></div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="in-code"><span class="sec-no">5</span>程式裡的積分</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>每一行都讀</small></div>
+      <p>積分項只有兩行，但兩行都很要緊。那個累加器<strong>跨呼叫持續保留</strong> — 那正是它之所以是記憶而不是公式的原因。而且增益 $k_i$ 乘的是<em>整個累積總和</em>，不是當下的誤差。</p>
+
+      <div class="codeblock">
+        <div class="code-head">控制步（每個 dt） <span class="lang">Python</span></div>
+<pre><code class="language-python">error      = wrap(setpoint - heading)        # rad，永遠先纏繞（第 07 章）
+integral  += error * dt                       # rad*s，跨呼叫持續保留
+derivative = (error - prev_error) / dt        # rad/s
+
+p = kp * error
+i = ki * integral                             # &lt;- 配平片：學會偏置
+d = kd * derivative
+
+u = p + i + d                                  # 舵的 rad 數
+u = clamp(u, -RUDDER_MAX, +RUDDER_MAX)
+prev_error = error
+</code></pre>
+      </div>
+
+      <p>追蹤一下這三項貢獻在案例 4 實驗中的變化。$t=20$ s 之前，船在 $90°$ 上，誤差為零：P=0、I=0（什麼都還沒累積）、D=0，舵歇在 $0°$。水流開啟；船首飄走，誤差增長，P 反推回去並在 $\approx92°$ 把它攔住。現在 <code>integral += error*dt</code> 開始每一步往上爬，因為誤差非零、而且<em>持續</em>非零。隨著積分增長，$i = k_i\,\text{積分}$ 接手扛起這份負荷，舵偏置滑向 $-4°$，誤差縮回零，P 淡出 — 而積分一發現 $e=0$，就恰好停在原地不再增長。交接完成。</p>
+
+      <div class="codeblock">
+        <div class="code-head">pid_controller.py <span class="lang">Python</span></div>
+<pre><code class="language-python">class PID:
+    def __init__(self, kp, ki, kd, output_limits=(-1.0, 1.0)):
+        self.kp, self.ki, self.kd = kp, ki, kd
+        self.out_min, self.out_max = output_limits
+        self.integral = 0.0
+        self.prev_error = None
+
+    def reset(self):
+        """重新接管時呼叫：陳舊的積分就是一個積分飽和 bug（第 05 章）。"""
+        self.integral = 0.0
+        self.prev_error = None
+
+    def update(self, error, dt):
+        p = self.kp * error
+        self.integral += error * dt                 # 記憶在這裡增長
+        i = self.ki * self.integral
+        d = 0.0 if self.prev_error is None else self.kd * (error - self.prev_error) / dt
+        self.prev_error = error
+        u = p + i + d
+        return max(self.out_min, min(self.out_max, u))   # 箝位
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 箝位藏著一個陷阱</div>
+        <p>注意，即使輸出已被箝位（clamp）在舵止（rudder stop），積分仍持續累積。對於溫和的案例 4 擾動，這無傷大雅 — 舵根本不會飽和（saturation）。但對於一次大幅度操船，這正是<strong>積分飽和（積分捲繞，windup）</strong>（第 05 章）的誕生方式：記憶不斷往一堵它看不見的牆灌滿。下一章我們會正面迎戰那個 bug。眼下，就先好好品味積分在誠實地做它的本分吧。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="by-hand"><span class="sec-no">6</span>手算一個配平片時間步</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>都是數字，不打馬虎眼</small></div>
+      <p>取水流開啟後幾秒鐘、積分還在學習途中的一個快照。增益 $k_p=2,\ k_i=0.2,\ k_d=3$。船被推歪到了 $91.5°$（設定值 $90°$），它幾乎靜止不動，而積分到目前為止已累積了 $-0.20$ rad·s 的負誤差。一個時間步：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>步驟</th><th>計算</th><th>結果</th></tr></thead>
+        <tbody>
+          <tr><td>error</td><td>wrap(90° − 91.5°) = −1.5°</td><td>−0.0262 rad</td></tr>
+          <tr><td>P</td><td>2 × (−0.0262)</td><td><strong>−0.0524 rad</strong>（−3.0°）</td></tr>
+          <tr><td>integral</td><td>−0.20 + (−0.0262)×0.05</td><td>−0.2013 rad·s</td></tr>
+          <tr><td>I</td><td>0.2 × (−0.2013)</td><td><strong>−0.0403 rad</strong>（−2.3°）</td></tr>
+          <tr><td>derivative</td><td>≈ 0（船幾乎靜止）</td><td>≈ 0 rad/s</td></tr>
+          <tr><td>D</td><td>3 × 0</td><td><strong>≈ 0 rad</strong></td></tr>
+          <tr><td>總和</td><td>−0.0524 − 0.0403 + 0</td><td>−0.0927 rad = <strong>−5.3°</strong></td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 讀出正在進行中的交接</div>
+        <p>此刻 P 仍扛著大部分的工作（$-3.0°$），而 I 才只累積到 $-2.3°$。但每一步積分都變得更負一點，同時隨著誤差收斂，P 縮小。快轉到穩態：誤差 $\to0$，所以 P $\to0$、D $\to0$，而積分已經斜坡升到 $k_i\,\text{積分} = -4°$，全靠它自己。整個過程裡舵的總量始終維持在 $-4°$ 附近 — 改變的只是<em>組成</em>，從由 P 供應轉為由 I 供應。那個轉移，就是配平片把負荷從你手裡接過去。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>換你上場</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="pid04-why-zero">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">為什麼加上積分項能把穩態航向誤差驅趕到<em>恰好</em>為零，而不只是像更大的 $k_p$ 那樣單純把它縮小？</div>
+        <ul class="ex-options">
+          <li data-correct="false">因為 $k_i$ 比 $k_p$ 大，所以它主導了輸出。</li>
+          <li data-correct="true">在穩態下，積分唯有在誤差為零時才會停止變化，所以迴圈只能在 $e=0$ 時歸於靜止。</li>
+          <li data-correct="false">因為一旦船停下來，積分就抵消了微分項。</li>
+          <li data-correct="false">因為水流擾動過一陣子之後會自己消退。</li>
+        </ul>
+        <div class="ex-explain">一個定值的積分要求 $\tfrac{di}{dt}=k_i e=0$，這就逼出 $e=0$。被撐住的積分值接著供應那 $-4°$ 的配平來抵消水流，而 P 與 D 都歸零。更大的 $k_p$ 只能把偏差除以 $k_p$（$e_{ss}=-4°/k_p$）— 它永遠到不了零，而且還沒接近零，你就先用光了可用的 $k_p$。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="pid04-pd-offset" data-answer="2" data-tol="0.1">
+        <div class="ex-head"><span class="badge">Q2</span> 算一算</div>
+        <div class="ex-q">用一個純 PD 控制器（$k_i=0$）、$k_p=2$，配上一道等於卡住 $4°$ 之舵的水流，穩態航向偏差的大小是多少，以<strong>度</strong>為單位？（提示：$k_p e_{ss}=-4°$。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">°</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$e_{ss} = -4°/k_p = -4°/2 = -2°$，所以船穩定在偏離 $2°$ 之處 — 被命令去 $90°$ 卻停在 $92°$。要從一個 P 項裡擠出 $-4°$ 的舵，你就必須停在一個 $-2°$ 的誤差上。加上 $k_i$ 就能消除它，因為最後扛著配平的是積分，而不是誤差。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="pid04-why-slow">
+        <div class="ex-head"><span class="badge">Q3</span> 推理 — 為什麼「慢」才是特色</div>
+        <div class="ex-q">在 $k_i=0.2$ 的模擬裡，$t=20$ s 踢進來之後的恢復大約要 $30$ s。把 $k_i$ 拉到 $2$ 會讓它超調並蛇行。請以積分所代表的意義為出發點，解釋為什麼慢的那個版本才是<em>正確</em>的設計 — 以及是什麼物理原因使得 $k_i=2$ 行為失常。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">積分是累積誤差的一份記憶。它<em>應該</em>對哪幾種誤差作出反應，又該忽略哪幾種？另外回想一下，一個積分器會替迴圈增添 $-90°$ 的相位延遲。</div></details>
+        <details class="ex-acc"><summary>顯示一種解答</summary><div class="acc-body">
+          <p>積分存在的目的是抵消那些<strong>持續存在</strong>的擾動 — 一道穩定的水流、一個配平失衡 — 而不是像單一道浪那樣的暫態。一個慢的積分會隨時間平均，只去壓那些維持非零的誤差，而那正是水流的樣子。那份耐心，就是我們加它進來所要的那個性質。</p>
+          <p>把 $k_i$ 猛拉到 $2$，有兩件事會壞掉。第一，記憶現在會對它本該忽略的短暫態作出反應，於是它在遲緩的船體（時間常數（time constant）$T=2.5$ s）能反應過來之前就先累積出偏置 — 它把配平超調了，接著只好再鬆開，產生那緩慢的蛇行。第二，積分器貢獻 $-90°$ 的相位延遲；把 $k_i$ 灌大，你就花掉了穩定裕度，把迴圈推向振盪。解方就是那個配方：加上能在可接受時間內消除偏差的<em>最小</em> $k_i$，然後就停手。積分應該是迴圈裡最慢的東西。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章回顧</div>
+        <p>一個 PD 控制器是靠<em>維持錯誤</em>來保持航向的：要對著水流推出 $-4°$ 的舵，P 就必須停在 $e_{ss}=-4°/k_p$，一個你用可用的增益整定不掉的結構性偏差。積分修好了它 — 它成為控制器的記憶，累積誤差，而且唯有在 $e=0$ 時才能停止增長，所以它把穩態誤差驅趕到恰好為零，並停泊在水流所要求的那 $-4°$ 配平上。在模擬裡，擾動在 $t=20$ s 階躍進來；PD 被推歪了就一直歪著，PID 則下探後在約 $30$ s 內恢復。那份遲緩就是特色，也正是為什麼 $k_i$ 必須是迴圈裡最小、最慢的那一項 — 你每加一分積分，都買到了低頻權威，卻也花掉了相位裕度。下一章：當那份不斷增長的記憶撞上一個飽和的舵時會發生什麼事 — 積分飽和，積分的黑暗面。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+<script src="../../assets/pid-sim.js"></script>
+<script>EM.pidSim("sim-i", EM.pidPresets.pid());</script>
+</body>
+</html>

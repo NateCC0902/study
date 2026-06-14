@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>感測器與致動器：與真實世界的介接 — Embedded Mastery</title>
+<link rel="stylesheet" href="../../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../../assets/styles.css">
+</head>
+<body class="track-arduino" data-course="embedded" data-track="arduino" data-chapter="07-sensors-actuators">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">Arduino · 第 07 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Arduino 學程 · 第 07 章 · 進階</div>
+        <h1>感測器與致動器：與真實世界的介接</h1>
+        <p>到目前為止，你的接腳只和 LED 與其他接腳對話。現在它們要面對混亂的物理世界——距離、溫度、市電供電的風扇、轉動的馬達。這個世界會反擊：雜訊、電壓突波、反電動勢（back-EMF）。本章談的是如何<em>可靠地</em>連接它，讓你的機器人能撐過第一次碰撞，讓你的繼電器板能撐過第一次斷電。</p>
+        <div class="meta">
+          <span>⏱ 約 50 分鐘</span><span>🧠 訊號鏈</span><span>⚡ HC-SR04 · DHT · H 橋</span><span>🔧 飛輪二極體與隔離</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="signal-chain"><span class="sec-no">1</span>訊號鏈：感測器負責量測，致動器負責動作</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先建立整體圖像</small></div>
+      <p>每一個會接觸真實世界的嵌入式系統都是一條<strong>訊號鏈</strong>：物理世界被感測、轉成電壓、經過調理、被 MCU 讀取、做出決策，然後再推送回去給一個<strong>致動器</strong>，由它改變世界。感測器是這條鏈的輸入端；致動器是輸出端。你的韌體則是夾在中間那一層薄薄的判斷力。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話模型</div>
+        <p><strong>感測器</strong>把一個物理量轉換成 MCU 能讀取的電氣訊號；<strong>致動器</strong>則把 MCU 發出的電氣訊號轉換回物理效應。本章談的一切不是這兩者之一，就是把它們接線到不會互相摧毀的那份紀律。</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    W([物理世界]) --> S["感測器<br/>(換能器)"]
+    S --> C["訊號調理<br/>(分壓 · 電平 · 濾波)"]
+    C --> M["MCU<br/>(ADC / 數位讀取)"]
+    M --> D{決策}
+    D --> DR["驅動器<br/>(H 橋 · 繼電器 · MOSFET)"]
+    DR --> A["致動器<br/>(馬達 · 伺服機 · 繼電器)"]
+    A --> W
+      </div>
+
+      <p>有兩個觀念主宰了一個連接到底能不能運作。第一個是<strong>電壓電平</strong>：ATmega328P 接腳在 0–5&nbsp;V 之間運作良好，但超過約 5.5&nbsp;V 就會損毀；像 ESP32 這類 3.3&nbsp;V 板子超過約 3.6&nbsp;V 就會掛掉。第二個是<strong>阻抗</strong>——大致來說，就是一個節點能夠提供（source）或汲取（sink）多少電流。感測器的輸出可能是一個微弱、高阻抗的訊號，一條又長又有雜訊的導線就能讓它失真；而 MCU 接腳只能提供約 20–40&nbsp;mA，遠遠不足以驅動一顆馬達。整門手藝就在於匹配電平與阻抗，讓每一級都真的能驅動下一級。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 接腳不是電源供應器</div>
+        <p>ATmega328P 的 I/O 接腳額定為約 20&nbsp;mA 連續電流（絕對最大值 40&nbsp;mA），整顆晶片總和大約 200&nbsp;mA。驅動一顆 LED 沒問題。但繼電器線圈（約 70&nbsp;mA）、伺服機，或直流馬達（數百 mA 到數安培）就<strong>不行</strong>——這些需要在接腳與負載之間放一顆驅動電晶體或專用晶片。直接用接腳驅動馬達，你不是讓晶片掉電重置（brown out），就是把接腳燒掉。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="ultrasonic"><span class="sec-no">2</span>量測距離：HC-SR04 與音速</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>2 美元模組裡的回聲定位</small></div>
+      <p><strong>HC-SR04</strong> 是一個聲納。你對它的 <code>TRIG</code> 接腳送一個短脈衝；它就發出一段 40&nbsp;kHz 的超音波「啁啾（chirp）」，然後把 <code>ECHO</code> 接腳拉到 <strong>HIGH</strong> 並維持高電位，直到啁啾撞到某物反彈回來。那段 ECHO 脈衝的<em>寬度</em>就是聲音的來回飛行時間。把它計時，你就知道障礙物有多遠——就跟蝙蝠一樣。</p>
+
+      <div class="mermaid">
+sequenceDiagram
+    participant MCU
+    participant HCSR04 as HC-SR04
+    participant Obj as 障礙物
+    MCU->>HCSR04: TRIG 拉 HIGH 維持 10 µs
+    HCSR04->>Obj: 8 × 40 kHz 脈衝串
+    HCSR04->>MCU: ECHO 變為 HIGH
+    Obj-->>HCSR04: 聲音反射回來
+    HCSR04->>MCU: ECHO 變為 LOW (經過 t_echo 之後)
+    Note over MCU: 脈衝寬度 = 來回時間
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>推導距離公式</small></div>
+      <p>聲音在 20&nbsp;°C 乾燥空氣中傳播速度約為 <span>$v \approx 343\ \text{m/s}$</span>。ECHO 脈衝量到的是啁啾<em>飛出去</em>到障礙物<em>再飛回來</em>的時間——也就是距離的兩倍。所以單程距離是飛行路徑的一半：</p>
+
+      <div class="math-box">
+        $$ d = \frac{v \cdot t_{\text{echo}}}{2} $$
+      </div>
+
+      <p>現在把它變得實用。Arduino 量到的 <span>$t_{\text{echo}}$</span> 單位是<strong>微秒</strong>，而我們想要的 <span>$d$</span> 單位是<strong>公分</strong>。把音速換算成 cm/µs：</p>
+
+      <div class="math-box">
+        $$ v = 343\ \tfrac{\text{m}}{\text{s}} = 343\times\frac{100\ \text{cm}}{10^{6}\ \mu\text{s}} = 0.0343\ \tfrac{\text{cm}}{\mu\text{s}} $$
+      </div>
+
+      <p>代回距離公式並把常數整理出來：</p>
+
+      <div class="math-box">
+        $$ d_{\text{cm}} = \frac{0.0343 \cdot t_{\mu s}}{2} = \frac{t_{\mu s}}{58.3} \;\approx\; \frac{t_{\mu s}}{58} $$
+      </div>
+
+      <p>這就是每一篇機器人教學都會引用的著名<strong>「除以 58」</strong>規則。它其實就是 <span>$2/0.0343 = 58.3$</span> 四捨五入後的結果。用 58 取代 58.3 會把距離高估約 0.5%——相較於 <span>$v$</span> 本身的溫度相依性（每 °C 漂移約 0.17%），這是可以忽略的。如果你需要精準度，請計算 <span>$v = 331.4 + 0.6\,T_{°C}$</span> m/s，再除以對應的常數。</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 範例演算</div>
+        <p>ECHO 維持 HIGH 達 <span>$t_{\text{echo}} = 1740\ \mu\text{s}$</span>。則 <span>$d = 1740 / 58 = 30\ \text{cm}$</span>。用 SI 單位做合理性檢查：<span>$d = 0.0343 \times 1740 / 2 = 29.9\ \text{cm}$</span>。障礙物大約在 30&nbsp;cm 外。</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>逐行細讀</small></div>
+      <p><code>pulseIn(pin, HIGH)</code> 在這裡是完美的工具：它會阻塞直到接腳變 HIGH，啟動一個微秒計時器，並在接腳再度變 LOW 時回傳脈衝寬度（µs）。我們給它一個逾時，這樣當回聲缺席（物件太遠，或根本沒物件）時，迴圈才不會永遠卡住。</p>
+
+      <div class="codeblock">
+        <div class="code-head">hcsr04.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t TRIG = 9;
+const uint8_t ECHO = 10;
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(TRIG, OUTPUT);
+  pinMode(ECHO, INPUT);
+  digitalWrite(TRIG, LOW);   // 在第一個脈衝前確保乾淨的 LOW
+}
+
+float measureCm() {
+  // 1) 發出一個乾淨的 10 us 觸發脈衝。
+  digitalWrite(TRIG, LOW);  delayMicroseconds(2);
+  digitalWrite(TRIG, HIGH); delayMicroseconds(10);   // 規格書：&gt;= 10 us
+  digitalWrite(TRIG, LOW);
+
+  // 2) 計時 ECHO 維持 HIGH 多久（來回飛行時間，單位 us）。
+  //    30000 us 的逾時把量程上限設在約 5 m，並避免卡死。
+  unsigned long t = pulseIn(ECHO, HIGH, 30000UL);
+  if (t == 0) return -1.0;          // 逾時內沒有回聲
+
+  // 3) 換算：d_cm = t_us / 58.3  (= 來回 0.0343 cm/us 的一半)。
+  return t / 58.3f;
+}
+
+void loop() {
+  float cm = measureCm();
+  if (cm &lt; 0) Serial.println(F("out of range"));
+  else { Serial.print(cm, 1); Serial.println(F(" cm")); }
+  delay(60);                        // 兩次 ping 至少間隔 60 ms：避免聽到
+}                                   // 上一個啁啾的遲到回聲
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——3.3 V 板子上的 5 V ECHO 線</div>
+        <p>經典的 HC-SR04 以 5&nbsp;V 運作，並把 ECHO 驅動到 <strong>5&nbsp;V</strong>。把它直接接進 3.3&nbsp;V 的 ESP32 或 STM32 接腳，你會慢慢把它煮熟。請用電阻分壓把 ECHO 降下來（例如串聯 1&nbsp;kΩ、對地 2&nbsp;kΩ，得到 <span>$5\cdot\tfrac{2}{3}=3.3$</span>&nbsp;V），或使用電平轉換器。TRIG 在模組上是輸入腳，所以它收到的 3.3&nbsp;V HIGH 沒問題。</p>
+      </div>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-sonar-wrap">
+        <div class="sim-title">🔬 即時：回聲時間 → 距離</div>
+        <canvas id="sim-sonar"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">拖曳 ECHO 脈衝寬度，看著障礙物移動。讀數即時套用 <em>d</em> = <em>t</em>/58.3——正是你的韌體所計算的。</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="digital-protocol"><span class="sec-no">3</span>單線時序：DHT11/DHT22 通訊協定</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>整段對話只用一條線</small></div>
+      <p>HC-SR04 交給你的是一個類比意味的脈衝寬度。許多數位感測器則是用一條資料線講一種<strong>位元敲擊式（bit-banged）的序列協定</strong>，其中<em>每個 HIGH 脈衝的持續時間編碼一個位元</em>。<strong>DHT11</strong>（溫度＋濕度，便宜，解析度低）與 <strong>DHT22</strong>（又稱 AM2302，解析度較細）就是經典範例，它們教你的這套模式，你也會在 WS2812 LED 以及許多其他元件上看到。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 用文字說明 DHT 握手流程</div>
+        <p>1) MCU 把線拉 <strong>LOW 至少 18&nbsp;ms</strong>（DHT11）以喚醒感測器，然後釋放它。2) 感測器以 80&nbsp;µs LOW 接著 80&nbsp;µs HIGH 回應。3) 它串流送出 <strong>40 個位元</strong>（16 位濕度、16 位溫度、8 位校驗和）。每個位元以 50&nbsp;µs LOW 開始；接著 <strong>約 26&nbsp;µs HIGH 表示 0</strong>、<strong>約 70&nbsp;µs HIGH 表示 1</strong>。你靠計時那段 HIGH 來解碼。</p>
+      </div>
+
+      <div class="mermaid">
+sequenceDiagram
+    participant MCU
+    participant DHT
+    MCU->>DHT: 拉 LOW &gt;= 18 ms (起始)
+    MCU->>DHT: 釋放 (上拉電阻把線帶到 HIGH)
+    DHT->>MCU: 80 us LOW + 80 us HIGH (應答)
+    loop 40 個位元
+        DHT->>MCU: 50 us LOW (位元起始)
+        DHT->>MCU: HIGH ~26us = 0  /  ~70us = 1
+    end
+    Note over MCU: byte5 == (b0+b1+b2+b3) &amp; 0xFF ? 有效
+      </div>
+
+      <p>時序緊到（微秒等級）讓可靠讀取 DHT 意味著要在擷取期間關閉中斷，這正是為什麼你該用一個經過驗證的函式庫，而不是自己手刻。但你必須理解這個協定才能除錯：校驗和失敗通常代表某個中斷（一次 millis 計時、一個序列位元組）把那些 HIGH 視窗中的某一個拉長了，翻轉了一個位元。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>校驗和</small></div>
+      <p>那 40 個位元以五個位元組抵達。最後一個是校驗和：前四個位元組總和的低 8 位元。你用以下方式驗證</p>
+
+      <div class="math-box">
+        $$ \text{checksum} \;\overset{?}{=}\; (b_0 + b_1 + b_2 + b_3)\ \&amp;\ \texttt{0xFF} $$
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">dht_decode.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">// 對擷取到的 5 個位元組做概念性解碼（真正的驅動程式會先擷取
+// 40 個邊緣的時序；這裡只示範驗證 + 換算）。
+bool dhtDecode(const uint8_t b[5], float &amp;rh, float &amp;tC) {
+  uint8_t sum = b[0] + b[1] + b[2] + b[3];   // 8 位元溢位捨棄是刻意的
+  if (sum != b[4]) return false;             // 校驗和不符 -&gt; 拒絕
+
+  // DHT22：16 位元數值，0.1 單位解析度，溫度 MSB = 正負號。
+  rh = ((b[0] &lt;&lt; 8) | b[1]) * 0.1f;
+  int16_t raw = ((b[2] &amp; 0x7F) &lt;&lt; 8) | b[3];
+  tC = raw * 0.1f;
+  if (b[2] &amp; 0x80) tC = -tC;                  // 最高位元為 1 =&gt; 負值
+  return true;
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——取樣 DHT 太快</div>
+        <p>DHT11 約以 1&nbsp;Hz 更新，DHT22 約 0.5&nbsp;Hz。輪詢得更快，你只會拿到舊的或損毀的讀數。還有：資料線需要一個對 VCC 的 <strong>4.7–10&nbsp;kΩ 上拉電阻</strong>，因為這個協定仰賴在雙方都不驅動時讓線浮在 HIGH。忘了上拉電阻，你就會得到全零或全一的垃圾。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="inductive-loads"><span class="sec-no">4</span>致動器與飛輪二極體：馴服電感反衝</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>為什麼線圈會反咬一口</small></div>
+      <p>繼電器、電磁閥和馬達裡都含有一個<strong>線圈</strong>——也就是電感。電感討厭電流的突然變化：它的整個本性就是要讓電流持續流動。所以你一把它切 OFF 的那一瞬間，磁場崩潰，線圈就會產生一個巨大的反向電壓突波（<strong>反電動勢，back-EMF</strong>），試圖維持那股電流。那道突波可達數百伏特，會在你的切換電晶體上跳電弧，或把你的繼電器接點熔焊在一起。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>電感的復仇</small></div>
+      <p>電感兩端的電壓正比於其電流變化的速度：</p>
+
+      <div class="math-box">
+        $$ v_L = L\,\frac{di}{dt} $$
+      </div>
+
+      <p>當一顆電晶體把線圈切斷時，它試圖在數奈秒內把電流從運轉值降到零。當 <span>$dt \to 0$</span>，那個導數爆炸，<span>$v_L$</span> 突波就大到嚇人。一顆<strong>飛輪二極體</strong>（又稱續流二極體，freewheeling diode）<em>跨接在線圈兩端、在正常運作時反向偏壓</em>，會在開關打開時給那股受困電流一個無害的迴圈去循環。電流此時便平緩地衰減為</p>
+
+      <div class="math-box">
+        $$ i(t) = I_0\,e^{-t/\tau}, \qquad \tau = \frac{L}{R} $$
+      </div>
+
+      <p>而突波被箝制到大約只比電源高出一個二極體壓降（約 0.7&nbsp;V），而不是數百伏特。每個線圈上一顆便宜的 <strong>1N4007</strong>。這沒得商量。</p>
+
+      <div class="mermaid">
+flowchart LR
+    V["+V 電源"] --> COIL["繼電器 / 馬達線圈"]
+    COIL --> Q["開關<br/>(NPN / MOSFET)"]
+    Q --> GND["GND"]
+    V -. "二極體陰極" .- D[/"飛輪二極體<br/>1N4007"/]
+    D -. "陽極" .- COIL
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 二極體方向——這個要對</div>
+        <p>二極體的<strong>陰極（有條紋的那端）接到 +V</strong>，陽極接到電晶體／線圈的交會點。所以正常運作時它是反向偏壓、形同隱形。只有當線圈把它的電壓甩到<em>高於</em> +V 時它才導通，把電流引導成一個迴圈。裝反了，你就會透過一顆順向二極體把電源短路——瞬間冒煙。</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 交流負載需要緩衝器（snubber），不是二極體</div>
+        <p>飛輪二極體只對 <strong>DC</strong> 線圈有效。如果你的繼電器<em>接點</em>切換的是電感性的<strong>交流</strong>負載（市電馬達、變壓器），電弧發生在接點側，二極體幫不上忙——你要用一個 <strong>RC 緩衝器</strong>（例如 100&nbsp;Ω + 100&nbsp;nF）或在接點兩端跨一顆突波吸收器（varistor），來吸收電弧能量、阻止接點腐蝕。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="relays-isolation"><span class="sec-no">5</span>繼電器、光耦隔離與切換危險負載</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>用小訊號去指揮大訊號</small></div>
+      <p><strong>繼電器</strong>是一個電控開關：一股小小的線圈電流把一個機械接點拉到閉合，讓一個完全獨立（而且可能是市電電壓）的電路導通。它的超能力是<strong>電氣隔離（galvanic isolation）</strong>——5&nbsp;V 的控制側與 230&nbsp;V 的負載側不共用任何銅箔，所以負載側的故障無法炸掉你的 MCU。標準的玩家用繼電器板還加了一個<strong>光耦合器（opto-coupler）</strong>，連那顆線圈驅動電晶體都和你的微控制器做光學隔離：唯一跨越界線的東西是光。</p>
+
+      <div class="mermaid">
+flowchart LR
+    MCU["MCU 接腳<br/>(5 V 邏輯)"] --> OPTO["光耦合器<br/>(光間隙)"]
+    OPTO --> DRV["線圈驅動器<br/>+ 飛輪二極體"]
+    DRV --> COIL["繼電器線圈"]
+    COIL -. "磁性" .-> SW["接點 (已隔離)"]
+    SW --> LOAD["市電負載<br/>(風扇 / 燈 / 幫浦)"]
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>低電位觸發的板子會咬新手</small></div>
+      <p>大多數玩家用繼電器板是<strong>低電位觸發（active-LOW）</strong>：當你把輸入腳驅動到 LOW 時繼電器才激磁，因為光耦合器的 LED 接在 VCC 與你的接腳之間。這也代表開機時、當接腳還在浮動的瞬間，繼電器可能會喀一聲 ON——請在把接腳設為 OUTPUT <em>之前</em>先把它設成 HIGH（去激磁），以避免一次毛刺（glitch）。</p>
+
+      <div class="codeblock">
+        <div class="code-head">relay.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t RELAY = 7;   // 低電位觸發光耦板：LOW = ON, HIGH = OFF
+
+void setup() {
+  digitalWrite(RELAY, HIGH);   // 先去激磁，在 pinMode 之前...
+  pinMode(RELAY, OUTPUT);      // ...這樣開機期間就不會喀一聲 ON
+}
+
+inline void relayOn()  { digitalWrite(RELAY, LOW);  }   // 注意：邏輯反相
+inline void relayOff() { digitalWrite(RELAY, HIGH); }
+
+void loop() {
+  relayOn();  delay(2000);     // 負載通電 2 秒
+  relayOff(); delay(2000);     // 然後斷電 2 秒
+}
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——隔離本身就是全部重點時</div>
+        <p>在一台工業 PLC 中，24&nbsp;V 邏輯與它所指揮的 400&nbsp;V 三相馬達，被刻意保持在分開的接地平面上，僅透過光耦合器與繼電器接點相連。理由既殘酷又具體：一次馬達故障可能會把一千伏特的暫態傾倒到它的配線上，而那道隔離屏障是唯一擋在這暫態與一台價值 50,000 美元控制器之間的東西。同樣的原則往下縮放到你那塊 3 美元的繼電器板：絕對不要讓市電與邏輯共用銅箔。</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——市電不是教學玩具</div>
+        <p>230&nbsp;V / 120&nbsp;V 市電會要你的命。如果你對爬電距離（creepage）、外殼、保險絲與接地沒有十足把握，請改切換一個<strong>低壓直流負載</strong>（一台 12&nbsp;V 風扇、一條 LED 燈條）來練習，把市電留給有資格的工作。韌體是一模一樣的；但一個閃失的後果可不一樣。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="motors-hbridge"><span class="sec-no">6</span>直流馬達與 H 橋：方向＋速度</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>用四個開關讓馬達反轉</small></div>
+      <p>直流馬達在電流流過時往一個方向轉，電流反向時往另一個方向轉。要從單一電源讓電流反向，你需要一個 <strong>H 橋</strong>：四個開關像字母 H 一樣圍著馬達排列。閉合左上＋右下這一對，電流往一個方向流；閉合右上＋左下，電流往另一個方向流。像 <strong>L298N</strong>（較舊、BJT、約 1.7&nbsp;V 壓降、每通道可達 2&nbsp;A）或效率高得多的 <strong>DRV8833</strong>（MOSFET、低壓降、每通道可達約 1.5&nbsp;A）這類驅動晶片，把兩個 H 橋包在一起，讓你能驅動兩顆馬達。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——直通（shoot-through）</div>
+        <p>絕對不要同時閉合 H 的<em>同一側</em>兩個開關（例如左上＋左下）。那會透過兩顆電晶體把電源直接短路到地——這叫「直通」——並在數微秒內摧毀整個橋。這個被禁止的輸入組合正是驅動晶片存在的理由：它們會為你強制插入死區時間（dead-time）並拒絕非法狀態。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>由 PWM 工作週期決定速度</small></div>
+      <p>H 橋設定方向；致能腳（enable）上的 <strong>PWM</strong>（第 4 章）設定速度。直流馬達的平均施加電壓是電源乘上工作週期，而一階近似下其無載轉速正比於該平均電壓：</p>
+
+      <div class="math-box">
+        $$ \bar{V}_{\text{motor}} = D \cdot V_{\text{supply}}, \qquad \omega \;\approx\; \frac{\bar{V}_{\text{motor}} - I\,R_a}{k_e} $$
+      </div>
+
+      <p>其中 <span>$D$</span> 是工作週期（0–1），<span>$k_e$</span> 是馬達的反電動勢常數，<span>$I R_a$</span> 是電樞電阻壓降。結論：<strong>工作週期就是你的油門</strong>。在 12&nbsp;V 電源上、<span>$D = 0.5$</span> 時，馬達看到的平均電壓約 6&nbsp;V，運轉於接近其無載轉速的一半（在負載下會比較軟，因為有 <span>$IR_a$</span> 這一項）。H 橋電晶體也必須能配合 PWM，這正是為什麼我們切換的是<strong>致能</strong>線，而不是方向線。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>用 DRV8833 風格驅動器做方向＋速度</small></div>
+      <p>這裡我們用 L298N 的慣例：兩個方向輸入（<code>IN1</code>、<code>IN2</code>）設定極性，而一個支援 PWM 的 <code>ENA</code> 腳透過 <code>analogWrite</code> 設定速度。程式碼下方的真值表就是整個心智模型。</p>
+
+      <div class="codeblock">
+        <div class="code-head">hbridge.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t IN1 = 4, IN2 = 5;   // 方向控制
+const uint8_t ENA = 6;            // PWM 速度 (在 Uno 上腳 6 = Timer0 OC0A)
+
+void setup() {
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT); pinMode(ENA, OUTPUT);
+}
+
+// speed: 0..255 PWM 工作週期；dir: +1 前進, -1 後退, 0 = 滑行/煞車
+void drive(int speed, int dir) {
+  if (dir &gt; 0)      { digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);  }
+  else if (dir &lt; 0) { digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH); }
+  else              { digitalWrite(IN1, LOW);  digitalWrite(IN2, LOW);  } // 滑行
+  analogWrite(ENA, constrain(speed, 0, 255));   // 工作週期 = speed/255
+}
+
+void loop() {
+  drive(200, +1); delay(1500);   // 前進，約 78% 工作週期
+  drive(0,    0); delay(400);    // 滑行
+  drive(120, -1); delay(1500);   // 後退，約 47% 工作週期
+  drive(0,    0); delay(400);
+}
+</code></pre>
+      </div>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th><code>IN1</code></th><th><code>IN2</code></th><th>馬達</th><th>效果</th></tr></thead>
+        <tbody>
+          <tr><td>HIGH</td><td>LOW</td><td>→ 前進</td><td>電流 A→B</td></tr>
+          <tr><td>LOW</td><td>HIGH</td><td>← 後退</td><td>電流 B→A</td></tr>
+          <tr><td>LOW</td><td>LOW</td><td>滑行</td><td>兩個低側皆關 → 自由旋轉</td></tr>
+          <tr><td>HIGH</td><td>HIGH</td><td>煞車</td><td>兩端短路 → 快速停止</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 伺服機 vs. 直流馬達 vs. 步進馬達</div>
+        <p><strong>玩家用伺服機</strong>（PWM 那章）：你用每 20&nbsp;ms 一次的 1–2&nbsp;ms 脈衝去命令一個<em>角度</em>；它內建自己的 H 橋與回授。<strong>直流馬達</strong>：你命令方向＋速度；H 橋由<em>你</em>提供。<strong>步進馬達</strong>：透過一個依序切換的多線圈驅動器（A4988/DRV8825）做離散步進。不同的任務、不同的驅動器——但它們每一個都需要飛輪保護，因為它們每一個都是線圈。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="power-discipline"><span class="sec-no">7</span>電源紀律：分開供電、共用接地</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>為什麼馬達一啟動你的 MCU 就重置</small></div>
+      <p>最常見的新手翻車：機器人往前開、Arduino 就重開機。原因：馬達的湧入電流（在堵轉／啟動時，它可能瞬間拉到運轉電流的 <strong>5–10 倍</strong>）把共用的 5&nbsp;V 軌壓垮到掉電（brown-out）門檻以下，於是 MCU 重置。解法是<strong>電源紀律</strong>。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 混合訊號供電的三條規則</div>
+        <p><strong>1. 把馬達電源分開。</strong>馬達／繼電器要從它們自己的電池或穩壓器供電，絕不要走 MCU 的 5&nbsp;V 腳。<br>
+        <strong>2. 共用接地。</strong>所有電源的接地<em>必須</em>綁在一起——否則控制訊號就沒有共同的參考點，H 橋讀到的是垃圾。這是新手會跳過、然後說不出為什麼一切都不動的那條規則。<br>
+        <strong>3. 處處去耦。</strong>每顆晶片的 VCC 旁靠近處放一顆 100&nbsp;nF 陶瓷電容，再在馬達電源上跨一顆 100–470&nbsp;µF 的大電解電容，用來吸收切換暫態。</p>
+      </div>
+
+      <div class="mermaid">
+flowchart TB
+    BAT["電池 / 馬達電源"] --> REG["5V 穩壓器"]
+    REG --> MCU["MCU VCC"]
+    BAT --> DRV["馬達驅動器 VM"]
+    MCU -. "訊號" .-> DRV
+    GND([共用接地]) --- MCU
+    GND --- DRV
+    GND --- BAT
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>編列電流預算</small></div>
+      <p>在選擇電源之前，先把最壞情況的電流加總起來。以一台雙馬達機器人為例：兩顆馬達堵轉、一個聲納，加上 MCU：</p>
+
+      <div class="math-box">
+        $$ I_{\text{total}} = \sum_k I_k = 2\,(0.8\,\text{A}) + 0.015\,\text{A} + 0.05\,\text{A} \approx 1.67\,\text{A} $$
+      </div>
+
+      <p>挑一個額定值舒適地高於它的電源——比方說 2.5&nbsp;A——這樣暫態才不會把電軌拉垮。然後把你的導線與驅動器的電流額定值依同一份預算來選。L298N 上限約每通道 2&nbsp;A，<em>而且</em>每通道會以熱的形式浪費約 1.7&nbsp;V；DRV8833 則能把你電池裡更多的能量留在馬達上。電流編列就是「能跑一整個下午的機器人」與「每次轉彎就重置的機器人」之間的差別。</p>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="real-case-robot"><span class="sec-no">8</span>真實案例：一台避障機器人</h2>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>這就是整章濃縮成一個迴圈</small></div>
+      <p>以上所有東西組合成一台小小的自主機器人：一個 HC-SR04 往前看，韌體做決策，一個 H 橋操控兩顆直流馬達。感測 → 決策 → 動作——就是 §1 那條訊號鏈，化為現實。</p>
+
+      <div class="codeblock">
+        <div class="code-head">avoider.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">// 接腳：聲納在 9/10，左馬達 IN1/IN2 + ENL，右馬達 IN3/IN4 + ENR。
+const uint8_t TRIG=9, ECHO=10;
+const uint8_t IN1=4, IN2=5, ENL=6, IN3=7, IN4=8, ENR=11;
+const float   STOP_CM = 25.0f;     // 障礙物比這更近就轉開
+
+float ping() {
+  digitalWrite(TRIG, LOW);  delayMicroseconds(2);
+  digitalWrite(TRIG, HIGH); delayMicroseconds(10);
+  digitalWrite(TRIG, LOW);
+  unsigned long t = pulseIn(ECHO, HIGH, 30000UL);
+  return t ? t / 58.3f : 999.0f;   // 沒有回聲 =&gt; 視為「很遠」
+}
+
+void wheels(int l, int lDir, int r, int rDir) {
+  digitalWrite(IN1, lDir &gt; 0); digitalWrite(IN2, lDir &lt; 0); analogWrite(ENL, l);
+  digitalWrite(IN3, rDir &gt; 0); digitalWrite(IN4, rDir &lt; 0); analogWrite(ENR, r);
+}
+
+void setup() {
+  pinMode(TRIG, OUTPUT); pinMode(ECHO, INPUT);
+  uint8_t outs[] = {IN1,IN2,ENL,IN3,IN4,ENR};
+  for (uint8_t p : outs) pinMode(p, OUTPUT);
+}
+
+void loop() {
+  if (ping() &lt; STOP_CM) {           // 前方有障礙：原地往右旋轉
+    wheels(180, +1, 180, -1);
+    delay(350);
+  } else {                          // 路徑淨空：以約 70% 工作週期前進
+    wheels(180, +1, 180, +1);
+  }
+  delay(60);                        // 遵守 &gt;=60 ms 的聲納間隔
+}
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——這套模式真的出貨在實際產品裡</div>
+        <p>掃地機器人正是這個迴圈放大版：懸崖感測器與保險桿餵給一個決策層，由它指揮一個雙 H 橋來驅動行走輪，並用一個無刷驅動器來驅動吸力馬達——每一個電感性負載都有自己的續流保護，全都掛在一棵以星形接地、由一顆電池透過分開的穩壓器供電的電源樹上。那台 20 美元的桌面機器人與那台 400 美元的掃地機，跑的是你剛讀過的同一副骨架。掌握這副骨架，你兩者都能造。</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>⑤ 換你了</h2>
+      <div class="layer"><span class="step">⑤</span> 練習 <small>你來寫、你來決定</small></div>
+      <p>三道檢測。點一個答案、輸入一個數字，或揭開一道程式挑戰。你的進度會儲存在這台裝置上，並顯示在首頁。</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="ard07-flyback-ground">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢測</div>
+        <div class="ex-q">你把一顆直流馬達透過 H 橋接到一顆外部 9&nbsp;V 電池，Arduino 用它自己的 5&nbsp;V 電源。馬達隨機抽搐，橋讀到的是垃圾指令。你加了一顆飛輪二極體，它還是表現失常。最可能的<em>剩餘</em>錯誤是什麼？</div>
+        <ul class="ex-options">
+          <li data-correct="false">飛輪二極體太小——換一顆大一點的</li>
+          <li data-correct="true">兩個電源的接地沒有綁在一起（沒有共用接地）</li>
+          <li data-correct="false">馬達需要更高的 PWM 頻率</li>
+          <li data-correct="false">Arduino 接腳無法為馬達提供足夠電流</li>
+        </ul>
+        <div class="ex-explain">使用分開的電源時你<strong>必須</strong>把它們的接地接在一起。邏輯訊號是<em>相對於接地</em>的電壓；沒有共同參考點，驅動器就分不出 HIGH 與 LOW，讀到的都是垃圾。飛輪二極體防的是反電動勢（那是另一個問題），而 Arduino 接腳只驅動驅動器的邏輯輸入，不是馬達本身——所以缺的那一塊是共用接地。</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="ard07-sonar-distance" data-answer="30" data-tol="1">
+        <div class="ex-head"><span class="badge">Q2</span> 算算看</div>
+        <div class="ex-q">你的 HC-SR04 的 ECHO 脈衝量到 <strong>1740&nbsp;µs</strong> 寬。障礙物有多遠，以<strong>公分</strong>表示？（使用規則 $d_{\text{cm}} = t_{\mu s}/58$。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="cm"><span class="ex-unit">cm</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$d = 1740 / 58 = 30\ \text{cm}$。用 SI 交叉檢查：$d = v\,t/2 = 0.0343\,(\text{cm}/\mu s) \times 1740\,\mu s / 2 = 29.9\ \text{cm}$。「除以 58」這個規則其實就是 $2/0.0343$ 四捨五入——快到足以每個迴圈都跑。</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="ard07-pulsein-distance">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰——用 <code>pulseIn</code> 算距離</div>
+        <div class="ex-q">為一個 <code>TRIG = 3</code>、<code>ECHO = 2</code> 的 HC-SR04 寫一個函式 <code>float distanceCm()</code>。它必須發出一個正確的 10&nbsp;µs 觸發脈衝，用逾時計時回聲，並回傳公分（若沒有回聲抵達則回傳 <code>-1</code>）。然後每秒印出一次讀數。</div>
+        <details class="ex-acc">
+          <summary>提示</summary>
+          <div class="acc-body">流程是：把 TRIG 短暫驅動 LOW，HIGH 維持 10&nbsp;µs（<code>delayMicroseconds(10)</code>），再回到 LOW。接著 <code>pulseIn(ECHO, HIGH, 30000)</code> 會給出寬度（µs）；除以 58.3。<code>pulseIn</code> 回傳 <code>0</code> 代表逾時到期——把它轉換成你的 <code>-1</code> 哨兵值。</div>
+        </details>
+        <details class="ex-acc">
+          <summary>顯示一種解答</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">distance.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t TRIG = 3;
+const uint8_t ECHO = 2;
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(TRIG, OUTPUT);
+  pinMode(ECHO, INPUT);
+  digitalWrite(TRIG, LOW);
+}
+
+float distanceCm() {
+  digitalWrite(TRIG, LOW);  delayMicroseconds(2);
+  digitalWrite(TRIG, HIGH); delayMicroseconds(10);   // 10 us 觸發
+  digitalWrite(TRIG, LOW);
+
+  unsigned long t = pulseIn(ECHO, HIGH, 30000UL);    // us, 約 5 m 上限
+  if (t == 0) return -1.0f;                          // 沒有回聲
+  return t / 58.3f;                                  // d_cm = t_us / 58.3
+}
+
+void loop() {
+  float cm = distanceCm();
+  if (cm &lt; 0) Serial.println(F("no echo"));
+  else { Serial.print(cm, 1); Serial.println(F(" cm")); }
+  delay(1000);
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">逾時是那個生產級的細節：少了它，缺席的回聲會讓 <code>pulseIn</code> 阻塞長達一秒，你的控制迴圈就停擺了。封頂在 30&nbsp;ms 把最壞情況限制在約 5&nbsp;m 的量程，並讓迴圈保持反應靈敏。</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> 本章回顧</div>
+        <p>你現在能夠推理從感測器到致動器的一整條訊號鏈：對 HC-SR04 的回聲計時並用 <span>$d_{\text{cm}} = t_{\mu s}/58.3$</span> 換算成距離；解碼一個 DHT 單線訊框並驗證它的校驗和；用一顆方向正確的飛輪二極體保護每一個電感性負載（<span>$v_L = L\,di/dt$</span> 就是原因），並在交流接點上改用 RC 緩衝器；把危險負載放在光耦隔離的繼電器後方來切換；用 H 橋驅動直流馬達的方向、用 PWM 工作週期控制它的速度，同時避免直通；並用分開的電源、一個<strong>共用接地</strong>、去耦電容，以及一份誠實的電流預算，讓整套系統存活下來。這就是一台小型自主機器人所需的一切——感測、決策、動作，並在自己的致動器手下倖存。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="回到頂端">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../../../assets/vendor/highlight.min.js"></script>
+<script src="../../../assets/katex/katex.min.js"></script>
+<script src="../../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../../assets/vendor/mermaid.min.js"></script>
+<script src="../../../assets/app.js"></script>
+
+<!-- chapter-specific simulator: echo time -> distance -->
+<script>
+EM.sim("sim-sonar", {
+  height: 240,
+  params: [
+    { key: "echo", label: "ECHO 寬度 (µs)", min: 116, max: 5800, step: 58, value: 1740, unit: "µs" }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h;
+    var pad = 46 * dpr;
+    var cm = v.echo / 58.3;                 // 韌體的精確公式
+    var maxCm = 5800 / 58.3;                // 滿量程範圍（軸顯示約 99 cm）
+    var yMid = H / 2;
+
+    // axis / track line
+    ctx.strokeStyle = "#262d3a"; ctx.lineWidth = 1 * dpr;
+    ctx.beginPath(); ctx.moveTo(pad, yMid); ctx.lineTo(W - 14 * dpr, yMid); ctx.stroke();
+
+    // sensor (left)
+    ctx.fillStyle = "#2ec4b6";
+    ctx.fillRect(pad - 22 * dpr, yMid - 16 * dpr, 22 * dpr, 32 * dpr);
+    ctx.fillStyle = "#6e7681"; ctx.font = (12 * dpr) + "px monospace";
+    ctx.fillText("HC-SR04", 6 * dpr, yMid - 24 * dpr);
+
+    // obstacle position scaled across the track
+    var x = pad + (cm / maxCm) * (W - pad - 30 * dpr);
+    // sound pulses (animated dashes between sensor and obstacle)
+    ctx.strokeStyle = "#3a8bdd"; ctx.lineWidth = 2 * dpr;
+    ctx.setLineDash([6 * dpr, 6 * dpr]);
+    ctx.beginPath(); ctx.moveTo(pad, yMid); ctx.lineTo(x, yMid); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // obstacle (wall)
+    ctx.fillStyle = "#e0b341";
+    ctx.fillRect(x, yMid - 26 * dpr, 10 * dpr, 52 * dpr);
+
+    // distance label
+    ctx.fillStyle = "#cfd6e0"; ctx.font = (13 * dpr) + "px monospace";
+    ctx.fillText((Math.round(cm * 10) / 10) + " cm", x - 4 * dpr, yMid - 34 * dpr);
+
+    var d1 = Math.round(cm * 10) / 10;
+    var dSI = Math.round((0.0343 * v.echo / 2) * 10) / 10;
+    return "ECHO <b>t</b> = " + v.echo + " µs &nbsp;·&nbsp; <b>d</b> = t/58.3 = <b>" +
+           d1 + " cm</b> &nbsp;·&nbsp; SI 檢查 (v·t/2) = " + dSI + " cm";
+  }
+});
+</script>
+</body>
+</html>

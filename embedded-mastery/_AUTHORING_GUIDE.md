@@ -9,9 +9,14 @@ structure, skeleton, tone, and component usage. This guide is the spec.
 1. Output a COMPLETE, valid HTML document. No truncation, no "...", no TODO.
 2. Use ONLY the vendored assets via the exact `<link>`/`<script>` block below.
    Never reference a CDN or the internet — the iPad may be fully offline.
-3. Paths are relative from inside `Arduino/` or `STM32/` → assets are `../assets/...`.
-4. Set `<body class="track-arduino"...>` for Arduino, `track-stm32` for STM32,
-   and `data-track` / `data-chapter` to the exact ids from the manifest.
+3. Paths are relative from inside `Arduino/` or `STM32/` → the shared assets now live at the
+   site root, so they are `../../assets/...` (the EN chapters; `../../../assets/...` for the
+   `zh-tw/` translations one level deeper). Brand/home link → `../../index.html`.
+4. Set `<body class="track-arduino" data-course="embedded" ...>` for Arduino (`track-stm32`
+   for STM32), plus `data-track` / `data-chapter` to the exact ids from the registry in
+   `assets/app.js` (the `COURSES.embedded` object — the single source of truth for all courses).
+   The `EN / 繁中` language toggle is injected automatically by `app.js`; 繁中 pages are the
+   same file under a `zh-tw/` subfolder with one extra `../` on every path.
 5. Do NOT hand-write the sidebar list or prev/next nav — leave the empty
    `<nav class="sidebar" id="sidebar"></nav>` and `<nav class="chap-nav" id="chap-nav"></nav>`.
    `app.js` fills them automatically from the manifest + your `<h2 id>`s.
@@ -26,15 +31,15 @@ structure, skeleton, tone, and component usage. This guide is the spec.
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>CHAPTER TITLE — Embedded Mastery</title>
-<link rel="stylesheet" href="../assets/katex/katex.min.css">
-<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
-<link rel="stylesheet" href="../assets/styles.css">
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
 </head>
-<body class="track-arduino" data-track="arduino" data-chapter="02-gpio">
+<body class="track-arduino" data-course="embedded" data-track="arduino" data-chapter="02-gpio">
 <div id="read-progress"></div>
 <header class="topbar">
   <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
-  <a class="brand" href="../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <a class="brand" href="../../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
   <span class="spacer"></span>
   <span class="track-pill">Arduino · Ch 02</span>
   <span class="done-chip" id="done-chip">In progress</span>
@@ -58,11 +63,11 @@ structure, skeleton, tone, and component usage. This guide is the spec.
   </main>
 </div>
 <button id="to-top" aria-label="Back to top">↑</button>
-<script src="../assets/vendor/highlight.min.js"></script>
-<script src="../assets/katex/katex.min.js"></script>
-<script src="../assets/katex/contrib/auto-render.min.js"></script>
-<script src="../assets/vendor/mermaid.min.js"></script>
-<script src="../assets/app.js"></script>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
 <!-- optional chapter simulator <script> AFTER app.js, calling EM.sim(...) -->
 </body>
 </html>

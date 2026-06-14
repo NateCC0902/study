@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>什麼是機器學習？ — 機器學習與深度學習</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-mldl" data-course="mldl" data-track="main" data-chapter="00-what-is-ml">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> ML/DL</a>
+  <span class="spacer"></span>
+  <span class="track-pill">ML/DL · 00</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">ML/DL 課程 · 00 · 基礎</div>
+        <h1>什麼是機器學習？</h1>
+        <p>傳統程式設計與機器學習從相反的兩端解決同樣的問題：一個寫下規則，另一個從範例中發掘規則。我們會把 ML 究竟是什麼（以及不是什麼）釘得清清楚楚、點名三種學習範式、攤開端到端的工作流程，並把一個真實的無人水面載具（USV）感知任務框架化為一個 ML 問題。</p>
+        <div class="meta"><span>⏱ 約 30 分鐘</span><span>🧩 無先備知識</span><span>🐍 numpy-from-scratch</span><span>∑ 監督式框架</span></div>
+      </section>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🧭</span> 第 0 部分 · 第 00 課 · 程式技術棧：numpy-from-scratch</div>
+        <p><strong>先備知識：</strong>無 — 從這裡開始。</p>
+        <p><strong>學完本課你能：</strong></p>
+        <ul>
+          <li>區分 <strong>AI</strong>、<strong>ML</strong> 與 <strong>DL</strong>，並說出各自所處的層次。</li>
+          <li>說出三種學習範式（<strong>監督式</strong>、<strong>非監督式</strong>、<strong>強化</strong>），並為一個問題挑出正確的那一種。</li>
+          <li>追蹤從原始資料到部署模型的<strong>端到端 ML 工作流程</strong>。</li>
+          <li>判斷何時 ML 是對的工具 — 以及何時一個單純的 <code>if</code> 敘述就贏過它。</li>
+          <li>把一個真實的機器人任務（USV 碼頭偵測／避障）框架化為一個 ML 問題：輸入、輸出、範式。</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="intuition"><span class="sec-no">1</span>直覺理解</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺理解 <small>先把全貌建立起來</small></div>
+      <p>傳統程式設計與機器學習從相反的兩端解決同一類問題。</p>
+
+      <p>在<strong>傳統程式設計</strong>中，是<em>你</em>寫下規則。「如果聲納回波距離小於 3 公尺，就向右舵轉向。」你知道邏輯、你把它打出來、電腦執行它。輸出是你所撰寫規則的<em>結果</em>。</p>
+
+      <p>在<strong>機器學習</strong>中，你不寫規則。你交給機器一堆<strong>範例</strong> — 一對對的（情境、正確答案）— 然後由一個演算法去搜尋最能重現那些答案的規則。這些規則（稱為<strong>模型</strong>）是被<em>發掘</em>出來的，而非被撰寫出來的。</p>
+
+      <div class="mermaid">
+flowchart LR
+    subgraph CP[傳統程式設計]
+        R1[規則] --> P1[程式]
+        D1[資料] --> P1
+        P1 --> A1[答案]
+    end
+    subgraph ML[機器學習]
+        D2[資料] --> P2[學習演算法]
+        A2[答案] --> P2
+        P2 --> R2[規則／模型]
+    end
+</div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 牢牢記住的比喻</div>
+        <p><strong>傳統程式設計是寫一份食譜；ML 是品嚐一萬道菜並反推出食譜。</strong>當你已經知道怎麼做這道菜時，你會去寫食譜。當這道菜微妙到無法用文字描述時，你會去品嚐並反推 — 例如「在霧氣、眩光與浪湧中，碼頭在相機畫面裡<em>看起來</em>是什麼樣子？」沒有人能手寫出那個 <code>if</code> 敘述。這就是 ML 填補的缺口。</p>
+      </div>
+
+      <p><strong>AI vs ML vs DL。</strong>這些詞在行銷中被混用；它們其實不一樣。</p>
+      <ul>
+        <li><strong>人工智慧 (Artificial Intelligence, AI)</strong> — 讓機器做出看起來有智慧的事這個廣泛目標。包含 ML，但也包含手寫邏輯、搜尋演算法（用於路徑規劃的 A* 是 AI，而且其中<em>完全沒有</em>學習成分）以及規則引擎。</li>
+        <li><strong>機器學習 (Machine Learning, ML)</strong> — AI 的子集合，其行為是<em>從資料中學來的</em>，而非手寫的。</li>
+        <li><strong>深度學習 (Deep Learning, DL)</strong> — ML 的子集合，使用具有許多層的<strong>神經網路</strong>。它仍然是「從資料中學規則」，但模型是一個堆疊得很深的函數，強大到足以學出自己的特徵。（我們從第 <a href="09-neural-networks-mlp.html">09</a> 課開始建構這些。）</li>
+      </ul>
+
+      <div class="mermaid">
+flowchart TD
+    AI[人工智慧<br/>搜尋、邏輯、規則引擎、ML] --> ML[機器學習<br/>從資料中學習]
+    ML --> DL[深度學習<br/>深度神經網路]
+</div>
+
+      <p>一個好用的檢驗法：你的 A* 路徑規劃器與你的 PID 控制器是 AI／控制，<strong>不是</strong> ML — 其中沒有任何東西被學習。一個從過去的慣性測量單元 (IMU) 加 GPS 資料來預測當前漂流的模型<em>才是</em> ML。</p>
+
+      <h3>三種學習範式</h3>
+      <p>機器如何學習，取決於它得到什麼樣的回饋。</p>
+
+      <div class="mermaid">
+flowchart TD
+    ML[機器學習] --> S[監督式<br/>有標籤的範例：X 到 y]
+    ML --> U[非監督式<br/>只有 X，找出結構]
+    ML --> R[強化<br/>行動、得到獎勵、改進]
+    S --> SC[分類<br/>離散標籤]
+    S --> SR[迴歸<br/>連續數值]
+    U --> UC[分群]
+    U --> UD[降維]
+    R --> RP[策略學習]
+</div>
+
+      <ul>
+        <li><strong>監督式學習 (supervised learning)</strong> — 你同時擁有輸入<strong>與</strong>正確答案（<strong>標籤</strong>）。模型學習輸入 → 標籤的映射。又分為<strong>分類</strong>（標籤是一個類別：「碼頭」／「浮標」／「開闊水域」）與<strong>迴歸</strong>（標籤是一個數字：「到障礙物的距離，以公尺計」）。這是第 02–13 課的大部分內容。</li>
+        <li><strong>非監督式學習 (unsupervised learning)</strong> — 你有輸入，但<em>沒有</em>答案。模型自行找出結構：把相似的光達掃描分組（<strong>分群</strong>），或把一個 64 通道的聲納陣列壓縮成 3 個有意義的軸（<strong>降維</strong>）。第 <a href="08-kmeans-pca.html">08</a> 課。</li>
+        <li><strong>強化學習 (reinforcement learning, RL)</strong> — 一個<strong>代理人</strong>在環境中採取動作，收到一個純量<strong>獎勵</strong>，並學出一個能最大化長期獎勵的<strong>策略</strong>。這正是你會用來訓練 USV 在水流中定點保持、或讓無人機降落的方法。每一步沒有固定的「正確答案」 — 只有延遲的獎勵。（超出本課程核心範圍，但你會認得它。）</li>
+      </ul>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 一個快速的決策規則</div>
+        <p><em>我有帶標籤的答案嗎？→ 監督式。只有原始資料、想找出結構？→ 非監督式。一個代理人隨時間行動以換取獎勵？→ 強化。</em></p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-math"><span class="sec-no">2</span>數學原理</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>用符號表達監督式框架</small></div>
+      <p>這裡的數學刻意保持輕量 — 第 <a href="01-math-foundations.html">01</a> 課才會建立真正的工具箱。但監督式學習的核心<em>框架</em>值得用一組符號交代清楚，因為後面每一課都是它的一種變化。</p>
+
+      <p>我們想學習一個函數</p>
+      <div class="math-box">$$ f_\theta : \mathcal{X} \rightarrow \mathcal{Y} $$</div>
+      <p>其中 $\mathcal{X}$ 是<strong>輸入空間</strong>（例如所有可能的聲納讀數），$\mathcal{Y}$ 是<strong>輸出空間</strong>（例如以公尺計的距離，或類別的集合），而 $\theta$（theta）是<strong>參數</strong>向量 — 也就是學習過程要調整的那些數字。單一個輸入是 $x \in \mathcal{X}$；它的真實答案是 $y \in \mathcal{Y}$；模型的猜測是 $\hat{y} = f_\theta(x)$（讀作「y-hat」）。</p>
+
+      <p>我們得到一個由 $n$ 個帶標籤範例組成的<strong>訓練集</strong>：</p>
+      <div class="math-box">$$ \mathcal{D} = \{(x^{(1)}, y^{(1)}), \dots, (x^{(n)}, y^{(n)})\} $$</div>
+      <p>上標 $(i)$ 是範例的索引（它<em>不是</em>指數）。每個 $x^{(i)}$ 通常是一個<strong>特徵</strong>向量 — 也就是測得的量，例如 $[\text{range}, \text{intensity}, \text{bearing}]$。</p>
+
+      <p>為了說出一個猜測有多<em>錯</em>，我們定義一個<strong>損失函數</strong> $\ell(\hat{y}, y)$，當猜得好時它很小、當猜得差時它很大。把損失在整個訓練集上取平均，就得到<strong>成本</strong>（或稱<strong>經驗風險</strong>）：</p>
+      <div class="math-box">$$ J(\theta) = \frac{1}{n} \sum_{i=1}^{n} \ell\big(f_\theta(x^{(i)}),\, y^{(i)}\big) $$</div>
+      <p>這從何而來？它就只是「在我看過的資料上平均犯的錯」。對迴歸來說，一個經典選擇是<strong>平方誤差</strong> $\ell(\hat{y}, y) = (\hat{y} - y)^2$（重重懲罰大幅偏離）；對分類，我們會在第 <a href="04-logistic-regression.html">04</a> 課使用不同的損失。</p>
+
+      <p><strong>訓練</strong> = 求解這個最佳化問題</p>
+      <div class="math-box">$$ \theta^{*} = \arg\min_{\theta} \; J(\theta) $$</div>
+      <p>也就是找出使平均損失最小的那組參數。我們會在第 <a href="03-gradient-descent.html">03</a> 課用<strong>梯度下降</strong>來做這件事。<strong>推論</strong> = 在一個<em>新的</em> $x$ 上使用訓練好的 $f_{\theta^{*}}$ 來得到 $\hat{y}$。</p>
+
+      <p>整場遊戲用一句話講完：<strong>挑一個模型族 $f_\theta$、定義一個損失，然後在 $\theta$ 上搜尋以最小化平均損失 — 同時確保它在你沒看過的資料上仍然管用。</strong>最後那個子句就是<strong>泛化</strong>，也是難的部分。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 泛化 vs 死背</div>
+        <p><strong>泛化</strong>是「死背訓練集」與「真正學到規律」之間的差別。一個在訓練資料上拿到滿分、卻在新資料上失敗的模型，就是<strong>過度擬合</strong> — 它把雜訊都背了下來。第 <a href="05-overfitting-evaluation.html">05</a> 課完全在講如何量測並修正這件事。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="code"><span class="sec-no">3</span>程式碼</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>把這個迴圈具體化</small></div>
+      <p>還沒有真正的訓練 — 那從第 02 課開始。這裡的目標是用一個極小的 <code>numpy</code> 範例把那個<em>迴圈</em>具體化，好讓這些詞彙不再抽象。我們會擬合一個盡可能簡單的模型 — 一個單一數字，也就是平均 — 來配適資料，做法是字面上地逐一嘗試各個值並觀察損失。</p>
+
+      <div class="codeblock">
+        <div class="code-head">mean_by_search.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import numpy as np
+
+# ---- 1. DATA --------------------------------------------------------------
+# 假裝一台 USV 在 8 個時刻量測了「到最近障礙物的距離」（公尺）。
+# 在監督式學習中，這些會是「標籤」(y)。這裡為了把它弄到最精簡，
+# 我們的「模型」沒有輸入 x — 它只是對所有情況都預測同一個常數值。
+y = np.array([12.1, 11.8, 13.0, 12.5, 11.2, 12.9, 12.3, 12.7])
+
+# ---- 2. MODEL -------------------------------------------------------------
+# 我們的模型族很簡單：f_theta(x) = theta，只有單一個參數。
+# 「每次都預測同一個數字。」theta 就是我們試圖要學的東西。
+def model(theta):
+    return theta  # 刻意忽略輸入；這是最簡單可能的 f_theta
+
+# ---- 3. LOSS / COST -------------------------------------------------------
+# 均方誤差：所有範例上 (prediction - truth)^2 的平均。
+def cost(theta, y):
+    preds = model(theta)            # 一個數字，會與所有 y 廣播相減
+    return np.mean((preds - y) ** 2)
+
+# ---- 4. "OPTIMIZE" (brute-force search, just to SEE the minimum) ----------
+# 真正的 ML 使用梯度下降（第 03 課）。這裡我們掃描候選的 theta。
+candidates = np.linspace(10.0, 14.0, 401)     # 從 10 到 14 的 401 個猜測
+costs = np.array([cost(t, y) for t in candidates])
+
+best_idx   = np.argmin(costs)                  # 最小成本的索引
+theta_star = candidates[best_idx]              # 學到的參數
+print(f"learned theta*: {theta_star:.3f}")     # -&gt; learned theta*: 12.310
+print(f"min cost:       {costs[best_idx]:.3f}")# -&gt; min cost:       0.319
+
+# 檢驗：對 MSE 而言，最佳的常數正好就是 y 的平均。
+print(f"mean of y:      {y.mean():.3f}")       # -&gt; mean of y:      12.312
+</code></pre>
+      </div>
+
+      <p><code>theta_star</code> 正好落在 <code>y.mean()</code> 上 — 這不是巧合。對於使用平方誤差損失的常數模型，成本 $J(\theta) = \frac{1}{n}\sum (\theta - y^{(i)})^2$ 在 $\theta$ 上是一條拋物線；把它的導數設為零會得到 $\theta^{*} = \bar{y}$，也就是平均。你剛剛用暴力法做完了你的第一道 ML 數學，而解析解也與之吻合。那個「有個底部的拋物線」形狀，正是第 03 課裡梯度下降要<em>往下滾</em>的東西。</p>
+
+      <p>現在來把<strong>損失地形 (loss landscape)</strong> 視覺化 — 這是 ML 裡最重要的一張圖：</p>
+
+      <div class="codeblock">
+        <div class="code-head">plot_loss_landscape.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import matplotlib.pyplot as plt
+
+plt.figure(figsize=(6, 4))
+plt.plot(candidates, costs, label="cost J(theta)")
+plt.axvline(theta_star, color="red", linestyle="--",
+            label=f"theta* = {theta_star:.2f}")
+plt.xlabel("theta (predicted distance, m)")
+plt.ylabel("mean squared error")
+plt.title("Loss landscape: training = find the bottom of this curve")
+plt.legend()
+plt.tight_layout()
+plt.show()
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 你應該看到</div>
+        <p>一條平滑的 U 形（拋物線）曲線，它唯一的最低點落在紅色虛線處，大約在 <code>theta = 12.31</code>。在後面每一課裡，訓練都是在找像這樣一條曲線的底部 — 只不過 $\theta$ 將會有數千或數百萬個維度，而不是一個維度，而且我們無法用暴力法掃描它。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="real-case"><span class="sec-no">4</span>實際案例</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>把一個 USV 感知任務框架化</small></div>
+      <p><strong>任務：一台 USV 必須從它前方的相機加聲納偵測碼頭並避開障礙物。</strong>讓我們把它框架化為 ML，而非手寫規則。</p>
+
+      <p>為什麼不直接寫規則就好？你可以試試：「碼頭 = 靠近水線的大型明亮矩形。」但碼頭千變萬化（木造、混凝土、浮動式、有船／沒船），而光照從黎明的眩光擺盪到霧氣。你每加一個 <code>if</code> 去修補一個失敗案例，就會弄壞另外兩個。這正是經典的徵兆，告訴你應該從範例中<em>學</em>出規則，而不是去撰寫它。</p>
+
+      <p><strong>把它逐項框架化：</strong></p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>ML 概念</th><th>這個任務</th></tr></thead>
+        <tbody>
+          <tr><td><strong>輸入</strong> $x$</td><td>該瞬間的一個相機畫面（像素）加上一個融合後的聲納／光達距離向量</td></tr>
+          <tr><td><strong>特徵</strong></td><td>可以是原始像素（DL 會學出自己的特徵，第 13 課）或人工設計的：邊緣密度、主要距離、強度直方圖</td></tr>
+          <tr><td><strong>輸出</strong> $y$</td><td>兩個頭：<em>(a)</em> 類別 — <code>{dock, buoy, vessel, open_water}</code>；<em>(b)</em> 數字 — 到最近障礙物的距離（公尺）</td></tr>
+          <tr><td><strong>範式</strong></td><td>(a) 監督式<strong>分類</strong>；(b) 監督式<strong>迴歸</strong> — 兩者都是監督式，因為我們會替錄下的航程加上標籤</td></tr>
+          <tr><td><strong>標籤</strong></td><td>由人去標註記錄下來的影像：畫框／標記畫面。這是花錢的部分。</td></tr>
+          <tr><td><strong>損失</strong></td><td>類別頭用交叉熵；距離頭用平方誤差（第 04、02 課）</td></tr>
+          <tr><td><strong>訓練／推論</strong></td><td>在工作站／GPU 上以帶標籤的紀錄離線訓練；在 USV 的機載算力上、於 ROS2 感知節點中即時跑<strong>推論</strong></td></tr>
+          <tr><td><strong>泛化</strong></td><td>真正的考驗：它在一個<em>從未訓練過</em>的港灣、在它從未見過的天候裡管用嗎？以一個保留下來的測試集來量測（第 05 課）。</td></tr>
+        </tbody>
+      </table></div>
+
+      <p>這個專案的整套<strong>端到端工作流程</strong>：</p>
+
+      <div class="mermaid">
+flowchart LR
+    A[蒐集資料<br/>錄下港灣航程] --> B[標註<br/>標記畫面、標出距離]
+    B --> C[特徵<br/>原始像素或人工設計]
+    C --> D[模型<br/>挑選 f_theta]
+    D --> E[損失<br/>定義何謂出錯]
+    E --> F[最佳化<br/>訓練：最小化成本]
+    F --> G[評估<br/>保留的港灣＋天候]
+    G -->|good| H[部署<br/>USV 上的 ROS2 推論節點]
+    G -->|bad| C
+    H -->|new failures| A
+</div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🌊</span> 它是一個迴圈，不是一條直線</div>
+        <p>USV 在部署中遇上一個失敗案例 — 比方說它把一艘停泊的獨木舟誤判為開闊水域 — 而那個失敗就變成新的帶標籤訓練資料。那個回饋迴圈才是真正工作的大部分；擬合模型的數學只是輕鬆的 10%。</p>
+      </div>
+
+      <p>一個用來打底的經典：同一套監督式框架也描述了 <strong>Iris</strong> 資料集（特徵 = 花瓣／花萼的量測值，標籤 = 花的物種，範式 = 分類），以及 <strong>California housing</strong>（特徵 = 街區統計量，標籤 = 房價中位數，範式 = 迴歸）。同樣的骨架，不同的 $x$ 與 $y$。一旦你看懂這個骨架，你就會到處都看見它。</p>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pitfalls-tips"><span class="sec-no">5</span>常見陷阱與技巧</h2>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 要分清楚的六個陷阱</div>
+        <ul>
+          <li><strong>規則行得通時別動用 ML。</strong>如果你能可靠地寫出那個 <code>if</code> 敘述（例如「若深度 &lt; 0.5 公尺則停止」），就那樣做 — 它可測試、可除錯，而且沒有訓練資料的成本。唯有當規則複雜或模糊到無法手寫時，ML 才值回票價。</li>
+          <li><strong>沒有標籤 ≠「那就做非監督就好」。</strong>非監督式學習找出的是<em>結構</em>，而非<em>你要的特定答案</em>。如果你需要「碼頭 vs 非碼頭」，分群不會免費把那個標籤交到你手上 — 你在某個環節仍需要監督。許多真實專案之所以夭折，就是因為沒人替標註編列預算。</li>
+          <li><strong>訓練準確率是個虛榮指標。</strong>一個模型可以在它看過的資料上拿到 100%，卻毫無用處。永遠要以模型從未訓練過的<strong>保留</strong>集來評斷。我們會在第 05 課把這件事形式化 — 現在就先把這個直覺內化。</li>
+          <li><strong>垃圾進、垃圾出 — 而且問題大多出在「垃圾進」。</strong>標錯的畫面、一小時後就開始漂移的聲納、鏡頭有汙漬的相機：模型會忠實地把你資料裡的缺陷都學起來。預期你會花在資料上的時間遠多於花在模型上的時間。</li>
+          <li><strong>分布偏移會反咬你一口。</strong>一個在平靜淡水試驗池中訓練出來的模型，可能在鹹水、浪湧與眩光中失敗。部署的世界很少與訓練的世界吻合；要計畫去量測並重新訓練。</li>
+          <li><strong>AI ≠ ML ≠ DL — 把它們分清楚。</strong>在線性迴歸（第 02 課）就夠用時卻動用深度神經網路，是一個真實且常見的錯誤。從簡單開始；唯有在能證明較簡單的模型確實不足時，才增加複雜度。</li>
+        </ul>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="check-understanding"><span class="sec-no">6</span>自我檢測</h2>
+
+      <p><strong>Q1.</strong> 你的隊友說「我們在路徑規劃器上用了 AI — 它是 A* 搜尋。」這是機器學習嗎？為什麼是或為什麼不是？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>不是。A* 是一個<strong>搜尋演算法</strong> — 它遵循手寫的邏輯去找出一條最短路徑。沒有任何東西是<em>從資料中學來的</em>；相同的輸入永遠依固定規則產生相同的輸出。它是 AI（有智慧的行為），但不是 ML。它只有在你（比方說）從記錄下來的穿越資料中學出邊權重成本函數時，才會變成 ML。</p>
+      </div></details>
+
+      <p><strong>Q2.</strong> 你有 50,000 筆記錄下來的聲納掃描，但<strong>沒有</strong>標籤告訴你每一筆掃描裡有什麼。你想要發掘這些掃描是否落入幾種自然的「類型」。是哪一種範式，又是哪一個子任務？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p><strong>非監督式學習</strong>，具體來說是<strong>分群</strong> — 在沒有任何標籤的情況下把相似的掃描分組。（第 08 課。）如果你之後想把那些分群<em>命名</em>為「碼頭／開闊水域／船隻」，那個命名步驟就會需要監督 — 也就是來自人的標籤。</p>
+      </div></details>
+
+      <p><strong>Q3.</strong> 在符號 $f_\theta(x^{(i)}) = \hat{y}^{(i)}$ 與標籤 $y^{(i)}$ 之中，學習演算法在訓練期間改變的是哪一個，固定不變的又是哪一個？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>訓練改變的是 <strong>$\theta$</strong>（參數），好讓 $\hat{y}^{(i)} = f_\theta(x^{(i)})$ 接近真實的 $y^{(i)}$。資料 $x^{(i)}$ 與標籤 $y^{(i)}$ 是<strong>固定的</strong> — 它們是我們學習所依據的範例。我們調的是那些旋鈕（$\theta$），而不是世界。</p>
+      </div></details>
+
+      <p><strong>Q4.</strong> 一個模型在它訓練過的資料上拿到 99% 準確率，但在一個它從未見過的新港灣上只有 61%。這叫什麼名字，而且那個訓練數字令人安心嗎？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>這是<strong>過度擬合</strong> — 模型把訓練集（連同它的雜訊／怪癖）都背了起來，而不是學到一個能<strong>泛化</strong>的規律。那個 99% <em>並不</em>令人安心；它幾乎是個警訊。在未見過的資料上那個 61% 才是重要的數字。（第 05 課專門在講偵測並修正這件事。）</p>
+      </div></details>
+
+      <p><strong>Q5.</strong> 為什麼端到端 ML 工作流程被畫成一個迴圈，而不是從資料到部署的一條直線？</p>
+      <details class="ex-acc"><summary>解答</summary><div class="acc-body">
+        <p>因為部署會浮現新的失敗案例（新的港灣、新的天候、標錯的邊界情形），這些會回饋到資料蒐集與標註中。真實的 ML 系統會被持續評估並重新訓練；「出貨一次就忘了它」幾乎從不成立。擬合模型那個步驟，只是一個由資料工作主導的、持續循環中的一小片。</p>
+      </div></details>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>換你試試</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="ml00-paradigm">
+        <div class="ex-head"><span class="badge">Q1</span> 挑出範式</div>
+        <div class="ex-q">你有記錄下來的 USV 相機畫面，每一個都已經<strong>由人標記</strong>為 <code>dock</code>、<code>buoy</code> 或 <code>open_water</code>，而你想要模型對新畫面預測那個標記。這是哪一種範式與子任務？</div>
+        <ul class="ex-options">
+          <li data-correct="true">監督式學習 — 分類（離散標籤）。</li>
+          <li data-correct="false">監督式學習 — 迴歸（連續數值）。</li>
+          <li data-correct="false">非監督式學習 — 分群（沒有可用的標籤）。</li>
+          <li data-correct="false">強化學習 — 一個代理人為了延遲獎勵而行動。</li>
+        </ul>
+        <div class="ex-explain">你同時擁有輸入<em>與</em>正確答案（人的標記），所以它是<strong>監督式</strong>。答案是來自一個固定集合的<em>類別</em>，而不是一個數字，所以它是<strong>分類</strong>。迴歸會預測一個連續數值（例如以公尺計的距離）；分群只在你沒有標籤時才適用；RL 需要一個隨時間賺取獎勵的代理人。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="ml00-best-constant" data-answer="12.312" data-tol="0.01">
+        <div class="ex-head"><span class="badge">Q2</span> 計算最佳常數</div>
+        <div class="ex-q">對於使用平方誤差損失的常數模型，$\theta^{*}$ 正好就是標籤的平均。使用 $y = [12.1, 11.8, 13.0, 12.5, 11.2, 12.9, 12.3, 12.7]$，計算 $\theta^{*} = \bar{y}$（以公尺計，取到小數點後 3 位）。</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">m</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">總和 $= 12.1+11.8+13.0+12.5+11.2+12.9+12.3+12.7 = 98.5$。除以 $n=8$：$\theta^{*} = 98.5/8 = 12.3125 \approx 12.312$ m。這與 <code>y.mean()</code> 以及程式碼中暴力搜尋的 <code>theta_star</code> 吻合（後者落在 12.310 只是因為 401 點的網格無法剛好命中 12.3125）。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="ml00-rules-vs-ml">
+        <div class="ex-head"><span class="badge">Q3</span> 規則還是學習？</div>
+        <div class="ex-q">一個隊友想為一個安全連鎖機制「用 ML」：<em>當量測到的水深掉到 0.5 公尺以下時就讓 USV 停止</em>。這應該用機器學習嗎？用本課的推理來證成你的看法，然後說出碼頭偵測任務中的哪一部分<em>應該</em>用 ML，以及為什麼。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">問問自己：你能否可靠地手寫出那個 <code>if</code> 敘述？如果可以，ML 增添了什麼 — 而它又有什麼代價（訓練資料、評估、分布偏移）？</div></details>
+        <details class="ex-acc"><summary>顯示一個解答</summary><div class="acc-body">
+          <p><strong>不該 — 保持它是一條規則。</strong>「若深度 &lt; 0.5 公尺則停止」是一個單一、明確、可靠手寫的 <code>if</code> 敘述。它可測試、可除錯、具決定性，而且需要零筆帶標籤訓練資料。對於一個已經完美運作的規則，ML 只會增添訓練資料的成本、評估的負擔，以及分布偏移的風險 — 嚴格來說更差。正如本課所說：<em>唯有在規則複雜或模糊到無法手寫時才使用 ML</em>。</p>
+          <p><strong>ML 值回票價之處：</strong><em>感知</em>步驟 — 「這個相機畫面是碼頭嗎？」 — 才是那個模糊的部分。碼頭在材質、形狀、光照與天候上千變萬化；每一個手寫的 <code>if</code> 修補都會弄壞另外兩個。這就是 ML 填補的缺口：從帶標籤的範例中學出「碼頭 vs 非碼頭」的規則（監督式分類），然後把它的輸出餵進那個簡單的手寫安全邏輯。學那個模糊的感知；手寫那個明確的控制。</p>
+        </div></details>
+      </div>
+
+      <!-- ============================================================ recap -->
+      <h2 id="recap-next"><span class="sec-no">8</span>回顧與下一步</h2>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本課回顧</div>
+        <ul>
+          <li><strong>AI ⊃ ML ⊃ DL</strong>：AI 是廣泛的目標，ML 從資料中學規則，DL 使用深度神經網路。A* 與 PID 是 AI／控制，但<em>不是</em> ML。</li>
+          <li>三種範式：<strong>監督式</strong>（帶標籤的 X→y；分類＋迴歸）、<strong>非監督式</strong>（從無標籤的 X 找出結構）、<strong>強化</strong>（行動 → 獎勵 → 策略）。</li>
+          <li>一句話講完監督式學習：挑一個模型 $f_\theta$、定義一個<strong>損失</strong>，並在訓練資料上<strong>最小化平均損失</strong> — 然後檢查它能<strong>泛化</strong>到未見過的資料。</li>
+          <li>端到端工作流程 — 資料 → 特徵 → 模型 → 損失 → 最佳化 → 評估 → 部署 — 是一個<strong>迴圈</strong>，而且資料工作遠遠蓋過數學。</li>
+          <li>唯有在規則複雜到無法手寫時才使用 ML；否則一個 <code>if</code> 敘述就贏了。</li>
+        </ul>
+        <p>接下來我們要建構那個真正的工具箱 — 向量、矩陣、導數與機率 — 它讓上述這一切變得可計算：<a href="01-math-foundations.html">01 — 數學工具箱</a>。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂部">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

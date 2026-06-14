@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>D 控制：阻尼器 — USV 的 PID 控制</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-pid" data-course="pid" data-track="main" data-chapter="03-d-control">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> PID&nbsp;·&nbsp;USV</a>
+  <span class="spacer"></span>
+  <span class="track-pill">PID · 第 03 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">PID 課程 · 第 03 章 · D 項</div>
+        <h1>D 控制：阻尼器</h1>
+        <p>單靠 P 會超調並振鈴 — 它是一根沒有摩擦的彈簧（spring）。在這一章裡，我們把 $k_p=2$ 固定下來，再加上微分（derivative）項。我們會看 D 在收斂途中如何對抗 P，精準釘出控制器決定滑行的那一刻，並證明 D 永遠做不到的那一件事。</p>
+        <div class="meta"><span>⏱ ~30 分鐘</span><span>🧭 PD 航向保持</span><span>⚡ 即時模擬</span><span>🛑 阻尼</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="why-add-d"><span class="sec-no">1</span>為什麼 P 需要一個搭檔</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>我們上次停在哪</small></div>
+      <p>上一章只有 P 的船表現得就像彈簧上的一顆質量（mass）。下令從 0° 轉到 90°，你離設定值（setpoint）越遠，舵（rudder）就拉得越用力 — 完全就像彈簧拉得越開、回拉的力就越大。麻煩在於一根輕阻尼的彈簧會做的事：它會<em>振盪（oscillate）</em>。船首（bow）擺向 90°，但它抵達時速度很快，直接衝過去，然後振鈴（ring）。</p>
+
+      <p>具體來說，用我們敲定的那組增益（gain），$k_p=2$ 振鈴一次後穩定在約 92°。推到 $k_p=5$ 它就永遠停不下來 — 那是這艘船的臨界增益（ultimate gain, Ku）$K_u$，一個 $\pm16°$ 的振盪（oscillation）永無止境。解法<strong>不是</strong>更多彈簧，而是摩擦。那就是微分項。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話講完 D 的模型</div>
+        <p>P 對<strong>你身在何處</strong>（誤差（error））起反應。D 對<strong>那個位置變化得多快</strong>（誤差的變化率）起反應。一個避震器（shock absorber）不在乎車子在哪裡 — 只在乎懸吊移動得多快。D 就是那個避震器。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>我們正在加入的那一項</small></div>
+      <p>我們沿用第 01 章那個離散控制律（control law），只是把 $k_d$ 打開。微分是（已纏繞過的）誤差的有限差分：</p>
+      <div class="math-box">$$ u_n = \underbrace{k_p\,e_n}_{\text{P：位置}} \;+\; \underbrace{k_d\,\frac{e_n - e_{n-1}}{dt}}_{\text{D：速度}}, \qquad e_n = \psi_\text{set} - \psi_n $$</div>
+      <p>仔細看符號。當船正擺<em>向</em>設定值時，誤差正在縮小，所以 $e_n &lt; e_{n-1}$，有限差分為<strong>負</strong>。在 $k_d &gt; 0$ 的情況下，D 因此會是負的 — 它把舵往跟 P <em>相反</em>的方向推。D 在收斂過程中對抗 P。這個對抗就是整個機制的全部。</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>操船的階段</th><th>$e$</th><th>$\dot e$</th><th>D 項</th><th>效果</th></tr></thead>
+        <tbody>
+          <tr><td>離得很遠、剛開始轉</td><td>大的 +</td><td>小的 −</td><td>小的 −</td><td>P 主導，全力轉向</td></tr>
+          <tr><td>快速收斂、接近目標</td><td>小的 +</td><td>大的 −</td><td>大的 −</td><td>D 主導，猛力煞車</td></tr>
+          <tr><td>已上航向、維持中</td><td>0</td><td>0</td><td>0</td><td>D 完全消失</td></tr>
+        </tbody>
+      </table></div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-sim"><span class="sec-no">2</span>親手操作：自己把阻尼器加上去</h2>
+
+      <div class="layer"><span class="step">④</span> 實例 <small>在你信任數學之前，先感受它</small></div>
+      <p>一如既往的同一艘船：$K=0.6$、$T=2.5$ s、20 Hz 迴圈、$\pm35°$ 舵。P 增益釘死在 $k_p=2$。這裡唯一重要的旋鈕是 $k_d$。跑一個 0° → 90° 的階躍，盯著航向（heading）面板看。</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>🧭</span> PD 航向保持（自己加上阻尼器 kd）</div>
+        <canvas id="sim-pd"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 拖什麼、看什麼</div>
+        <p>掃描（sweep）$k_d$，重現筆記裡的三種情況：</p>
+        <ul>
+          <li><strong>$k_d=0$</strong> — 純 P。它超調（overshoot）到大約 118° 並振鈴。這是你最醜的基準線。</li>
+          <li><strong>$k_d=1$</strong> — 一個小而有禮的超調。阻尼器（damper）開始咬住了。</li>
+          <li><strong>$k_d=3$</strong> — 它像泊車小弟一樣滑進去。完全沒有超調。</li>
+        </ul>
+        <p>現在當船首接近 90° 時，盯著<em>舵</em>面板看：在 $k_d=3$ 時，命令舵角實際上會變成<strong>負的</strong> — 反舵（counter-rudder）— 而且早在船抵達之前就發生了。那個負的尖峰就是 D 在煞車。P 絕不會在還沒到達目標時就下令反舵；只有 D 會。</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 把它推過頭</div>
+        <p>把 $k_d$ 拉向 8–10。收斂過程變得遲鈍，舵也開始顯得神經兮兮。太多阻尼器會讓船害怕自己的運動 — 而且（預告第 07 章）它會把感測器雜訊（noise）放大成舵的抖動。有一個甜蜜點，對這個船體（hull）來說 $k_d=3$ 就是它。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="d-opposes-p"><span class="sec-no">3</span>D 對抗 P：重讀那個實作範例</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>用數字看抵消</small></div>
+      <p>D 對抗 P 最乾淨的證明，就活在第 01 章那個手算的時間步（timestep）裡。回想那個操船途中的快照 — 航向 60°、設定值 90°、前一次誤差 31°、增益 $k_p=2,\ k_d=3$：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>步驟</th><th>計算</th><th>結果</th></tr></thead>
+        <tbody>
+          <tr><td>誤差 $e_n$</td><td>wrap(90°−60°)=30°</td><td>0.5236 rad</td></tr>
+          <tr><td>P</td><td>$2 \times 0.5236$</td><td><strong>+1.047 rad</strong>（+60°）</td></tr>
+          <tr><td>$\dot e$</td><td>$(0.5236 - 0.5411)/0.05$</td><td>−0.349 rad/s（船首正以 20 °/s 收斂）</td></tr>
+          <tr><td>D</td><td>$3 \times (-0.349)$</td><td><strong>−1.047 rad</strong>（−60°）</td></tr>
+          <tr><td>總和（P + D）</td><td>$1.047 - 1.047$</td><td>≈ 0 rad → 控制器滑行</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 再讀一次這個結果</div>
+        <p>船離設定值還有<strong>30°</strong>，然而 P（+60° 的舵）與 D（−60°）卻<em>恰好抵消</em>。控制器命令出基本上為零的舵。為什麼？因為船首已經以 20 °/s 收進來。再用力推也不會更快到 — 只會累積出更多動量，超調得更兇。<strong>那個抵消就是阻尼（damping）。</strong>對照只有 P 的世界：單靠 P 會要求 +60°，被箝位（clamp）到 +35° 的舵止，全速衝進牆裡。</p>
+      </div>
+
+      <p>這就是為什麼模擬器（simulator）裡的 PD 船早在抵達之前就鬆手。D 正在讀取收斂速率，並悄悄地把它從需求中減掉。你收斂得越快，它減掉的就越多。</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="coasting-rule"><span class="sec-no">4</span>滑行法則：它何時歸於中性？</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>推導那個門檻</small></div>
+      <p>上面那個抵消不是運氣。控制器歸於中性 — P + D = 0 — 恰好發生在兩項大小相等、方向相反的時候。把它們對立起來：</p>
+      <div class="math-box">$$ k_p\,e = k_d\,\dot e \quad\Longrightarrow\quad \dot e = \frac{k_p}{k_d}\,e $$</div>
+      <p>（我在這裡把 $\dot e$ 寫成一個正的收斂速率；在收斂途中 $\dot e$ 其實是負的，平衡的是兩者的大小。）代入我們的增益 $k_p=2$ 與 $k_d=3$：</p>
+      <div class="math-box">$$ \dot e = \frac{k_p}{k_d}\,e = \frac{2}{3}\,e $$</div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 經驗法則</div>
+        <p>在 $k_p=2,\ k_d=3$ 時，一旦<strong>收斂速率（°/s）超過剩餘誤差（°）的 ⅔</strong>，控制器就停止推力。所以在離目標 30° 時，門檻是 $\tfrac{2}{3}\times 30 = 20$ °/s — 收斂快過這個值，D 就贏，舵鬆手。那<em>正是</em>那個實作範例：離 30°、以 20 °/s 收斂，恰好站在 P 與 D 抵消的刀鋒上。</p>
+      </div>
+
+      <p>比值 $k_p/k_d$ <em>就是</em>控制器心目中「每剩一度該有的安全收斂速度」。把它調低（更多 $k_d$，或更少 $k_p$），船就堅持要慢慢地爬進去 — 重阻尼。把它調高（更少 $k_d$），它就願意快速抵達 — 欠阻尼，會超調。整定（tuning）D，就是在選擇要讓船多麼積極地滑進它的目標。</p>
+
+      <div class="mermaid">
+flowchart TD
+    A["誤差 e、收斂速率 ė"] --> B{"ė &gt; kp/kd · e ?"}
+    B -->|"是 — 收斂太快"| C["D 勝過 P<br/>淨舵角放鬆／反向<br/>煞車"]
+    B -->|"否 — 收斂緩慢"| D["P 勝過 D<br/>淨舵角持續推進<br/>繼續轉向"]
+    C --> E["滑行至設定值，零超調"]
+    D --> E
+</div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="d-on-change"><span class="sec-no">5</span>D 只對變化起作用 — 以及這付出的代價</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>D 的盲點</small></div>
+      <p>這是最重要的單一限制，而且它直接從數學裡掉出來。D 與 $\dot e$（誤差的變化率）成正比。船一旦穩定到某個航向並維持住，誤差就停止變化：$\dot e = 0$，於是 <strong>D = 0</strong>。運動一停止，阻尼器就在那一瞬間消失。那正是你想要阻尼器做的事 — 但這也意味著 D 對於維持一個穩定的航向<em>毫無</em>貢獻。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> D 修不了偏差，也完成不了轉向</div>
+        <p>回想案例 2：水流（current）推船首的力道像 4° 卡住的舵，而一個 P 控制器會帶著一個固定的偏差（offset）穩定下來，因為在誤差為零時它命令出零舵。<strong>加上 D 對這一切毫無改變。</strong>當船坐在它那個（錯誤的）穩定航向上時，誤差是固定的，$\dot e=0$，於是 D = 0 — 它無從抓取。D 只馴服<em>運動</em>；它無法供應一個穩定擾動（disturbance）所要求的那個固定舵角。消滅那個偏差完全是另一項的工作（積分（integral）— 下一章）。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>兩個邊界條件</small></div>
+      <p>D 的兩種失敗都是同一個事實看了兩次。在一個穩定的偏差航向上，誤差是某個固定值 $e_\text{ss} \neq 0$：</p>
+      <div class="math-box">$$ \dot e = 0 \;\Rightarrow\; \text{D} = k_d\,\dot e = 0, \qquad u_\text{ss} = k_p\,e_\text{ss} + 0 = k_p\,e_\text{ss} $$</div>
+      <p>穩態的舵角單由 P 決定 — D 什麼都沒加。所以面對水流時，PD 落在跟只有 P <em>一樣</em>的偏差上。D 讓旅程平順；它不改變終點。把這句話記著：它是 I 項的懸念。</p>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="in-code"><span class="sec-no">6</span>程式碼裡的 D 項</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>每一行都讀</small></div>
+      <p>這是第 01 章那個一模一樣的 <code>PID</code> 類別 — 我們只是緊盯著那兩行<em>本身就是</em>微分的程式。注意對最開頭那個取樣點（sample）的防護：還沒有 <code>prev_error</code> 時，有限差分是未定義的，所以 D 被強制設為零。跳過那個防護，你的第一個時間步就會拿 <code>None</code> 去算出一個垃圾微分，然後把舵猛甩到底。</p>
+      <div class="codeblock">
+        <div class="code-head">pid_controller.py <span class="lang">Python</span></div>
+<pre><code class="language-python">def update(self, error, dt):
+    """One PD step. error is already angle-wrapped (rad)."""
+    p = self.kp * error
+
+    # --- 微分項 ----------------------------------------------
+    # 第一個取樣點：沒有前一次誤差，所以變化率未定義。
+    # 強制 D = 0，而非拿 None 去做差分。
+    if self.prev_error is None:
+        d = 0.0
+    else:
+        de = error - self.prev_error          # 這一步的誤差變化量
+        d  = self.kd * de / dt                # rad 舵；收斂過程中為負
+    self.prev_error = error                    # 記下來給下次呼叫用
+    # ---------------------------------------------------------
+
+    u = p + d                                  # （ki*integral 在第 04 章加入）
+    return max(self.out_min, min(self.out_max, u))   # 箝位到舵止
+</code></pre>
+      </div>
+
+      <div class="layer"><span class="step">④</span> 實例 <small>驗證那個實作範例</small></div>
+      <p>把同一組數字餵進去做個健全性檢查 — 這應該要精準重現手算的結果。注意我們在每個誤差抵達控制器<em>之前</em>就先纏繞（wrap）它（那個角度纏繞（angle wrapping）的 bug 自成一章），而且我們把真實的迴圈週期當作 <code>dt</code> 傳進去。</p>
+      <div class="codeblock">
+        <div class="code-head">check_worked_example.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import math
+
+pid = PID(kp=2.0, ki=0.0, kd=3.0, output_limits=(-0.611, 0.611))  # ±35°
+DT  = 0.05
+
+# 用「前一次」取樣播種控制器：航向 59°、設定值 90°
+prev_heading = math.radians(59.0)
+pid.update(math.radians(90.0) - prev_heading, DT)   # prev_error = 31° = 0.5411 rad
+
+# 現在是快照那一步：航向 60°、設定值 90°
+e = math.radians(90.0) - math.radians(60.0)         # 30° = 0.5236 rad
+u = pid.update(e, DT)
+
+print(f"P  = {pid.kp * e:+.3f} rad   ({math.degrees(pid.kp*e):+.1f}°)")
+print(f"de = {e - math.radians(31.0):+.4f} rad   over dt = {DT}s")
+print(f"u  = {u:+.3f} rad   ({math.degrees(u):+.1f}°)")
+# P  = +1.047 rad   (+60.0°)
+# de = -0.0175 rad  -&gt; D = 3 * (-0.0175/0.05) = -1.047 rad (-60.0°)
+# u  = +0.000 rad   (+0.0°)   &lt;- P 與 D 抵消：船滑行
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">⚓</span> 在真正的 USV 上</div>
+        <p>在水上，$\dot e$ 來自於對一個 20 Hz、帶雜訊的羅盤做差分 — 而雜訊的微分大得驚人（相鄰兩次 0.5° 的讀數就能算出 14 °/s 的幻影擺動）。這就是為什麼生產級程式會對<em>量測值（measurement）</em>微分，而不是對誤差微分，並對它做低通濾波（low-pass filter）。這兩件事都是你在這裡的 <code>update()</code> 裡做的決定；我們會在第 06–07 章遇到逼出它們的那些 bug。現在，理想感測器，乾淨的 D。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>換你了</h2>
+
+      <div class="layer"><span class="step">⑤</span> 練習 <small>把這些法則變成你自己的</small></div>
+
+      <div class="exercise" data-ex="quiz" data-id="pid03-why-no-offset-fix">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">PD 船（$k_p=2,\ k_d=3$）頂著水流維持一個穩定的航向，卻穩定在偏離設定值 2° 的地方 — 跟只有 P 的船一樣的偏差。為什麼加上 D 並沒有消除那個偏差？</div>
+        <ul class="ex-options">
+          <li data-correct="false">$k_d=3$ 太小了；更大的 $k_d$ 就能補上這個差距。</li>
+          <li data-correct="true">在穩定航向上誤差是固定的，所以 $\dot e = 0$ 且 D = 0 — D 在維持航向時毫無貢獻，留下 P 獨自對抗水流。</li>
+          <li data-correct="false">D 加上了它自己的偏差，剛好互相抵消。</li>
+          <li data-correct="false">船穩定下來的同時水流變大了。</li>
+        </ul>
+        <div class="ex-explain">D 與 $\dot e$ 成正比。船一旦穩定，$\dot e = 0$，於是 $u_\text{ss} = k_p e_\text{ss} + k_d\cdot 0 = k_p e_\text{ss}$ — 與只有 P 完全相同。D 讓<em>收斂過程</em>平順，卻無法供應穩定擾動所要求的那個固定舵角。那是積分的工作（第 04 章）。再多的 $k_d$ 也改變不了終點。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="pid03-coasting-rate" data-answer="13.3" data-tol="0.5">
+        <div class="ex-head"><span class="badge">Q2</span> 算一算</div>
+        <div class="ex-q">用滑行法則 $\dot e = \tfrac{k_p}{k_d}\,e$，搭配 $k_p=2,\ k_d=3$：船離設定值還有 <strong>20°</strong>。在高於哪個收斂速率（單位 °/s）時，D 開始勝過 P，控制器便鬆開舵？</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">°/s</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$\dot e = \tfrac{2}{3}\times 20° = 13.33$ °/s。在此之下，P 仍主導，舵持續推進轉向；在此之上，D 主導，控制器開始煞車。注意這個門檻會隨著你離得多遠而縮放 — 離 30° 時是 20 °/s，離 20° 時是 13.3 °/s。你越接近，控制器對你的速度就越謹慎。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="pid03-counter-rudder">
+        <div class="ex-head"><span class="badge">Q3</span> 推理 — 那個負的舵尖峰</div>
+        <div class="ex-q">在 $k_d=3$ 的模擬裡，當船還沒到 90° 並正朝它轉去時，舵命令會短暫地變成<strong>負的</strong>（反舵）。解釋為什麼，並解釋為什麼一個純 P 的控制器永遠做不到這件事。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">在收斂的尾端把 $u = k_p e + k_d \dot e$ 寫出來。誤差 $e$ 仍然是正的（你還沒抵達）。$\dot e$ 是什麼符號？而當船首快速擺進來時，D 相對於 P 有多大？</div></details>
+        <details class="ex-acc"><summary>顯示一個解答</summary><div class="acc-body">
+          <p>在收斂的尾端，誤差又小又是正的（$e &gt; 0$，仍未到達），而收斂速率很大，所以 $\dot e$ 是強烈的負值。於是 $\text{D} = k_d\dot e$ 是一個很大的負數，而 $\text{P} = k_p e$ 是一個小的正數。它們的總和 $u = k_p e + k_d\dot e$ 變成<strong>負的</strong>：控制器在船抵達設定值之前就下令反舵來煞住這個擺動，扼殺掉那本來會造成超調的動量。</p>
+          <p>一個純 P 的控制器算的是 $u = k_p e$。只要 $e &gt; 0$（還沒到目標），$u$ 永遠是正的 — 它<em>無法</em>下令反舵，直到船已經超調、$e$ 變號為止。到那時動量已經累積起來，你就振鈴了。預先煞車是 D 獨有的貢獻：它對<em>變化率</em>起作用，所以它能在位置誤差告訴它之前就先反應。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章回顧</div>
+        <p>D 是阻尼器：$\text{D}=k_d\,\dot e$。在收斂途中誤差正在縮小，所以 $\dot e &lt; 0$，D <strong>對抗 P</strong>，在船抵達之前就煞住擺動 — 那就是實作範例裡的 P+D 抵消（離 30°、以 20 °/s 收斂，P 與 D 都是 ±60°，淨值為零）。滑行法則 $k_p e = k_d\dot e$ 給出中性門檻：在 $k_p=2,\,k_d=3$ 時，一旦收斂快過剩餘誤差的 ⅔ 就鬆手。但 D 只對<em>變化</em>起作用：一旦穩定，$\dot e=0$ 且 D=0，所以它修不了頂著水流的固定偏差，也完成不了轉向 — 它只馴服運動。在誤差為零時還要撐住舵，需要的是積分。下一章：I，配平片（trim tab）。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+<script src="../../assets/pid-sim.js"></script>
+<script>EM.pidSim("sim-pd", EM.pidPresets.pd());</script>
+</body>
+</html>
