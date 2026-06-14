@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Robust Firmware: State Machines, Non-Blocking Design &amp; Power — Embedded Mastery</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="track-arduino" data-track="arduino" data-chapter="08-architecture-power">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">Arduino · Ch 08</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Arduino Track · Chapter 08 · Advanced→Master</div>
+        <h1>Robust Firmware: State Machines, Non-Blocking Design &amp; Power</h1>
+        <p>A blink sketch runs for ten minutes in a demo. A product runs for <em>years</em> in a wall, in a field, in a patient. That gap is not luck — it is architecture. We trade the spaghetti <code>loop()</code> for deliberate state machines, a cooperative scheduler, rollover-proof timing, memory discipline, and a power budget that turns 2000&nbsp;mAh into years of uptime.</p>
+        <div class="meta">
+          <span>⏱ ~55 min</span><span>🧠 Architecture</span><span>⚡ Low-power</span><span>🛡️ Watchdog</span><span>🔋 Battery math</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="from-spaghetti-to-architecture"><span class="sec-no">1</span>From a spaghetti <code>loop()</code> to architecture</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Early sketches grow by accretion: a <code>delay()</code> here, an <code>if</code> there, a flag, another flag, a nested <code>while</code> that "just polls until the button is released." It works on the bench. Then you add a sensor read, and suddenly the button feels mushy, the LED stutters, and a watchdog you didn't know existed reboots the board. The code didn't get harder — it got <em>tangled</em>. Every blocking call freezes everything else, and every loose flag is an implicit, undocumented state.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence model</div>
+        <p>Robust firmware is <strong>a set of explicit states advanced by small non-blocking steps, on a clock you trust</strong>. Nothing waits. Nothing hides. Every "mode" the device can be in has a name.</p>
+      </div>
+
+      <p>Three disciplines carry us the rest of the way, and this chapter takes them one at a time:</p>
+      <ul>
+        <li><strong>Finite state machines</strong> — name every mode, and the loop becomes a single <code>switch</code>.</li>
+        <li><strong>Cooperative scheduling</strong> — run many "tasks" on different intervals with one <code>millis()</code> clock and zero <code>delay()</code>.</li>
+        <li><strong>Resource discipline</strong> — memory and power are <em>budgets</em>. Spend them on purpose, measure what's left.</li>
+      </ul>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — <code>delay()</code> is a coma, not a pause</div>
+        <p><code>delay(1000)</code> doesn't "wait" — it <em>spins the CPU in a busy loop</em> for a billion-ish cycles, ignoring buttons, serial bytes, and every other task. One blocking call anywhere in <code>loop()</code> sets the responsiveness floor for the <em>whole</em> program. The entire chapter is, in a sense, the campaign to delete <code>delay()</code>.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="finite-state-machines"><span class="sec-no">2</span>Finite state machines: name every mode</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>a device is always in exactly one mode</small></div>
+      <p>A traffic light is <em>Green</em>, <em>Yellow</em>, or <em>Red</em> — never two at once, never something else. That is a <strong>finite state machine (FSM)</strong>: a finite set of states, plus rules (transitions) that move between them when events occur. Buttons, menus, charging sequences, communication protocols — almost every "it does this, then that, unless…" behavior <em>is</em> an FSM, whether you model it or not. Modeling it explicitly is the difference between code you can reason about and code you can only pray over.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>just enough formalism</small></div>
+      <p>Formally an FSM is the tuple <span>$M = (S,\, \Sigma,\, \delta,\, s_0)$</span>: a finite set of states <span>$S$</span>, an input alphabet (events) <span>$\Sigma$</span>, a transition function <span>$\delta : S \times \Sigma \to S$</span>, and a start state <span>$s_0 \in S$</span>. You never write <span>$\delta$</span> as an equation — you write it as a <code>switch</code>. But the formalism buys you a guarantee:</p>
+
+      <div class="math-box">
+        $$ |S| < \infty \;\Longrightarrow\; \text{every (state, event) pair is enumerable and testable.} $$
+      </div>
+
+      <p>If your device has 4 states and 3 distinct events, there are at most <span>$|S|\times|\Sigma| = 12$</span> transitions to define. That's a finite checklist — exactly the kind of thing that prevents the "but what happens if the button is pressed <em>during</em> calibration?" class of bug.</p>
+
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Armed: button press
+    Armed --> Running: button press
+    Running --> Idle: button held 2s
+    Running --> Fault: sensor error
+    Fault --> Idle: button press
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>The canonical implementation: a named <code>enum</code> for the states, a single state variable, and a <code>switch</code> that runs once per loop iteration. Each <code>case</code> does two things — act on the current state, and decide whether to transition.</p>
+
+      <div class="codeblock">
+        <div class="code-head">fsm.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">// 1) Name every mode the device can be in. The compiler now
+//    forbids a state that isn't on this list.
+enum class State : uint8_t { Idle, Armed, Running, Fault };
+
+State state = State::Idle;          // current state — the ONLY mode variable
+const uint8_t BTN = 2;              // button to GND, INPUT_PULLUP
+
+void setup() {
+  pinMode(BTN, INPUT_PULLUP);       // pressed == LOW
+  pinMode(LED_BUILTIN, OUTPUT);
+  Serial.begin(115200);
+}
+
+// A tiny edge detector: true exactly once, on the press.
+bool buttonPressed() {
+  static bool prev = HIGH;          // 'static' keeps value across calls
+  bool now = digitalRead(BTN);
+  bool edge = (prev == HIGH &amp;&amp; now == LOW);  // HIGH→LOW == press
+  prev = now;
+  return edge;
+}
+
+void loop() {
+  bool press = buttonPressed();     // sample events ONCE per iteration
+
+  switch (state) {                  // this switch IS the transition fn δ
+    case State::Idle:
+      digitalWrite(LED_BUILTIN, LOW);
+      if (press) state = State::Armed;
+      break;
+
+    case State::Armed:
+      digitalWrite(LED_BUILTIN, HIGH);          // solid = armed
+      if (press) state = State::Running;
+      break;
+
+    case State::Running:
+      // ... do the real work here, non-blocking ...
+      if (sensorFaulted()) state = State::Fault; // guarded transition
+      break;
+
+    case State::Fault:
+      if (press) state = State::Idle;            // operator clears fault
+      break;
+  }
+}
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Why this is bulletproof</div>
+        <p>There is <strong>one</strong> state variable and <strong>one</strong> place it changes (inside the <code>switch</code>). To answer "what does the device do when X happens?" you read exactly one <code>case</code>. Using <code>enum class</code> means a typo'd or out-of-range state is a <em>compile error</em>, not a 3&nbsp;a.m. field failure. The whole loop is non-blocking: it falls through in microseconds, so other tasks still run.</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — debounce <em>is</em> an FSM</div>
+        <p>That one-line edge detector lies on a noisy mechanical button: contacts bounce for 1–20&nbsp;ms, firing dozens of false edges. Production debounce is its own little FSM — states <em>Stable</em>, <em>Bouncing</em>, <em>Settled</em> — gated by a <code>millis()</code> timer that requires the level to hold steady for, say, 25&nbsp;ms before accepting it. You'll build exactly that in the exercises.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="cooperative-scheduler"><span class="sec-no">3</span>A cooperative scheduler without an RTOS</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>many clocks, one loop</small></div>
+      <p>Real devices juggle jobs on different rhythms: blink a heartbeat at 1&nbsp;Hz, sample a sensor at 10&nbsp;Hz, push a radio packet every 60&nbsp;s. You don't need a real-time operating system for this. You need a <strong>table</strong> of jobs, each remembering when it last ran, stepped by a single non-blocking loop. Each job checks one cheap question — "has my interval elapsed?" — and if so, runs and resets its timer. This is <em>cooperative</em> multitasking: tasks must be short and must return; nobody is preempted.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>the scheduler in 30 lines</small></div>
+      <p>A task is just <code>{interval, lastRun, fn}</code>. The dispatcher walks the table every loop and calls any task whose interval has elapsed.</p>
+
+      <div class="codeblock">
+        <div class="code-head">scheduler.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">struct Task {
+  uint32_t interval;     // run every 'interval' ms
+  uint32_t lastRun;      // millis() of last execution
+  void (*fn)();          // pointer to the task function
+};
+
+// ---- the actual jobs (each must be short &amp; non-blocking) ----
+void heartbeat()  { digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN)); }
+void sampleADC()  { /* read a sensor, stash the value */ }
+void sendPacket() { /* assemble &amp; transmit a frame    */ }
+
+// ---- the schedule: interval, lastRun=0, function ----
+Task tasks[] = {
+  { 500,   0, heartbeat  },   // 2 Hz LED toggle
+  { 100,   0, sampleADC  },   // 10 Hz sensor
+  { 60000, 0, sendPacket },   // once a minute
+};
+const uint8_t NTASKS = sizeof(tasks) / sizeof(tasks[0]);
+
+void setup() { pinMode(LED_BUILTIN, OUTPUT); }
+
+void loop() {
+  uint32_t now = millis();                  // ONE timestamp per pass
+  for (uint8_t i = 0; i &lt; NTASKS; i++) {
+    // unsigned subtraction — see §4 for why this is rollover-safe
+    if (now - tasks[i].lastRun &gt;= tasks[i].interval) {
+      tasks[i].lastRun = now;               // reset BEFORE running
+      tasks[i].fn();                        // run the task
+    }
+  }
+  // loop() returns in microseconds → nothing blocks anything else
+}
+</code></pre>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    T(["now = millis()"]) --> L{For each task}
+    L --> C{"now - lastRun<br/>≥ interval?"}
+    C -- yes --> R["lastRun = now<br/>fn()"]
+    R --> L
+    C -- no --> L
+    L -- done --> T
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Reset <code>lastRun</code> <em>before</em> calling <code>fn()</code></div>
+        <p>Set <code>lastRun = now</code> before invoking the task, so the interval is measured from the <em>scheduled</em> tick, not from when the task happens to finish. This keeps the cadence stable even if a task runs a little long, and it prevents drift from creeping in over millions of iterations.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — cooperative means <em>you</em> must yield</div>
+        <p>No task is preempted. If <code>sampleADC()</code> contains a <code>delay(200)</code>, every other task — including the heartbeat — stalls for 200&nbsp;ms. The scheduler is only as responsive as your slowest task. Keep each one short; if a job is inherently long, chop it into its own FSM that advances one step per call.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="millis-rollover"><span class="sec-no">4</span><code>millis()</code> rollover: proving the unsigned trick</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive it, don't trust it</small></div>
+      <p><code>millis()</code> returns a <code>uint32_t</code> — a 32-bit unsigned counter of milliseconds since boot. It counts up to <span>$2^{32}-1$</span> and then <strong>wraps back to 0</strong>. When does that happen?</p>
+
+      <div class="math-box">
+        $$ t_{\text{wrap}} = \frac{2^{32}\ \text{ms}}{1000 \cdot 60 \cdot 60 \cdot 24} \approx \frac{4.295\times10^{9}}{86\,400\,000} \approx 49.7\ \text{days} $$
+      </div>
+
+      <p>Every <code>millis()</code>-based device that stays powered for ~50 days hits this wrap. The naive guard <code>if (now &gt; lastRun + interval)</code> <strong>breaks</strong> across the wrap: <code>lastRun + interval</code> overflows or <code>now</code> resets to a small number, and the comparison goes wrong — a task that fires forever or never. The fix is to <em>subtract first</em>, in unsigned arithmetic:</p>
+
+      <div class="math-box math">
+        $$ \texttt{if } (\,\underbrace{\texttt{now} - \texttt{lastRun}}_{\text{unsigned}}\, \geq \texttt{interval}\,) $$
+      </div>
+
+      <p>Here's the proof that this is correct <em>even across the wrap</em>. Unsigned 32-bit subtraction is defined to be performed <strong>modulo</strong> <span>$2^{32}$</span>:</p>
+
+      <div class="math-box">
+        $$ (\texttt{now} - \texttt{lastRun}) \bmod 2^{32} \;=\; \text{true elapsed ms},\quad \text{for any elapsed} < 2^{32}. $$
+      </div>
+
+      <p>Concretely, suppose <code>lastRun</code> = <span>$2^{32}-10$</span> (just before the wrap) and 25&nbsp;ms later <code>now</code> has wrapped to <span>$15$</span>. The literal difference <span>$15 - (2^{32}-10)$</span> is negative — but computed modulo <span>$2^{32}$</span> it becomes</p>
+
+      <div class="math-box">
+        $$ \big(15 - (2^{32}-10)\big) \bmod 2^{32} \;=\; (25 - 2^{32}) \bmod 2^{32} \;=\; 25\ \text{ms.} $$
+      </div>
+
+      <p>Exactly the true elapsed time. The wrap <em>cancels itself</em> in modular arithmetic, so the unsigned subtraction returns the right answer with no special-casing. This is why the scheduler in §3 uses <code>now - tasks[i].lastRun &gt;= interval</code> and never adds.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The rule, burned in</div>
+        <p>For timing, <strong>always subtract two unsigned <code>millis()</code> values and compare the difference to your interval</strong>. Never compare absolute timestamps, never add the interval to a timestamp, and keep both operands the same <code>uint32_t</code> type. Do that and rollover is a non-event — your code sails through the 49.7-day boundary without noticing.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — a stray <code>int</code> ruins the proof</div>
+        <p>The magic depends on <em>unsigned</em> math. If you store <code>lastRun</code> as a signed <code>long</code> or <code>int</code>, or mix in an <code>int</code> literal, C++ integer promotion can drag the subtraction into signed arithmetic where overflow is <em>undefined behavior</em>. Use <code>uint32_t</code> (or <code>unsigned long</code>) end to end.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="memory-discipline"><span class="sec-no">5</span>Memory discipline: Flash, stack, heap &amp; <code>F()</code></h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>2&nbsp;KB of SRAM is a tight budget</small></div>
+      <p>The ATmega328P has just <strong>2&nbsp;KB of SRAM</strong>. That sliver holds <em>three</em> tenants that grow toward each other: <strong>globals/statics</strong> (fixed, from the bottom), the <strong>heap</strong> (grows up as you <code>malloc</code>/use <code>String</code>), and the <strong>stack</strong> (grows down with every function call and local). When heap and stack collide, the chip doesn't error — it silently corrupts data and behaves like it's haunted.</p>
+
+      <div class="mermaid">
+flowchart TB
+    A["0x0100 — bottom<br/>Globals &amp; statics"] --> B["Heap →<br/>(grows UP)"]
+    B --> C["… free RAM …"]
+    C --> D["← Stack<br/>(grows DOWN)"]
+    D --> E["0x08FF — top of 2 KB SRAM"]
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> String literals secretly eat SRAM</div>
+        <p>Because the AVR is a <strong>Harvard architecture</strong>, a constant like <code>Serial.println("Booting...")</code> lives in Flash but is <em>copied into SRAM</em> at startup so the CPU can read it as data. A dozen debug strings can quietly burn hundreds of your 2048 bytes before <code>setup()</code> even runs.</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>keep strings in Flash; never fragment the heap</small></div>
+      <p>Two tools fix this. The <code>F()</code> macro tells the compiler to leave a string literal in Flash and stream it from there. <code>PROGMEM</code> does the same for larger constant tables. And the <code>String</code> <em>class</em> — the heap-allocating one — is banned in long-running firmware.</p>
+
+      <div class="codeblock">
+        <div class="code-head">memory.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;avr/pgmspace.h&gt;
+
+// BAD: this literal is copied into precious SRAM at boot.
+// Serial.println("System initialized and ready");
+
+// GOOD: F() keeps it in Flash; it is streamed byte-by-byte.
+void banner() {
+  Serial.println(F("System initialized and ready"));  // 0 bytes SRAM
+}
+
+// A constant lookup table parked entirely in Flash:
+const uint8_t gamma8[] PROGMEM = { 0, 1, 2, 4, 6, 10, 14, 20 };
+
+uint8_t gammaLookup(uint8_t i) {
+  return pgm_read_byte(&amp;gamma8[i]);   // explicit Flash read
+}
+
+// Measure free SRAM at runtime: the gap between the heap top
+// and the current stack pointer. Tiny, classic, reliable.
+extern char *__brkval;                 // top of heap (set by malloc)
+extern char  __heap_start;             // start of heap region
+
+int freeRAM() {
+  char top;                            // address of 'top' ≈ stack ptr
+  return (int)&amp;top - (__brkval ? (int)__brkval : (int)&amp;__heap_start);
+}
+
+void setup() {
+  Serial.begin(115200);
+  banner();
+  Serial.print(F("Free RAM: "));
+  Serial.println(freeRAM());           // watch this number stay STABLE
+}
+
+void loop() { /* freeRAM() must not trend downward over time */ }
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — <code>String</code> fragments the heap to death</div>
+        <p>Arduino's <code>String</code> class allocates and frees on the heap every time it grows or concatenates. In a loop that builds <code>String</code>s, the heap fills with mismatched holes — <strong>fragmentation</strong> — until an allocation that <em>should</em> fit can't find a contiguous gap. The device runs fine for hours, then crashes. Use fixed <code>char</code> buffers with <code>snprintf()</code> instead, and watch <code>freeRAM()</code> hold flat. A stable free-RAM number over hours is the signature of leak-free firmware.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="power-and-sleep"><span class="sec-no">6</span>Power &amp; sleep modes: the battery-life equation</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the CPU is almost always idle anyway</small></div>
+      <p>A sensor node that samples once a minute spends 99.9% of its life with nothing to do. Running the CPU full-tilt through that idle time burns ~15&nbsp;mA for no benefit. Sleep modes let the chip switch off blocks it isn't using — CPU, then timers, then the oscillator — dropping current by <em>three or four orders of magnitude</em>. The AVR offers a ladder, from light to deep:</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Mode (<code>SLEEP_MODE_*</code>)</th><th>What's off</th><th>Wakes on</th><th>Typical I (ATmega328P)</th></tr></thead>
+        <tbody>
+          <tr><td><code>IDLE</code></td><td>CPU clock</td><td>any interrupt</td><td>~6&nbsp;mA</td></tr>
+          <tr><td><code>ADC</code></td><td>CPU + I/O clk</td><td>ADC done, etc.</td><td>~1&nbsp;mA</td></tr>
+          <tr><td><code>PWR_SAVE</code></td><td>most clocks; Timer2 lives</td><td>Timer2, WDT, INT</td><td>~1.8&nbsp;µA + Timer2</td></tr>
+          <tr><td><code>PWR_DOWN</code></td><td>everything but WDT &amp; ext INT</td><td>WDT, INT0/1, pin-change</td><td>~6&nbsp;µA (WDT on)</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>average current &amp; battery life</small></div>
+      <p>The device alternates: a short <em>active</em> burst of current <span>$I_{\text{active}}$</span> for <span>$t_{\text{active}}$</span>, then a long <em>sleep</em> at <span>$I_{\text{sleep}}$</span> for <span>$t_{\text{sleep}}$</span>, with period <span>$T = t_{\text{active}} + t_{\text{sleep}}$</span>. The <strong>average current</strong> is the time-weighted mean — a duty-cycle average:</p>
+
+      <div class="math-box">
+        $$ I_{\text{avg}} = \frac{I_{\text{active}}\,t_{\text{active}} + I_{\text{sleep}}\,t_{\text{sleep}}}{T} $$
+      </div>
+
+      <p>And battery life follows from capacity (in mAh) divided by that average draw (in mA), giving hours:</p>
+
+      <div class="math-box">
+        $$ t_{\text{life}}\,[\text{h}] = \frac{C\,[\text{mAh}]}{I_{\text{avg}}\,[\text{mA}]} $$
+      </div>
+
+      <p><strong>Worked example.</strong> Take a node that wakes for <span>$t_{\text{active}}=0.1\,\text{s}$</span> at <span>$I_{\text{active}}=20\,\text{mA}$</span> (radio + ADC), then sleeps in <code>PWR_DOWN</code> at <span>$I_{\text{sleep}}=6\,\mu\text{A}=0.006\,\text{mA}$</span> for the rest of a <span>$T=60\,\text{s}$</span> cycle, so <span>$t_{\text{sleep}}=59.9\,\text{s}$</span>:</p>
+
+      <div class="math-box">
+        $$ I_{\text{avg}} = \frac{(20)(0.1) + (0.006)(59.9)}{60} = \frac{2.0 + 0.359}{60} \approx 0.0393\ \text{mA} $$
+      </div>
+
+      <p>From a <span>$C = 2000\,\text{mAh}$</span> pack:</p>
+
+      <div class="math-box">
+        $$ t_{\text{life}} = \frac{2000}{0.0393} \approx 50\,900\ \text{h} \approx 2120\ \text{days} \approx \mathbf{5.8\ years.} $$
+      </div>
+
+      <p>Notice the lever: the active burst contributes 2.0 of the 2.36&nbsp;mA·s per cycle, yet because it's so brief the average collapses to ~39&nbsp;µA. <strong>Sleep time is the whole game.</strong> The same node running the CPU full-tilt at 15&nbsp;mA would last about 5.5 days — a ~380× difference from one architectural choice.</p>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-power-wrap">
+        <div class="sim-title">🔬 Live: average-current &amp; battery-life explorer</div>
+        <canvas id="sim-power"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">Drag the sliders: shrink <em>t<sub>active</sub></em> or lengthen the period and watch <em>I<sub>avg</sub></em> collapse and the projected battery life climb from days into years.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>sleep, wake on the watchdog, repeat</small></div>
+      <p>The pattern: configure the watchdog to fire an interrupt every ~8&nbsp;s, drop into <code>PWR_DOWN</code>, and let that WDT interrupt wake the CPU. Between wakes the chip draws microamps.</p>
+
+      <div class="codeblock">
+        <div class="code-head">sleep_node.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;avr/sleep.h&gt;
+#include &lt;avr/wdt.h&gt;
+#include &lt;avr/interrupt.h&gt;
+
+volatile bool wokeFromWDT = false;
+
+// Watchdog as a periodic wake source (interrupt, NOT reset).
+void setupWDT_8s() {
+  cli();                              // disable interrupts while we poke regs
+  wdt_reset();
+  // timed sequence: set WDCE+WDE, then program prescaler within 4 cycles
+  WDTCSR = (1 &lt;&lt; WDCE) | (1 &lt;&lt; WDE);
+  WDTCSR = (1 &lt;&lt; WDIE)               // INTERRUPT mode (wake, don't reset)
+         | (1 &lt;&lt; WDP3) | (1 &lt;&lt; WDP0); // prescaler 1001b → ~8 s timeout
+  sei();
+}
+
+ISR(WDT_vect) { wokeFromWDT = true; } // fires every ~8 s, returns to loop
+
+void powerDownUntilWDT() {
+  set_sleep_mode(SLEEP_MODE_PWR_DOWN); // deepest practical mode
+  cli();
+  sleep_enable();
+  sleep_bod_disable();               // kill brown-out detector → save ~µA
+  sei();
+  sleep_cpu();                       // ←── CPU halts here at ~6 µA
+  sleep_disable();                   // execution resumes HERE after WDT
+}
+
+void setup() { setupWDT_8s(); pinMode(LED_BUILTIN, OUTPUT); }
+
+void loop() {
+  // --- ACTIVE burst: brief, do the real work ---
+  digitalWrite(LED_BUILTIN, HIGH);
+  readSensorAndMaybeTransmit();      // ~100 ms of 20 mA work
+  digitalWrite(LED_BUILTIN, LOW);
+
+  // --- SLEEP: collapse to microamps until the watchdog wakes us ---
+  powerDownUntilWDT();
+}
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Squeeze the last microamps</div>
+        <p>In <code>PWR_DOWN</code> the dominant draws are the brown-out detector (~20&nbsp;µA) and the watchdog (~4&nbsp;µA). <code>sleep_bod_disable()</code> kills the former for the sleep window. Also disable the ADC (<code>ADCSRA &amp;= ~(1 &lt;&lt; ADEN)</code>) and float unused pins so leakage paths don't quietly drain the cell.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="watchdog-timer"><span class="sec-no">7</span>The watchdog: auto-recovery from hangs</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>a dead-man's switch for firmware</small></div>
+      <p>Even careful firmware can wedge: a sensor library spins forever waiting for an I²C ack that never comes, or a cosmic-ray bit-flip corrupts the program counter. With no human nearby, the device is just <em>dead</em>. The <strong>watchdog timer (WDT)</strong> is a hardware countdown that, if it ever reaches zero, <em>resets the whole chip</em>. Your job is to "pet" it — call <code>wdt_reset()</code> — faster than it expires. A healthy loop keeps petting; a hung loop stops, the WDT times out, and the chip reboots into a known-good state.</p>
+
+      <div class="mermaid">
+flowchart LR
+    A["loop() runs"] --> B["wdt_reset()<br/>pet the dog"]
+    B --> A
+    A -. hangs .-> C["no pet"]
+    C --> D["WDT counts to 0"]
+    D --> E(["Hardware RESET<br/>→ reboot clean"])
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>reset mode, not interrupt mode</small></div>
+      <p>Here the WDT is armed in <em>reset</em> mode (<code>WDE</code>, not <code>WDIE</code>) with an 8&nbsp;s timeout. Note this is the same peripheral as §6, configured for a different job — recovery instead of waking.</p>
+
+      <div class="codeblock">
+        <div class="code-head">watchdog.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;avr/wdt.h&gt;
+
+void setup() {
+  // Did we get here via a watchdog reset? Log it, then clear.
+  if (MCUSR &amp; (1 &lt;&lt; WDRF)) { /* record "WDT recovered a hang" */ }
+  MCUSR = 0;
+
+  wdt_enable(WDTO_8S);     // reset the chip if not petted within 8 s
+}
+
+void loop() {
+  wdt_reset();            // pet the dog — proof the loop is alive
+
+  doScheduledWork();      // your FSM + scheduler from §2–§3
+
+  // If doScheduledWork() ever hangs &gt; 8 s, wdt_reset() is never
+  // reached, the WDT fires, and the MCU reboots into a clean state.
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — petting inside the hang</div>
+        <p>Never sprinkle <code>wdt_reset()</code> inside long inner loops just to "keep it happy." That defeats the entire point: the watchdog must be able to <em>catch</em> a hang. Pet it in exactly one place — the top of <code>loop()</code> — so that any stall longer than the timeout is guaranteed to trip it.</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — a coin-cell sensor node that lasts a year</div>
+        <p>Tie it together: a soil-moisture node on a CR2032 (~225&nbsp;mAh) or a pair of AAs (~2000&nbsp;mAh). It wakes on the watchdog roughly every minute, spends ~100&nbsp;ms reading the sensor and firing one LoRa packet at ~20&nbsp;mA, then drops to <code>PWR_DOWN</code> at single-digit microamps. With the §6 math, the AA pack yields years and even the coin cell clears 12+ months — because the device is <em>asleep 99.9% of the time</em>. The same WDT that wakes it from sleep also reboots it if a radio driver ever wedges. State machine for behavior, scheduler for cadence, sleep for power, watchdog for resilience: that's a product, not a demo.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>⑤ Your turn</h2>
+      <div class="layer"><span class="step">⑤</span> Practice <small>you write &amp; decide</small></div>
+      <p>Three checks. Tap an answer, type a number, or reveal a coding challenge. Your progress is saved on this device and shown on the home page.</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="ard08-timing-memory">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">Two design choices keep long-running firmware healthy. Which statement is <strong>correct</strong>?</div>
+        <ul class="ex-options">
+          <li data-correct="false">Compare absolute timestamps with <code>if (now &gt; lastRun + interval)</code> — adding the interval is the safe form across the <code>millis()</code> wrap.</li>
+          <li data-correct="true">Subtract unsigned <code>millis()</code> values (<code>now - lastRun &gt;= interval</code>) so modulo-$2^{32}$ math handles the ~49.7-day wrap, and avoid the heap-fragmenting <code>String</code> class.</li>
+          <li data-correct="false">Prefer the <code>String</code> class over <code>char</code> buffers because it manages memory automatically and never fragments the heap.</li>
+          <li data-correct="false">Rollover is impossible because <code>millis()</code> returns a signed <code>long</code> that simply saturates at its maximum.</li>
+        </ul>
+        <div class="ex-explain">Unsigned subtraction is computed modulo $2^{32}$, so <code>now - lastRun</code> returns the true elapsed time even when <code>now</code> has wrapped past 0 — the wrap cancels itself (§4). Adding the interval to a timestamp overflows and breaks at the boundary. And <code>String</code> allocates/frees on the heap, fragmenting it until a fit-able allocation fails hours later (§5); fixed <code>char</code> buffers with <code>snprintf()</code> keep free RAM flat.</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="ard08-battery-life" data-answer="166" data-tol="5">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">A node draws an average current of $I_{\text{avg}} = 0.5\,\text{mA}$ from a $C = 2000\,\text{mAh}$ battery. Using $t_{\text{life}} = C / I_{\text{avg}}$, what is the battery life in <strong>days</strong>? (Compute hours first, then divide by 24.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="days"><span class="ex-unit">days</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$t_{\text{life}} = \dfrac{2000\ \text{mAh}}{0.5\ \text{mA}} = 4000\ \text{h}$, and $\dfrac{4000}{24} \approx 166$ days (~5.5 months). Drop $I_{\text{avg}}$ to 0.04&nbsp;mA via deep sleep (§6) and the same pack lasts years — the average current is the only knob that matters for battery life.</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="ard08-debounce-fsm">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — a non-blocking debounce FSM</div>
+        <div class="ex-q">Write a debounce routine that reports a <em>clean</em> button press with <strong>no <code>delay()</code></strong>. Model it as a tiny FSM: track the last raw reading and the <code>millis()</code> time it last changed; only accept a new <em>stable</em> level once it has held steady for <code>DEBOUNCE_MS</code> (say 25&nbsp;ms). Return <code>true</code> exactly once, on a confirmed HIGH→LOW edge. It must use unsigned <code>millis()</code> subtraction (§4) and must not block the scheduler.</div>
+        <details class="ex-acc">
+          <summary>Hint</summary>
+          <div class="acc-body">Keep three <code>static</code> variables: <code>lastRaw</code> (last pin reading), <code>lastChange</code> (a <code>uint32_t</code> timestamp), and <code>stable</code> (the accepted, debounced level). Each call: read the pin; if it differs from <code>lastRaw</code>, restart the timer (<code>lastChange = millis()</code>). If <code>millis() - lastChange &gt;= DEBOUNCE_MS</code> and the raw level differs from <code>stable</code>, commit it to <code>stable</code> and return <code>true</code> only when the new stable level is <code>LOW</code> (a press, since the button is <code>INPUT_PULLUP</code>).</div>
+        </details>
+        <details class="ex-acc">
+          <summary>Show one solution</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">debounce_fsm.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t  BTN = 2;          // wired to GND, INPUT_PULLUP
+const uint32_t DEBOUNCE_MS = 25; // must hold steady this long
+
+void setup() {
+  pinMode(BTN, INPUT_PULLUP);    // idle HIGH, pressed LOW
+  pinMode(LED_BUILTIN, OUTPUT);
+}
+
+// Returns true ONCE on a clean (debounced) press. No delay().
+bool debouncedPress() {
+  static bool     lastRaw    = HIGH;   // previous raw reading
+  static bool     stable     = HIGH;   // accepted, debounced level
+  static uint32_t lastChange = 0;      // when raw last changed
+
+  bool raw = digitalRead(BTN);
+  if (raw != lastRaw) {                // bouncing → restart timer
+    lastRaw    = raw;
+    lastChange = millis();
+  }
+
+  // unsigned subtraction → rollover-safe (see §4)
+  if ((uint32_t)(millis() - lastChange) &gt;= DEBOUNCE_MS) {
+    if (raw != stable) {               // level held long enough: commit
+      stable = raw;
+      if (stable == LOW) return true;  // HIGH→LOW == a real press
+    }
+  }
+  return false;
+}
+
+void loop() {
+  if (debouncedPress()) {
+    // toggle the LED on each clean press — no blocking anywhere
+    digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+  }
+  // ... your scheduler &amp; other tasks keep running every pass ...
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">This is the FSM mindset in miniature: <code>stable</code> is the state, the raw pin is the event, and the <code>millis()</code> timer is the guard on the transition. Because it never blocks and uses unsigned subtraction, it slots straight into the §3 scheduler and survives the 49.7-day wrap untouched. Swap <code>digitalRead</code> for a noisy sensor and the same pattern debounces <em>any</em> jittery input.</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> Chapter recap</div>
+        <p>You can now architect firmware that survives the field: model behavior as an explicit <strong>finite state machine</strong> (one <code>enum</code>, one <code>switch</code>, every mode named); run many jobs from a <strong>cooperative scheduler</strong> table of <code>{interval, lastRun, fn}</code> with zero <code>delay()</code>; <em>prove</em> that unsigned <code>millis()</code> subtraction sails through the ~49.7-day rollover; defend your 2&nbsp;KB of SRAM with <code>F()</code>, <code>PROGMEM</code>, and a <code>String</code>-free heap while measuring <code>freeRAM()</code>; budget power with $I_{\text{avg}} = (I_a t_a + I_s t_s)/T$ and $t_{\text{life}} = C/I_{\text{avg}}$ to turn 2000&nbsp;mAh into years; and bolt on a <strong>watchdog</strong> so a hung loop reboots itself. State machine for behavior, scheduler for cadence, sleep for power, watchdog for resilience — that is the anatomy of firmware that runs for years.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="Back to top">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+
+<!-- chapter-specific simulator: average-current / battery-life explorer -->
+<script>
+EM.sim("sim-power", {
+  height: 240,
+  params: [
+    { key: "Ia", label: "I_active", min: 1,   max: 50,   step: 1,   value: 20,  unit: "mA" },
+    { key: "ta", label: "t_active", min: 10,  max: 2000, step: 10,  value: 100, unit: "ms" },
+    { key: "Is", label: "I_sleep",  min: 1,   max: 1000, step: 1,   value: 6,   unit: "uA" },
+    { key: "T",  label: "period",   min: 1,   max: 300,  step: 1,   value: 60,  unit: "s" },
+    { key: "C",  label: "capacity", min: 100, max: 3000, step: 50,  value: 2000,unit: "mAh" }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h, pad = 44 * dpr;
+    var ta = v.ta / 1000;                 // ms → s
+    var Ts = v.T;                         // period in s
+    if (ta > Ts) ta = Ts;
+    var tsleep = Ts - ta;
+    var Is = v.Is / 1000;                 // µA → mA
+    var Iavg = (v.Ia * ta + Is * tsleep) / Ts;   // mA
+    var lifeH = v.C / Iavg;                       // hours
+    var lifeD = lifeH / 24;
+
+    // axes
+    var hi = pad, lo = H - pad;
+    ctx.lineWidth = 1 * dpr; ctx.strokeStyle = "#262d3a";
+    ctx.fillStyle = "#6e7681"; ctx.font = (12 * dpr) + "px monospace";
+    ctx.beginPath(); ctx.moveTo(pad, hi); ctx.lineTo(W - 10 * dpr, hi);
+    ctx.moveTo(pad, lo); ctx.lineTo(W - 10 * dpr, lo); ctx.stroke();
+    ctx.fillText("I", 8 * dpr, hi + 4 * dpr);
+    ctx.fillText("0", 10 * dpr, lo + 4 * dpr);
+
+    // current-vs-time profile: tall active spike, long low sleep
+    var pxPerS = (W - pad - 14 * dpr) / (Ts * 2.2);  // ~2.2 periods
+    var span = lo - hi;
+    var yActive = lo - span * 0.92;
+    var ySleep  = lo - span * (Is / v.Ia) * 0.92;
+    if (ySleep > lo - 2 * dpr) ySleep = lo - 2 * dpr;
+
+    ctx.strokeStyle = "#2ec4b6"; ctx.lineWidth = 2.5 * dpr;
+    ctx.beginPath();
+    var x = pad; ctx.moveTo(x, ySleep);
+    for (var k = 0; k < 3 && x < W - 14 * dpr; k++) {
+      ctx.lineTo(x, yActive);                 // rise
+      x += ta * pxPerS;
+      ctx.lineTo(x, yActive);                 // active plateau
+      ctx.lineTo(x, ySleep);                  // fall
+      x += tsleep * pxPerS;
+      ctx.lineTo(x, ySleep);                  // sleep floor
+    }
+    ctx.stroke();
+
+    return "I<sub>avg</sub> = <b>" + (Math.round(Iavg * 1000) / 1000) +
+           "</b> mA &nbsp;·&nbsp; life = <b>" + Math.round(lifeH) +
+           "</b> h ≈ <b>" + Math.round(lifeD) + "</b> days ≈ <b>" +
+           (Math.round(lifeD / 365 * 10) / 10) + "</b> yr";
+  }
+});
+</script>
+</body>
+</html>

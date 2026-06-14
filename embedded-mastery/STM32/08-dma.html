@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>DMA Deep Dive: Channels, Circular Mode &amp; Double Buffering — Embedded Mastery</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="track-stm32" data-track="stm32" data-chapter="08-dma">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">STM32 · Ch 08</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">STM32 Track · Chapter 08 · Advanced→Master</div>
+        <h1>DMA Deep Dive: Channels, Circular Mode &amp; Double Buffering</h1>
+        <p>DMA is the moment STM32 stops feeling like a faster Arduino and starts feeling like a different <em>class</em> of machine. A second engine moves bytes between peripherals and memory while the CPU computes — or sleeps. Master it and you unlock gapless audio, megabaud logging, and LED strips that never flicker. We build the model from the bus up, do the throughput math, then wire a real circular-DMA ADC capture.</p>
+        <div class="meta">
+          <span>⏱ ~50 min</span><span>🧠 Bus arbitration</span><span>⚡ Circular &amp; double buffer</span><span>🔧 ADC · UART · SPI</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="what-is-dma"><span class="sec-no">1</span>What <em>is</em> DMA, really?</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Without DMA, every byte that moves between a peripheral and memory passes <em>through the CPU</em>. The ADC finishes a conversion, raises a flag, the CPU wakes, reads <code>ADC1-&gt;DR</code> into a register, writes that register into a RAM array, increments a pointer, checks a counter, loops. For one 16-bit sample that is a dozen instructions. At 1 mega-sample per second the CPU does nothing <em>but</em> shuttle bytes — it has no cycles left to actually compute.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence model</div>
+        <p><strong>DMA (Direct Memory Access) is a second data-mover</strong> — a tiny dedicated engine on the bus that copies bytes between a peripheral and memory <em>without the CPU touching a single one</em>. You program it once with "from here, to there, this many, this wide" and it runs in the background while the core computes or sleeps.</p>
+      </div>
+
+      <p>The DMA controller is a bus master, exactly like the CPU. It arbitrates for the AHB/APB buses, performs the read and the write, increments addresses, decrements a counter, and raises an interrupt only when there is something worth telling you — typically "buffer half full" or "buffer full," not "one byte arrived." That collapse from <em>per-byte</em> CPU work to <em>per-buffer</em> CPU work is the entire point.</p>
+
+      <div class="mermaid">
+flowchart LR
+    subgraph SOC["STM32 — on-chip buses"]
+        CPU["Cortex-M4 core<br/>(free to compute / sleep)"]
+        DMA["DMA controller<br/>(bus master)"]
+        MEM["SRAM<br/>(your buffer)"]
+        PER["Peripheral<br/>ADC · UART · SPI"]
+    end
+    PER -- "request line" --> DMA
+    DMA -- "read DR" --> PER
+    DMA -- "write + increment" --> MEM
+    DMA -. "half / full IRQ" .-> CPU
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Key distinction</div>
+        <p>Polling and interrupts both cost <strong>CPU time per data item</strong>. DMA costs CPU time per <strong>transfer block</strong>. The peripheral's data-ready signal goes straight to the DMA engine as a hardware <em>request</em> — the core is never in the loop. That is why DMA throughput is bounded by the <em>bus</em>, not by your interrupt latency.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="controller-architecture"><span class="sec-no">2</span>Controller architecture: streams, channels &amp; request mapping</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>how the silicon is wired</small></div>
+      <p>The hardware differs by family, and the vocabulary trips up everyone once. On the <strong>STM32F4</strong> (Cortex-M4) there are <strong>two DMA controllers</strong>, <strong>DMA1</strong> and <strong>DMA2</strong>. Each controller has <strong>8 streams</strong>. Each stream can be connected to <strong>one of 8 channels</strong>, and the channel selects <em>which peripheral</em> drives that stream's request line. So a stream is the physical transfer engine; a channel is a multiplexer selecting its trigger source.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The naming trap (F4 vs F1)</div>
+        <p>On <strong>F4</strong>: a <em>stream</em> is the engine, and you pick a <em>channel</em> (0–7) to route the peripheral request to it. On the older <strong>STM32F1</strong> (Cortex-M3) there are no streams — DMA1 has <strong>7 channels</strong>, DMA2 has 5, and each channel <em>is</em> the engine with a fixed peripheral mapping. Same idea, different words. When a tutorial says "DMA channel," check which family it means.</p>
+      </div>
+
+      <p>The request mapping is fixed in silicon and printed in the reference manual as a table. You do not get to wire any peripheral to any stream — for example, on the F4, <strong>ADC1 is DMA2, Stream 0, Channel 0</strong> (and also Stream 4, Channel 0). <strong>SPI1_TX</strong> is DMA2, Stream 3, Channel 3. Pick the wrong stream/channel pair and the peripheral's request simply never reaches the engine and nothing moves. This is the single most common "my DMA does nothing" bug.</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Peripheral request (F4)</th><th>Controller</th><th>Stream</th><th>Channel</th></tr></thead>
+        <tbody>
+          <tr><td><code>ADC1</code></td><td>DMA2</td><td>0 (or 4)</td><td>0</td></tr>
+          <tr><td><code>SPI1_TX</code></td><td>DMA2</td><td>3 (or 5)</td><td>3</td></tr>
+          <tr><td><code>USART2_TX</code></td><td>DMA1</td><td>6</td><td>4</td></tr>
+          <tr><td><code>USART2_RX</code></td><td>DMA1</td><td>5</td><td>4</td></tr>
+          <tr><td><code>DAC1</code></td><td>DMA1</td><td>5</td><td>7</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — stream collisions</div>
+        <p>Two peripherals that share the same <em>stream</em> cannot run DMA simultaneously, even if they use different channels — there is only one engine per stream. If you need ADC1 <em>and</em> SPI1_TX both on DMA2, choose their <em>alternate</em> stream mappings so they land on different streams. Always cross-check the request table before committing a pin/peripheral plan.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="transfer-parameters"><span class="sec-no">3</span>Anatomy of a transfer: the six parameters</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>what you actually configure</small></div>
+      <p>Every DMA transfer is defined by a small set of parameters. Get these right and the engine does exactly what you mean; get one wrong and you corrupt RAM or read garbage. Here is the whole vocabulary:</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Parameter</th><th>Register field</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Direction</strong></td><td><code>DMA_SxCR.DIR</code></td><td>Peripheral→Memory, Memory→Peripheral, or Memory→Memory</td></tr>
+          <tr><td><strong>Peripheral address</strong></td><td><code>DMA_SxPAR</code></td><td>Source/dest peripheral data register, e.g. <code>&amp;ADC1-&gt;DR</code></td></tr>
+          <tr><td><strong>Memory address</strong></td><td><code>DMA_SxM0AR</code></td><td>Your RAM buffer base pointer</td></tr>
+          <tr><td><strong>Data width</strong></td><td><code>PSIZE</code> / <code>MSIZE</code></td><td>Byte (8), half-word (16), or word (32) per side</td></tr>
+          <tr><td><strong>Increment</strong></td><td><code>PINC</code> / <code>MINC</code></td><td>Step the address after each item — usually fixed peripheral, incrementing memory</td></tr>
+          <tr><td><strong>Count</strong></td><td><code>DMA_SxNDTR</code></td><td>Number of <em>data items</em> to move (not bytes)</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — NDTR counts items, not bytes</div>
+        <p><code>NDTR</code> is the number of <em>transfers</em>, sized by the source width. If <code>PSIZE</code> = half-word and you want to capture 1024 ADC samples, set <code>NDTR = 1024</code>, <em>not</em> 2048. The engine moves <code>NDTR</code> items and stops (normal mode) or reloads (circular). Off-by-a-factor-of-two here is a classic buffer overrun.</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Increment is the magic</div>
+        <p>The peripheral data register lives at one fixed address — its <code>DR</code> — so <code>PINC = 0</code>. Your RAM buffer is an array, so <code>MINC = 1</code> and the engine walks <code>buf[0]</code>, <code>buf[1]</code>, <code>buf[2]</code> … automatically. That single asymmetry — fixed peripheral, incrementing memory — is what turns a stream of <code>DR</code> reads into a populated array with zero CPU effort.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="normal-vs-circular"><span class="sec-no">4</span>Normal vs circular mode</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>one-shot vs forever</small></div>
+      <p>In <strong>normal mode</strong>, the engine moves <code>NDTR</code> items, raises the transfer-complete interrupt, then <em>stops</em>. To go again you must re-arm it: clear flags, reload <code>NDTR</code>, re-enable the stream. Fine for a one-shot block read; useless for a continuous stream because the gap while you re-arm means dropped samples.</p>
+
+      <p>In <strong>circular mode</strong> (set <code>DMA_SxCR.CIRC = 1</code>), when the counter hits zero the hardware <em>automatically reloads</em> <code>NDTR</code> and the memory pointer back to the start, and keeps going. The buffer becomes a ring: the ADC writes <code>buf[0..N-1]</code>, wraps to <code>buf[0]</code>, forever, with no CPU intervention. This is how an ADC or an audio codec streams indefinitely.</p>
+
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> Running
+    Running --> Half: NDTR crosses N/2<br/>(HT interrupt)
+    Half --> Running
+    Running --> Reload: NDTR == 0<br/>(TC interrupt)
+    Reload --> Running: CIRC=1<br/>auto-reload NDTR + ptr
+    Running --> Stopped: NDTR == 0<br/>CIRC=0 (normal)
+    Stopped --> [*]
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> When to reach for circular mode</div>
+        <p>Use circular mode whenever data arrives <strong>continuously and indefinitely</strong> at a fixed rate — ADC sampling, I²S/audio, periodic DAC waveform output, continuous UART reception. Use normal mode for <strong>finite, on-demand</strong> transfers — read 256 bytes from a flash chip, send one telemetry packet. The rule: continuous stream → circular; bounded job → normal.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="double-buffering"><span class="sec-no">5</span>Double buffering &amp; the half-transfer trick</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>fill one, process the other</small></div>
+      <p>Circular mode solves "never stop," but it creates a new hazard: if the engine is writing into the same buffer you are reading, you get a <strong>race</strong> — half-fresh, half-stale data. The fix is to split the work in time so the producer (DMA) and consumer (CPU) never touch the same region at once.</p>
+
+      <p>The cheapest version uses the <strong>half-transfer (HT)</strong> and <strong>transfer-complete (TC)</strong> interrupts of a single circular buffer. The HT interrupt fires when the engine crosses the midpoint, meaning the <em>first half</em> is full and safe to process while the engine fills the second half. The TC interrupt fires at wrap, meaning the <em>second half</em> is full and the engine is now refilling the first. You always process the half the engine is <em>not</em> writing.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> Ping-pong, the picture</div>
+        <p>Think of two buckets under a tap that the tap fills alternately. While bucket A fills, you empty bucket B; the instant A is full the tap swings to B and you empty A. Nobody ever reaches into the bucket currently under the tap. <strong>Gapless</strong> — the tap never has to stop. STM32 even offers true <em>double-buffer mode</em> (<code>DMA_SxCR.DBM = 1</code>) with two distinct addresses, <code>M0AR</code> and <code>M1AR</code>, that the engine swaps automatically and reports via the <code>CT</code> (current target) bit.</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    PER["ADC stream"] --> ENG{{DMA engine}}
+    ENG -->|"fill half A"| A["buf[0 .. N/2-1]"]
+    ENG -->|"fill half B"| B["buf[N/2 .. N-1]"]
+    A -. "HT IRQ → CPU processes A" .-> CPU["Cortex-M4"]
+    B -. "TC IRQ → CPU processes B" .-> CPU
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — too slow to keep up</div>
+        <p>Double buffering only works if you finish processing one half <em>before</em> the engine finishes filling the other. If your handler runs longer than the half-buffer fill time, the engine laps you and overwrites unprocessed data — a silent <strong>overrun</strong>. The fix is a bigger buffer (more time per half) or a faster handler. We compute that fill-time budget in the next section.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="throughput-math"><span class="sec-no">6</span>Throughput math: bytes/s &amp; buffer-fill time</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>where the numbers come from</small></div>
+      <p>Sizing a DMA buffer is arithmetic, and getting it right is the difference between gapless streaming and mysterious clicks. The raw data rate a stream produces is the product of three things — how often, how many parallel channels, and how wide each sample is:</p>
+
+      <div class="math-box">
+        $$ R = f_s \cdot N_{ch} \cdot W \quad\left[\tfrac{\text{bytes}}{\text{s}}\right] $$
+      </div>
+
+      <p>where <span>$f_s$</span> is the sample rate, <span>$N_{ch}$</span> the channel count, and <span>$W$</span> the bytes per sample. Take CD-quality stereo audio: <span>$f_s = 48\,\text{kHz}$</span>, <span>$N_{ch} = 2$</span> (left + right), <span>$W = 2$</span> bytes (16-bit):</p>
+
+      <div class="math-box">
+        $$ R = 48{,}000 \times 2 \times 2 = 192{,}000 \;\tfrac{\text{B}}{\text{s}} \approx 187.5\,\text{KiB/s} $$
+      </div>
+
+      <p>That is the byte stream the DMA engine must absorb forever. Now the buffer-fill time. If your circular buffer holds <span>$B$</span> bytes, the time to fill it completely is simply size over rate:</p>
+
+      <div class="math-box">
+        $$ t_{\text{fill}} = \frac{B}{R}, \qquad t_{\text{half}} = \frac{B}{2R} $$
+      </div>
+
+      <p>For a 1024-<em>sample</em> stereo buffer, <span>$B = 1024 \times 2 \times 2 = 4096$</span> bytes, so</p>
+
+      <div class="math-box">
+        $$ t_{\text{fill}} = \frac{4096}{192{,}000} \approx 21.3\,\text{ms}, \qquad t_{\text{half}} \approx 10.7\,\text{ms} $$
+      </div>
+
+      <p>That <span>$t_{\text{half}} \approx 10.7\,\text{ms}$</span> is your <strong>real-time budget</strong>: every HT/TC interrupt, your handler has ~10.7 ms to process 512 samples before the engine laps it. Miss the budget and you overrun. Bigger buffer → more slack but more latency; it is always this trade. One more reframing — for a single mono channel, the time between individual samples is just the period <span>$T_s = 1/f_s$</span>, and the engine must complete one <code>DR</code>→RAM transfer (a handful of bus cycles) well inside it.</p>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-dma-wrap">
+        <div class="sim-title">🔬 Live: DMA buffer-fill budget</div>
+        <canvas id="sim-dma"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">Drag sample rate, channels, width, and buffer size: watch the byte rate <em>R</em>, full-fill time, and your per-half processing budget recompute live. Push the rate up or the buffer down and see the budget shrink toward zero.</p>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="bus-arbitration"><span class="sec-no">7</span>Bus arbitration &amp; the FIFO</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>sharing the bus</small></div>
+      <p>The DMA engine and the CPU are <em>both</em> bus masters competing for the same AHB matrix. Only one master drives a given bus slave per cycle, so a <strong>bus arbiter</strong> grants access. On Cortex-M3/M4 STM32s the matrix is multi-layer, so DMA-to-SRAM and CPU-to-Flash can often proceed in <em>parallel</em> — but when they target the same slave (both want SRAM), the arbiter interleaves them and the loser stalls a cycle. DMA usually wins by priority, so heavy DMA traffic can mildly slow the CPU. This is the price of "free" transfers — it is cheap, not literally free.</p>
+
+      <p>The F4 streams add a <strong>FIFO</strong>: a small (4×32-bit) buffer between the peripheral side and the memory side. It earns its keep two ways. First, <strong>burst &amp; packing</strong>: it lets the engine collect several narrow peripheral reads and write them to memory in one wide burst, cutting the number of bus transactions. Second, <strong>width conversion</strong>: with the FIFO on you can read bytes from a peripheral and pack them into 32-bit memory words. With the FIFO disabled (<em>direct mode</em>), <code>PSIZE</code> and <code>MSIZE</code> must match and every item is an immediate single transfer.</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — why the FIFO matters for SD cards</div>
+        <p>High-bandwidth peripherals like the SDIO/SDMMC interface to an SD card <em>require</em> FIFO mode with bursts. The SD clock does not pause for bus contention, so the DMA must use burst transfers to keep up with the controller's hardware FIFO; direct mode simply cannot sustain the rate and you get underrun errors. The FIFO threshold (<code>1/4, 1/2, 3/4, full</code>) tunes how full the FIFO gets before it bursts — a real knob you turn when chasing throughput.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="real-cases"><span class="sec-no">8</span>Real cases: ADC, UART, WS2812 &amp; mem-to-mem</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>Here is the headline use: a free-running ADC streaming straight into a circular buffer. The CPU configures it once and is then completely uninvolved in moving samples. This is register-level for clarity; the HAL wraps the same fields.</p>
+
+      <div class="codeblock">
+        <div class="code-head">adc_dma_circular.c <span class="lang">C / STM32F4 (register level)</span></div>
+<pre><code class="language-c">// ADC1 -&gt; SRAM, circular, half-word samples.
+// F4 mapping: ADC1 = DMA2, Stream 0, Channel 0.
+#define NSAMP 1024
+volatile uint16_t adc_buf[NSAMP];   // 16-bit ADC results
+
+void adc_dma_init(void) {
+    RCC-&gt;AHB1ENR |= RCC_AHB1ENR_DMA2EN;   // clock the DMA2 controller
+
+    DMA2_Stream0-&gt;CR &amp;= ~DMA_SxCR_EN;     // disable before configuring
+    while (DMA2_Stream0-&gt;CR &amp; DMA_SxCR_EN) { }  // wait until actually off
+
+    DMA2_Stream0-&gt;PAR  = (uint32_t)&amp;ADC1-&gt;DR;     // source: ADC data reg (fixed)
+    DMA2_Stream0-&gt;M0AR = (uint32_t)adc_buf;       // dest: RAM buffer base
+    DMA2_Stream0-&gt;NDTR = NSAMP;                   // ITEMS (not bytes!)
+
+    DMA2_Stream0-&gt;CR =
+          (0u &lt;&lt; DMA_SxCR_CHSEL_Pos)   // Channel 0 selects ADC1 request
+        | (1u &lt;&lt; DMA_SxCR_PSIZE_Pos)   // peripheral size = half-word (16-bit)
+        | (1u &lt;&lt; DMA_SxCR_MSIZE_Pos)   // memory size     = half-word
+        | DMA_SxCR_MINC               // increment memory address
+        | DMA_SxCR_CIRC               // CIRCULAR: auto-reload forever
+        | DMA_SxCR_HTIE               // half-transfer interrupt enable
+        | DMA_SxCR_TCIE;              // transfer-complete interrupt enable
+        // DIR = 00 (peripheral-to-memory), PINC = 0 (peripheral fixed)
+
+    NVIC_EnableIRQ(DMA2_Stream0_IRQn);
+    DMA2_Stream0-&gt;CR |= DMA_SxCR_EN;   // arm the engine
+
+    ADC1-&gt;CR2 |= ADC_CR2_DMA | ADC_CR2_DDS;  // ADC issues DMA requests, keep requesting
+    ADC1-&gt;CR2 |= ADC_CR2_CONT | ADC_CR2_ADON;  // continuous + ON
+    ADC1-&gt;CR2 |= ADC_CR2_SWSTART;              // kick off conversions
+}</code></pre>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> What just happened</div>
+        <p>After <code>adc_dma_init()</code> returns, the ADC converts on its own, raises a DMA request after each result, and the engine drops the 16-bit value into the next slot of <code>adc_buf[]</code> — wrapping forever because <code>CIRC</code> is set. The CPU's <em>only</em> remaining job is the IRQ handler below, called twice per buffer. Note <code>DDS</code> (DMA Disable Selection): it keeps the ADC issuing requests after the last transfer so circular mode never stalls.</p>
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">dma2_stream0_irq.c <span class="lang">C / STM32F4</span></div>
+<pre><code class="language-c">void DMA2_Stream0_IRQHandler(void) {
+    if (DMA2-&gt;LISR &amp; DMA_LISR_HTIF0) {        // half-transfer: first half ready
+        DMA2-&gt;LIFCR = DMA_LIFCR_CHTIF0;       // clear the flag (write-1-to-clear)
+        process_block(&amp;adc_buf[0], NSAMP / 2);   // safe: engine fills 2nd half
+    }
+    if (DMA2-&gt;LISR &amp; DMA_LISR_TCIF0) {        // transfer-complete: second half ready
+        DMA2-&gt;LIFCR = DMA_LIFCR_CTCIF0;       // clear the flag
+        process_block(&amp;adc_buf[NSAMP / 2], NSAMP / 2);  // safe: engine refills 1st
+    }
+}</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — forgetting to clear flags</div>
+        <p>DMA status flags are write-1-to-clear via the dedicated <code>LIFCR</code>/<code>HIFCR</code> registers — you cannot clear them by writing the status register. Forget the clear and your handler re-fires instantly, livelocking the CPU. Also note F4 spreads 8 streams across <em>two</em> pairs: streams 0–3 use the <em>Low</em> registers (<code>LISR</code>/<code>LIFCR</code>), streams 4–7 the <em>High</em> ones (<code>HISR</code>/<code>HIFCR</code>).</p>
+      </div>
+
+      <p>The same engine, three more flavors:</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — UART log streaming, WS2812 &amp; mem-to-mem</div>
+        <p><strong>UART TX (memory→peripheral):</strong> point DMA at your log string, set <code>DIR</code> = memory-to-peripheral, <code>MINC = 1</code>, <code>PINC = 0</code>, <code>NDTR</code> = length, enable <code>USART-&gt;CR3.DMAT</code>. The whole buffer streams out at line rate while <code>main()</code> moves on — no blocking <code>printf</code>.<br>
+        <strong>WS2812 LED strip (memory→peripheral via SPI/timer):</strong> these "NeoPixel" strips need a precise ~800 kHz one-wire waveform. Encode each color bit as an SPI byte (or a timer-PWM duty), then DMA the whole encoded frame to <code>SPI-&gt;DR</code>. DMA's exact timing is what makes the strip glitch-free — bit-banging from the CPU jitters and the strip flickers.<br>
+        <strong>Memory-to-memory:</strong> set <code>DIR</code> = mem-to-mem (DMA2 only on F4), both <code>PINC</code> and <code>MINC</code> = 1, and it becomes a hardware <code>memcpy</code> that runs while the CPU does other work. Note: circular and direct mode are not available for mem-to-mem.</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>⑤ Your turn</h2>
+      <div class="layer"><span class="step">⑤</span> Practice <small>you write &amp; decide</small></div>
+      <p>Three checks. Tap an answer, type a number, or reveal a coding challenge. Your progress is saved on this device and shown on the home page.</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="stm08-double-buffer">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You are streaming an ADC continuously into a single circular buffer and processing the data on the CPU. What core problem do the <strong>half-transfer</strong> and <strong>transfer-complete</strong> interrupts (double buffering) actually solve?</div>
+        <ul class="ex-options">
+          <li data-correct="false">They make the DMA engine run faster by skipping the bus arbiter</li>
+          <li data-correct="true">They let you process one half of the buffer while the engine safely fills the other, avoiding a read/write race on the same data</li>
+          <li data-correct="false">They convert peripheral byte data into 32-bit memory words</li>
+          <li data-correct="false">They stop the ADC so the CPU can catch up between blocks</li>
+        </ul>
+        <div class="ex-explain">Double buffering is about <strong>separating producer and consumer in time</strong>. The HT interrupt says "first half is full, second is filling — process the first now"; the TC interrupt says the reverse. You always touch the half the engine is <em>not</em> writing, so there is never a race and the stream stays gapless. Speed and width-conversion are unrelated jobs (the FIFO/bursts handle those).</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="stm08-throughput" data-answer="192000" data-tol="1000">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">You capture <strong>48 kHz</strong> stereo (<strong>2 channels</strong>) audio at <strong>16 bits</strong> (2 bytes) per sample. What raw byte rate, in <strong>bytes per second</strong>, must your DMA stream sustain? (Use $R = f_s \cdot N_{ch} \cdot W$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="bytes/s"><span class="ex-unit">B/s</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$R = 48{,}000 \times 2 \times 2 = 192{,}000\ \text{B/s}$ (≈ 187.5 KiB/s). A 4096-byte buffer then fills in $4096/192000 \approx 21.3\,\text{ms}$, giving a ~10.7 ms per-half processing budget. Double the sample rate or the width and the byte rate — and the pressure on your handler — doubles too.</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="stm08-circular-adc">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — circular ADC with half/full callbacks (HAL)</div>
+        <div class="ex-q">Using the STM32 HAL, configure ADC1 to sample continuously into a <strong>circular</strong> DMA buffer of 256 half-words, and implement the <strong>half-complete</strong> and <strong>full-complete</strong> callbacks so each processes the correct half. Assume <code>hadc1</code> and its linked DMA handle are already initialized by CubeMX with circular mode. Think about <em>which</em> half each callback owns.</div>
+        <details class="ex-acc">
+          <summary>Hint</summary>
+          <div class="acc-body">Start the stream once with <code>HAL_ADC_Start_DMA(&amp;hadc1, (uint32_t*)buf, 256)</code> — the count is in <em>items</em>. Then override the two weak callbacks: <code>HAL_ADC_ConvHalfCpltCallback</code> fires at the midpoint (first 128 samples ready) and <code>HAL_ADC_ConvCpltCallback</code> fires at wrap (last 128 ready). Each should process the half the engine just finished — and, crucially, return fast enough to beat the fill time.</div>
+        </details>
+        <details class="ex-acc">
+          <summary>Show one solution</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">adc_circular_hal.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">#define NSAMP 256
+static volatile uint16_t buf[NSAMP];   // circular DMA target
+
+void app_start(void) {
+    // Start ADC -&gt; DMA in circular mode. Count is in ITEMS, not bytes.
+    // CubeMX set the DMA handle to Circular + HT/TC interrupts enabled.
+    HAL_ADC_Start_DMA(&amp;hadc1, (uint32_t *)buf, NSAMP);
+}
+
+// Fires when the engine crosses the midpoint: buf[0 .. 127] is full,
+// and the engine is now writing buf[128 .. 255]. Process the FIRST half.
+void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc) {
+    if (hadc-&gt;Instance == ADC1)
+        process_block((uint16_t *)&amp;buf[0], NSAMP / 2);
+}
+
+// Fires at wrap: buf[128 .. 255] is full, and the engine has wrapped
+// back to refill buf[0 .. 127]. Process the SECOND half.
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc) {
+    if (hadc-&gt;Instance == ADC1)
+        process_block((uint16_t *)&amp;buf[NSAMP / 2], NSAMP / 2);
+}
+
+// Your DSP / copy-out. MUST finish before the engine fills the other half.
+static void process_block(uint16_t *p, uint32_t n) {
+    for (uint32_t i = 0; i &lt; n; i++) {
+        // e.g. accumulate, filter, or copy out to a transmit buffer
+        (void)p[i];
+    }
+}</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">The lesson is the <strong>ownership split</strong>: half-callback owns indices <code>[0, N/2)</code>, full-callback owns <code>[N/2, N)</code>, and the engine is always writing the <em>other</em> half — so neither callback ever races the DMA. Keep <code>process_block</code> well inside the per-half fill budget (§6) or you overrun. For absolute safety on M7/cache parts, also invalidate the D-cache for the half you read.</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> Chapter recap</div>
+        <p>You can now explain DMA as a second bus master that moves bytes per-block instead of per-byte, name the F4 architecture (2 controllers × 8 streams, each selecting 1 of 8 channels) and contrast it with F1's channels, list the six transfer parameters and the items-not-bytes gotcha, choose circular vs normal mode, and use the half/full-transfer interrupts for gapless double-buffered streaming. You can size a buffer from $R = f_s N_{ch} W$ and $t_{\text{fill}} = B/R$, reason about bus arbitration and the FIFO, and you wired a real circular ADC capture with correct flag-clearing and half/full callbacks. Next we take this engine to the I²S codec and stream actual audio.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="Back to top">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+
+<!-- chapter-specific simulator -->
+<script>
+EM.sim("sim-dma", {
+  height: 250,
+  params: [
+    { key: "fs",  label: "sample rate", min: 8,   max: 192,  step: 1,   value: 48,   unit: "kHz" },
+    { key: "ch",  label: "channels",    min: 1,   max: 8,    step: 1,   value: 2,    unit: "ch"  },
+    { key: "w",   label: "width",       min: 1,   max: 4,    step: 1,   value: 2,    unit: "B"   },
+    { key: "smp", label: "buf samples", min: 128, max: 4096, step: 128, value: 1024, unit: ""    }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h, pad = 44 * dpr;
+
+    // R in bytes/s ; B in bytes ; times in ms
+    var R = (v.fs * 1000) * v.ch * v.w;          // bytes per second
+    var B = v.smp * v.ch * v.w;                  // buffer size in bytes
+    var tFill = B / R * 1000;                    // ms to fill whole buffer
+    var tHalf = tFill / 2;                       // per-half budget (ms)
+
+    // draw the buffer as a bar split in two halves, with a fill cursor
+    var barY = pad, barH = 46 * dpr, barX = pad, barW = W - pad - 16 * dpr;
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.strokeStyle = "#2f3a4c"; ctx.fillStyle = "#161c27";
+    ctx.fillRect(barX, barY, barW, barH);
+    ctx.strokeRect(barX, barY, barW, barH);
+    // midpoint divider
+    ctx.strokeStyle = "#3b4659";
+    ctx.beginPath();
+    ctx.moveTo(barX + barW / 2, barY); ctx.lineTo(barX + barW / 2, barY + barH);
+    ctx.stroke();
+
+    // animated fill cursor sweeping across (period = tFill, capped for visuals)
+    var period = Math.max(400, Math.min(tFill, 4000));   // ms, clamped for display
+    var phase = (Date.now() % period) / period;          // 0..1
+    var inSecondHalf = phase >= 0.5;
+    ctx.fillStyle = inSecondHalf ? "#f4a259" : "#2ec4b6";
+    ctx.fillRect(barX, barY, barW * phase, barH);
+
+    // labels for the two halves
+    ctx.fillStyle = "#9aa4b2"; ctx.font = (12 * dpr) + "px monospace";
+    ctx.fillText("half A (HT)", barX + 8 * dpr, barY + barH + 16 * dpr);
+    ctx.fillText("half B (TC)", barX + barW / 2 + 8 * dpr, barY + barH + 16 * dpr);
+
+    // "engine fills this / process that" annotation
+    ctx.fillStyle = inSecondHalf ? "#f4a259" : "#2ec4b6";
+    ctx.fillText(inSecondHalf ? "engine → B, CPU processes A"
+                              : "engine → A, CPU processes B",
+                 barX, barY - 12 * dpr);
+
+    // readable byte-rate string
+    var rStr = R >= 1e6 ? (Math.round(R / 1e4) / 100) + " MB/s"
+                        : (Math.round(R / 100) / 10) + " kB/s";
+    return "R = <b>" + R.toLocaleString() + "</b> B/s (" + rStr +
+           ") &nbsp;·&nbsp; buffer = <b>" + B.toLocaleString() + "</b> B &nbsp;·&nbsp; fill = <b>" +
+           (Math.round(tFill * 100) / 100) + "</b> ms &nbsp;·&nbsp; per-half budget = <b>" +
+           (Math.round(tHalf * 100) / 100) + "</b> ms";
+  }
+});
+</script>
+</body>
+</html>

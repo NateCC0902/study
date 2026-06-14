@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Analog: ADC, DMA Streaming, DAC &amp; Oversampling — Embedded Mastery</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="track-stm32" data-track="stm32" data-chapter="06-adc-dac">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">STM32 · Ch 06</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">STM32 Track · Chapter 06 · Advanced</div>
+        <h1>Analog: ADC, DMA Streaming, DAC &amp; Oversampling</h1>
+        <p>On Arduino you called <code>analogRead()</code> and got a 10-bit number, one channel at a time, with the CPU babysitting every conversion. The STM32 ADC is the same idea on steroids: 12-bit, multi-channel, and able to fire conversions and dump them straight into RAM via <strong>DMA</strong> while the CPU runs your control loop. We'll build that machine from the silicon up — and squeeze 14 effective bits out of a 12-bit converter with oversampling.</p>
+        <div class="meta">
+          <span>⏱ ~50 min</span><span>🧠 Sampling theory</span><span>⚡ DMA streaming</span><span>🔧 HAL + registers</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="adc-intuition"><span class="sec-no">1</span>The same idea, scaled up</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>An <strong>ADC</strong> (analog-to-digital converter) is a voltmeter that answers in integers. Feed it a voltage between 0 and a reference <span>$V_{ref}$</span>, and it hands back a whole number proportional to where that voltage sits in the range. That's exactly what Arduino's <code>analogRead()</code> did. The STM32 changes three things, and each one matters:</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence model</div>
+        <p>An STM32 ADC is a <strong>fast 12-bit voltmeter with a programmable schedule and a conveyor belt</strong>: it can convert a list of channels in sequence, on a timer's beat, and hand each result to DMA so the CPU never has to ask "are you done yet?"</p>
+      </div>
+
+      <p>The three upgrades over the classic AVR ADC:</p>
+      <ul>
+        <li><strong>Resolution.</strong> 12 bits instead of 10 — 4096 levels instead of 1024. Finer voltage steps.</li>
+        <li><strong>Throughput.</strong> Millions of samples per second, not tens of thousands. A successive-approximation core clocked up to tens of MHz.</li>
+        <li><strong>Autonomy.</strong> A whole <em>sequence</em> of channels can convert back-to-back, triggered by a timer, with results streamed to a RAM buffer by DMA. Zero CPU per sample.</li>
+      </ul>
+
+      <p>That last point is the whole game. On Arduino, sampling 4 sensors at 10 kHz means the CPU is stuck in <code>analogRead()</code> 40,000 times a second. On STM32, you configure it once and the sensors fill a buffer behind your back. We'll get there in §4.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What you're actually building</div>
+        <p>A pipeline: <strong>analog pin → sample-and-hold → SAR converter → data register → DMA → RAM buffer</strong>. The CPU configures the front of the pipe and reads the back of it. Everything in between is hardware.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="resolution-math"><span class="sec-no">2</span>Resolution: turning volts into counts</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive it</small></div>
+      <p>A 12-bit converter divides the input range <span>$[0, V_{ref}]$</span> into <span>$2^{12} = 4096$</span> equal steps. The smallest voltage difference it can distinguish — one count — is called the <strong>LSB</strong> (least-significant bit):</p>
+
+      <div class="math-box">
+        $$ \text{LSB} = \frac{V_{ref}}{2^{n}} = \frac{V_{ref}}{4096} $$
+      </div>
+
+      <p>With the typical <span>$V_{ref} = 3.3\,\text{V}$</span>:</p>
+
+      <div class="math-box">
+        $$ \text{LSB} = \frac{3.3\,\text{V}}{4096} \approx 0.806\,\text{mV} $$
+      </div>
+
+      <p>To go the other way — from a raw ADC count back to a voltage — note that the code ranges from <span>$0$</span> (for 0 V) to <span>$4095$</span> (for full scale, just under <span>$V_{ref}$</span>). The converter reports the <em>fraction</em> of full scale, so:</p>
+
+      <div class="math-box">
+        $$ V = \frac{\text{adc}}{4095}\, V_{ref} $$
+      </div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Why 4095 and not 4096?</div>
+        <p>The codes are <strong>0 … 4095</strong> — that's 4096 distinct values, but the <em>largest</em> code is 4095. Full scale (code 4095) corresponds to one LSB below <span>$V_{ref}$</span>. So we divide by the maximum code, 4095, to map code → voltage. Dividing by 4096 instead introduces a tiny systematic bias of one LSB at full scale; for a quick estimate it barely matters, but for calibrated measurements, use 4095.</p>
+      </div>
+
+      <p>Worked example: the ADC returns <code>adc = 2048</code>, the midpoint. Then</p>
+      <div class="math-box">
+        $$ V = \frac{2048}{4095}\times 3.3\,\text{V} \approx 1.65\,\text{V} $$
+      </div>
+      <p>— exactly half of <span>$V_{ref}$</span>, as you'd expect from the midpoint code. Compare with the old 10-bit AVR: there, <span>$\text{LSB} = 5\,\text{V}/1024 \approx 4.9\,\text{mV}$</span> — six times coarser than the STM32's 0.806 mV. Twelve bits buys you real precision.</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="timing-and-modes"><span class="sec-no">3</span>Conversion timing &amp; the ADC clock</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>how long a sample takes</small></div>
+      <p>A SAR (successive-approximation) ADC works like a binary search: it guesses the most-significant bit, compares, keeps or discards it, then the next bit, and so on — one comparison per bit. Before any of that, it must <strong>sample</strong>: connect the input to an internal capacitor and let it charge to the source voltage. A high-impedance sensor charges that cap slowly, so the sampling time is programmable.</p>
+
+      <p>On the STM32F4, total conversion time (in ADC clock cycles) is:</p>
+
+      <div class="math-box">
+        $$ T_{conv} = \frac{T_{sampling} + 12.5}{f_{ADC}} $$
+      </div>
+
+      <p>Here <span>$T_{sampling}$</span> is the chosen sample time in ADC cycles (the F4 offers 3, 15, 28, 56, 84, 112, 144, or 480 cycles), and the fixed <span>$12.5$</span> cycles is the successive-approximation phase for a 12-bit result (12 bits + 0.5 cycle of overhead). The denominator <span>$f_{ADC}$</span> is the ADC's own clock.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The ADC clock has a hard ceiling</div>
+        <p>On the F4, the ADC is clocked from <strong>APB2</strong> through the <code>ADCPRE</code> prescaler (÷2, ÷4, ÷6, ÷8). The resulting <span>$f_{ADC}$</span> must not exceed the datasheet maximum — typically <strong>~36 MHz</strong> on F4 parts. Overclock it and conversions silently lose accuracy. Always pick a prescaler that keeps <span>$f_{ADC}$</span> under the max.</p>
+      </div>
+
+      <p>Worked example: APB2 at 84 MHz, prescaler ÷4 gives <span>$f_{ADC} = 21\,\text{MHz}$</span> (safely under 36 MHz). With a 15-cycle sample time:</p>
+      <div class="math-box">
+        $$ T_{conv} = \frac{15 + 12.5}{21\times10^{6}\,\text{Hz}} = \frac{27.5}{21\times10^{6}} \approx 1.31\,\mu\text{s} \;\Rightarrow\; \approx 763\,\text{kSPS} $$
+      </div>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>four ways to schedule conversions</small></div>
+      <p>The ADC doesn't just convert once and stop. It has four <strong>modes</strong>, and picking the right one is half the design:</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Mode</th><th>What it does</th><th>Use when</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Single</strong></td><td>One channel, one conversion, then stop.</td><td>Occasional spot reads (battery voltage at boot).</td></tr>
+          <tr><td><strong>Continuous</strong></td><td>One channel, convert → restart → convert, forever.</td><td>Streaming one signal as fast as possible.</td></tr>
+          <tr><td><strong>Scan</strong></td><td>Walk a <em>sequence</em> of channels once (or continuously).</td><td>Reading several sensors as a group.</td></tr>
+          <tr><td><strong>Injected</strong></td><td>A high-priority sequence that pre-empts the regular one.</td><td>An urgent reading (motor current) interrupting a slow scan.</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p><strong>Scan + continuous + DMA</strong> is the combination that turns the ADC into the conveyor belt from §1: it walks your channel list over and over, and DMA catches every result. That's next.</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="adc-dma"><span class="sec-no">4</span>The superpower: ADC + DMA streaming</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the conveyor belt</small></div>
+      <p><strong>DMA</strong> (Direct Memory Access) is a tiny dedicated copier that moves data between a peripheral and RAM <em>without the CPU</em>. Wire the ADC's data register to a DMA channel and every finished conversion is whisked into your buffer automatically. Set the DMA to <strong>circular</strong> mode and it wraps to the start when the buffer fills — an endless ring the ADC keeps filling and you keep reading.</p>
+
+      <div class="mermaid">
+flowchart LR
+    PIN["Analog pins<br/>PA0 · PA1 · PA4"] --> ADC["ADC1<br/>scan + continuous"]
+    ADC -->|each result| DMA["DMA2 Stream0<br/>circular"]
+    DMA -->|writes| BUF["RAM buffer<br/>uint16_t[N]"]
+    BUF -.->|CPU reads<br/>at its leisure| CPU(["Control loop"])
+    ADC -. zero CPU per sample .-> CPU
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> Why this is the whole point</div>
+        <p>Without DMA, every conversion is a poll or an interrupt — the CPU stops to fetch one number, thousands of times a second. With DMA, the CPU configures the chain <em>once</em>, then the ADC and DMA run as a closed loop. The CPU only touches the buffer when <em>it</em> wants a fresh reading. This is how you sample sensors at hundreds of kSPS while still running PID, comms, and a UI.</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>Here's a realistic HAL configuration: three channels (PA0, PA1, PA4) scanned continuously, streamed circularly into a buffer. The ADC restarts the scan the instant DMA finishes a pass.</p>
+
+      <div class="codeblock">
+        <div class="code-head">adc_dma.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">#define NUM_CH   3
+#define NUM_AVG  16                 // optional: keep several scans
+volatile uint16_t adc_buf[NUM_CH]; // DMA writes here, in channel order
+
+extern ADC_HandleTypeDef hadc1;    // from CubeMX / your init
+
+void adc_dma_start(void) {
+  // Kick off the chain. HAL programs the DMA stream and the ADC,
+  // then ADC conversions stream straight into adc_buf with ZERO CPU.
+  // Cast: HAL wants uint32_t*, our data is 16-bit half-words (set in CubeMX).
+  HAL_ADC_Start_DMA(&amp;hadc1, (uint32_t *)adc_buf, NUM_CH);
+}
+
+// Called by HAL from the DMA transfer-complete ISR, once per full scan.
+// Because DMA is CIRCULAR, conversions never stop — this just notifies us.
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc) {
+  if (hadc->Instance == ADC1) {
+    // adc_buf now holds one fresh sample per channel. Convert as needed.
+    // (Reading is safe here; DMA is between passes.)
+    float v0 = (adc_buf[0] / 4095.0f) * 3.3f;   // PA0 → volts
+    (void)v0;                                    // ... use it
+  }
+}
+</code></pre>
+      </div>
+
+      <p>The matching low-level setup CubeMX generates is worth seeing once, because it's where the <em>policy</em> lives — scan, continuous, DMA-circular all encoded as register fields:</p>
+
+      <div class="codeblock">
+        <div class="code-head">adc_init.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">void MX_ADC1_Init(void) {
+  hadc1.Instance = ADC1;
+  hadc1.Init.ClockPrescaler   = ADC_CLOCK_SYNC_PCLK_DIV4; // f_ADC = APB2/4
+  hadc1.Init.Resolution       = ADC_RESOLUTION_12B;       // 12 bits → 0..4095
+  hadc1.Init.ScanConvMode     = ENABLE;     // walk the channel sequence
+  hadc1.Init.ContinuousConvMode = ENABLE;   // restart the scan forever
+  hadc1.Init.NbrOfConversion  = 3;          // three channels in the list
+  hadc1.Init.DMAContinuousRequests = ENABLE;// keep DMA requests coming
+  hadc1.Init.EOCSelection     = ADC_EOC_SINGLE_CONV;
+  HAL_ADC_Init(&amp;hadc1);
+
+  ADC_ChannelConfTypeDef sc = {0};
+  sc.SamplingTime = ADC_SAMPLETIME_15CYCLES;
+  sc.Channel = ADC_CHANNEL_0; sc.Rank = 1; HAL_ADC_ConfigChannel(&amp;hadc1, &amp;sc);
+  sc.Channel = ADC_CHANNEL_1; sc.Rank = 2; HAL_ADC_ConfigChannel(&amp;hadc1, &amp;sc);
+  sc.Channel = ADC_CHANNEL_4; sc.Rank = 3; HAL_ADC_ConfigChannel(&amp;hadc1, &amp;sc);
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the buffer must match the sequence</div>
+        <p>DMA writes results in <strong>rank order</strong>, not pin order. The <code>Rank</code> field decides which slot each channel lands in: rank 1 → <code>adc_buf[0]</code>, rank 2 → <code>adc_buf[1]</code>, and so on. Get the ranks wrong and your "PA4 reading" is silently PA1. Also: mark the buffer <code>volatile</code> — DMA changes it behind the compiler's back, and without <code>volatile</code> the optimizer may cache a stale value.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="dac"><span class="sec-no">5</span>Going the other way: the DAC</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>numbers become voltage</small></div>
+      <p>A <strong>DAC</strong> (digital-to-analog converter) is the ADC run backwards: write a number, get a voltage. Many STM32 parts (F4, L4, etc.) include one or two 12-bit DACs. Write a 12-bit code to the data register and the output pin holds a steady analog voltage — perfect for generating waveforms, audio, control offsets, or a reference for an external circuit.</p>
+
+      <p>The mapping mirrors the ADC's. A code of 0 gives ~0 V; the maximum code 4095 gives full scale near <span>$V_{ref}$</span>:</p>
+
+      <div class="math-box">
+        $$ V_{out} = \frac{\text{val}}{4095}\, V_{ref} $$
+      </div>
+
+      <p>So to put 1.0 V on the pin with <span>$V_{ref} = 3.3\,\text{V}$</span>, solve for the code: <span>$\text{val} = \dfrac{1.0}{3.3}\times 4095 \approx 1241$</span>.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>set an output voltage</small></div>
+      <div class="codeblock">
+        <div class="code-head">dac_out.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">extern DAC_HandleTypeDef hdac;
+
+void dac_set_volts(float volts) {
+  // Clamp to the legal range, then map volts → 12-bit code.
+  if (volts &lt; 0.0f)  volts = 0.0f;
+  if (volts &gt; 3.3f)  volts = 3.3f;
+  uint32_t code = (uint32_t)((volts / 3.3f) * 4095.0f + 0.5f); // round
+
+  HAL_DAC_SetValue(&amp;hdac, DAC_CHANNEL_1, DAC_ALIGN_12B_R, code);
+  HAL_DAC_Start(&amp;hdac, DAC_CHANNEL_1);
+}
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> DAC + DMA + timer = a waveform generator</div>
+        <p>The real trick: pre-compute a sine table in RAM, then have a <strong>timer</strong> trigger the DAC and <strong>DMA</strong> feed it the next table entry on every tick. The CPU writes the table once and the hardware plays it forever — a clean analog sine on the pin with zero CPU load. Same conveyor-belt pattern as the ADC, just flowing outward.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="oversampling"><span class="sec-no">6</span>Oversampling: buying extra bits</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>average away the noise</small></div>
+      <p>Your 12-bit reading isn't perfectly stable — the last bit or two flickers from thermal and quantization noise. That flicker is annoying, but it's also a gift: if the noise is roughly random and at least one LSB wide, <strong>averaging many samples</strong> recovers information <em>below</em> one LSB. Average enough and you genuinely resolve finer than 12 bits. This is <strong>oversampling</strong>.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive the bit gain</small></div>
+      <p>Averaging <span>$N$</span> independent samples reduces the noise standard deviation by <span>$\sqrt{N}$</span>:</p>
+
+      <div class="math-box">
+        $$ \sigma_{avg} = \frac{\sigma}{\sqrt{N}} $$
+      </div>
+
+      <p>Each extra <em>bit</em> of resolution halves the effective step size — i.e. needs the noise floor to drop by a factor of 2. Since averaging drops noise by <span>$\sqrt{N}$</span>, to gain <span>$n$</span> bits you need <span>$\sqrt{N} = 2^{n}$</span>, so <span>$N = 4^{n}$</span>. The clean rule:</p>
+
+      <div class="math-box">
+        $$ \Delta\text{ENOB} = \frac{1}{2}\log_{2} N = \log_{4} N \quad\Longrightarrow\quad N = 4^{\,n}\ \text{samples}\ \to\ +n\ \text{bits} $$
+      </div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> The trade table</div>
+        <p>Each extra effective bit costs 4× the samples (and 4× the time):</p>
+        <div class="tbl-wrap">
+        <table>
+          <thead><tr><th>Samples averaged $N$</th><th>Extra bits $n$</th><th>Effective resolution</th><th>Throughput cost</th></tr></thead>
+          <tbody>
+            <tr><td>$4^1 = 4$</td><td>+1</td><td>13-bit</td><td>÷4</td></tr>
+            <tr><td>$4^2 = 16$</td><td>+2</td><td>14-bit</td><td>÷16</td></tr>
+            <tr><td>$4^3 = 64$</td><td>+3</td><td>15-bit</td><td>÷64</td></tr>
+            <tr><td>$4^4 = 256$</td><td>+4</td><td>16-bit</td><td>÷256</td></tr>
+          </tbody>
+        </table>
+        </div>
+      </div>
+
+      <p>So 16 samples averaged turn a 12-bit ADC into an effective 14-bit one — <span>$\text{ENOB} = 12 + \log_4 16 = 12 + 2 = 14$</span> bits. The catch is throughput: you've spent 16 conversions per usable reading, so your output rate drops by 16×. That's the eternal embedded trade — <strong>resolution vs. speed</strong> — and now you can put numbers on it.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — oversampling needs noise to work</div>
+        <p>If the signal is <em>perfectly</em> quiet (noise &lt; 1 LSB), averaging just returns the same code every time — no extra bits, because there's nothing for the average to interpolate. Oversampling only buys resolution when there's at least ~1 LSB of random dither riding on the signal. Real-world thermal noise usually provides it; on a bench-perfect source you may need to add deliberate dither.</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Hardware does it for free on newer parts</div>
+        <p>STM32L4/G4/H7 ADCs include a built-in <strong>hardware oversampler</strong>: set an oversampling ratio and a right-shift, and the ADC sums <span>$N$</span> conversions and shifts the result — no CPU averaging, no extra firmware. On the F4 you do it in software (sum the DMA buffer, shift right). Either way the math above is what's happening.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="analog-watchdog"><span class="sec-no">7</span>The analog watchdog &amp; a real system</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>a hardware alarm</small></div>
+      <p>Sometimes you don't want the value — you want to know the instant a value leaves a safe band. Polling for that in software wastes cycles and adds latency. The <strong>analog watchdog</strong> is hardware that does it: program a low threshold and a high threshold, and the ADC fires an interrupt the moment a conversion falls outside <span>$[V_{low}, V_{high}]$</span>. No polling, near-zero latency.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Thresholds are in ADC codes, not volts</div>
+        <p>You set the watchdog limits as raw codes. To alarm above 2.0 V at <span>$V_{ref}=3.3$</span>V: <span>$\text{HT} = \dfrac{2.0}{3.3}\times 4095 \approx 2482$</span>. Convert your physical limits to codes the same way you convert readings back to volts — it's the inverse of the §2 formula.</p>
+      </div>
+
+      <div class="layer"><span class="step">④</span> Real case <small>this ships in products</small></div>
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — a motor controller that never blocks on the ADC</div>
+        <p>A brushless-motor board needs to read bus voltage, board temperature, and a throttle pot — continuously — while running a 20 kHz control loop. The design: ADC1 in <strong>scan + continuous</strong> mode walks all three channels into a 3-word circular DMA buffer. The control loop reads <code>adc_buf[]</code> whenever it likes; the values are always fresh, and not a single CPU cycle is spent waiting on a conversion. An <strong>analog watchdog</strong> on the bus-voltage channel is armed to fault-trip the motor instantly if the supply sags below a safe code — a hardware safety interlock, faster and more reliable than any software check. This exact pattern is in countless shipped drives, drones, and power supplies.</p>
+      </div>
+
+      <p>Notice every piece you learned snapping together: 12-bit resolution sets precision, the conversion-timing budget sets how fast the scan loops, scan mode picks the channels, DMA-circular removes the CPU from the loop, and the watchdog adds a hardware safety net. That's a complete analog front-end.</p>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>⑤ Your turn</h2>
+      <div class="layer"><span class="step">⑤</span> Practice <small>you compute &amp; decide</small></div>
+      <p>Three checks. Tap an answer, type a number, or reveal a coding challenge. Your progress is saved on this device and shown on the home page.</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="stm06-why-dma">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You're sampling four sensors at high rate while running a control loop. Why pair the ADC with <strong>DMA in circular mode</strong> instead of reading each conversion in an interrupt?</div>
+        <ul class="ex-options">
+          <li data-correct="false">DMA makes each individual conversion physically faster than the SAR core can run.</li>
+          <li data-correct="true">DMA moves every result into a RAM buffer with zero CPU per sample, so the CPU is free to run the control loop and only touches the buffer when it wants a fresh reading.</li>
+          <li data-correct="false">DMA increases the ADC's resolution from 12 bits to 16 bits.</li>
+          <li data-correct="false">Without DMA the ADC cannot do multi-channel scan mode at all.</li>
+        </ul>
+        <div class="ex-explain">DMA doesn't speed up the converter itself — the SAR timing is fixed by <span>$T_{conv}$</span>. What it removes is the <strong>per-sample CPU cost</strong>: each finished conversion is copied to RAM by the DMA engine, and circular mode means it loops forever without re-arming. The CPU configures the chain once and then ignores it, reading the buffer at its own pace. That's how you sample continuously and still have CPU left for everything else.</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="stm06-code-to-volts" data-answer="1.65" data-tol="0.03">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">A 12-bit ADC with <span>$V_{ref} = 3.3\,\text{V}$</span> returns the code <code>adc = 2048</code>. What input voltage does that correspond to? (Use $V = \dfrac{\text{adc}}{4095}\,V_{ref}$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="volts"><span class="ex-unit">V</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$V = \dfrac{2048}{4095}\times 3.3 \approx 1.65\,\text{V}$ — half of $V_{ref}$, as expected from the midpoint code. (Aside: one LSB here is $3.3/4096 \approx 0.806\,\text{mV}$, the finest step this converter can resolve.)</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="stm06-adc-dma-config">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — configure ADC + DMA (circular)</div>
+        <div class="ex-q">Sketch the HAL configuration to stream <strong>two</strong> channels (PA0 and PA1) continuously into a circular RAM buffer, then start it. Name every setting that makes it (a) scan two channels, (b) restart forever, and (c) keep DMA looping. Mark the buffer correctly so the optimizer doesn't bite you.</div>
+        <details class="ex-acc">
+          <summary>Hint</summary>
+          <div class="acc-body">Three <code>Init</code> flags do the heavy lifting: <code>ScanConvMode = ENABLE</code>, <code>ContinuousConvMode = ENABLE</code>, and <code>DMAContinuousRequests = ENABLE</code>. Set <code>NbrOfConversion = 2</code> and give each channel a <code>Rank</code>. The DMA stream itself must be configured as <strong>circular</strong> (CubeMX does this when you set the DMA request to Circular mode). Start with <code>HAL_ADC_Start_DMA(&amp;hadc1, (uint32_t*)buf, 2)</code>. And declare the buffer <code>volatile</code>.</div>
+        </details>
+        <details class="ex-acc">
+          <summary>Show one solution</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">adc2ch_dma.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">volatile uint16_t buf[2];          // DMA writes here; volatile is mandatory
+
+void MX_ADC1_Init(void) {
+  hadc1.Instance = ADC1;
+  hadc1.Init.ClockPrescaler   = ADC_CLOCK_SYNC_PCLK_DIV4; // keep f_ADC &lt;= 36 MHz
+  hadc1.Init.Resolution       = ADC_RESOLUTION_12B;
+  hadc1.Init.ScanConvMode     = ENABLE;     // (a) walk the 2-channel list
+  hadc1.Init.ContinuousConvMode = ENABLE;   // (b) restart the scan forever
+  hadc1.Init.DMAContinuousRequests = ENABLE;// (c) keep DMA requests flowing
+  hadc1.Init.NbrOfConversion  = 2;          // two ranks in the sequence
+  hadc1.Init.EOCSelection     = ADC_EOC_SINGLE_CONV;
+  HAL_ADC_Init(&amp;hadc1);
+
+  ADC_ChannelConfTypeDef sc = {0};
+  sc.SamplingTime = ADC_SAMPLETIME_15CYCLES;
+  sc.Channel = ADC_CHANNEL_0; sc.Rank = 1; HAL_ADC_ConfigChannel(&amp;hadc1, &amp;sc); // PA0 → buf[0]
+  sc.Channel = ADC_CHANNEL_1; sc.Rank = 2; HAL_ADC_ConfigChannel(&amp;hadc1, &amp;sc); // PA1 → buf[1]
+}
+
+void start(void) {
+  // The DMA stream is set to CIRCULAR in CubeMX, so this never has to be
+  // re-armed: conversions stream into buf[] endlessly with zero CPU.
+  HAL_ADC_Start_DMA(&amp;hadc1, (uint32_t *)buf, 2);
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">The three <code>ENABLE</code>s are the scan/continuous/DMA trio; <code>Rank</code> maps each pin to its buffer slot; circular DMA (a stream setting, not an ADC field) makes it perpetual; and <code>volatile</code> stops the compiler from caching stale buffer reads. Drop any one of these and the stream stalls, misorders, or reads garbage — the four classic ADC-DMA bugs.</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> Chapter recap</div>
+        <p>You can now convert between ADC codes and volts ($V = \tfrac{\text{adc}}{4095}V_{ref}$, LSB $\approx 0.806$ mV at 3.3 V), budget conversion time from $T_{conv} = (T_{sampling}+12.5)/f_{ADC}$ while respecting the ~36 MHz F4 ADC-clock ceiling, choose between single / continuous / scan / injected modes, and — the headline — stream multiple channels into a circular RAM buffer with <code>HAL_ADC_Start_DMA</code> so the CPU spends zero cycles per sample. You can drive a DAC ($V_{out} = \tfrac{\text{val}}{4095}V_{ref}$), trade throughput for resolution with oversampling ($N = 4^n$ samples → $+n$ effective bits, $\sqrt{N}$ noise reduction), and arm an analog watchdog as a hardware safety alarm. Next we'll put a timer in charge of <em>when</em> conversions fire, and synchronize the ADC to a PWM edge for precise current sensing.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="Back to top">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Foundations: MCUs, the AVR & Your First Sketch — Embedded Mastery</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="track-arduino" data-track="arduino" data-chapter="01-intro">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">Arduino · Ch 01</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Arduino Track · Chapter 01 · Beginner</div>
+        <h1>Foundations: Microcontrollers, the AVR &amp; Your First Sketch</h1>
+        <p>Before you write a single line, you need a correct mental model of <em>what</em> you are programming. We build that model from the silicon up — then make an LED blink and understand <em>every</em> nanosecond of why it works.</p>
+        <div class="meta">
+          <span>⏱ ~35 min</span><span>🧠 Mental model</span><span>⚡ First hardware</span><span>🔧 Toolchain</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="what-is-mcu"><span class="sec-no">1</span>What <em>is</em> a microcontroller?</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Your laptop is a <strong>computer</strong>: a CPU plus separate chips for memory, storage, graphics, and I/O, all wired together on a big board. A <strong>microcontroller (MCU)</strong> shrinks that entire idea onto <em>one</em> chip — CPU, memory, and peripherals fused into a single sliver of silicon the size of a fingernail. It costs a couple of dollars, sips milliwatts, and boots in microseconds with no operating system in sight.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence model</div>
+        <p>A microcontroller is a <strong>tiny, self-contained computer that runs exactly one program forever</strong>, talking directly to the physical world through its pins.</p>
+      </div>
+
+      <p>The "Arduino" on your desk is a convenient <em>board</em> built around an MCU. On the classic <strong>Arduino Uno</strong>, that MCU is Microchip's <strong>ATmega328P</strong>, an 8-bit AVR chip. The board adds a USB connector, a voltage regulator, a clock crystal, and header pins — conveniences. The brain is the 328P.</p>
+
+      <div class="mermaid">
+flowchart TB
+    subgraph CHIP["ATmega328P — one chip"]
+        CPU["8-bit AVR CPU core<br/>(executes instructions)"]
+        FLASH["Flash 32 KB<br/>(your program)"]
+        SRAM["SRAM 2 KB<br/>(variables)"]
+        EE["EEPROM 1 KB<br/>(saved settings)"]
+        PERIPH["Peripherals:<br/>Timers · ADC · UART · SPI · I²C · GPIO"]
+        CPU --- FLASH
+        CPU --- SRAM
+        CPU --- EE
+        CPU --- PERIPH
+    end
+    PERIPH --> PINS(["Physical pins → LEDs, sensors, motors"])
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Key distinction</div>
+        <p>A <strong>microprocessor</strong> (like in a PC) needs external chips to do anything. A <strong>microcontroller</strong> already contains memory and peripherals — it is "ready to run the physical world" the instant it powers on.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="the-atmega"><span class="sec-no">2</span>Anatomy of the ATmega328P</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>what's inside</small></div>
+      <p>Three things dominate how you write embedded code: <strong>how fast</strong> the CPU runs, <strong>how much memory</strong> you get, and <strong>which memory holds what</strong>. The 328P is deliberately tiny — and that scarcity shapes every decision you make later.</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Resource</th><th>ATmega328P (Uno)</th><th>Your laptop</th><th>Ratio</th></tr></thead>
+        <tbody>
+          <tr><td>Clock speed</td><td><code>16 MHz</code></td><td>~3 GHz</td><td>~190× slower</td></tr>
+          <tr><td>Program memory (Flash)</td><td><code>32 KB</code></td><td>~512 GB SSD</td><td>~16 million×</td></tr>
+          <tr><td>RAM (SRAM)</td><td><code>2 KB</code></td><td>~16 GB</td><td>~8 million×</td></tr>
+          <tr><td>CPU width</td><td>8-bit</td><td>64-bit</td><td>—</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Three memories, three jobs</div>
+        <p><strong>Flash (32 KB)</strong> — non-volatile; holds your compiled <em>program</em>. Survives power loss.<br>
+        <strong>SRAM (2 KB)</strong> — volatile; holds <em>variables</em> while running. Lost on power-off.<br>
+        <strong>EEPROM (1 KB)</strong> — non-volatile; holds <em>settings</em> you choose to persist (e.g. a calibration value).</p>
+      </div>
+
+      <p>The AVR uses a <strong>Harvard architecture</strong>: program (Flash) and data (SRAM) live on <em>separate</em> buses and address spaces. That is why a string constant <code>"hello"</code> secretly lives in Flash but gets copied to your precious SRAM at startup — a classic source of "why did I run out of RAM?" surprises we'll defuse in Chapter 8.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>budgeting scarce memory</small></div>
+      <p>Memory math is constant in embedded work. Suppose you log temperature samples as 16-bit integers (<code>int16_t</code> = 2 bytes each). How many fit in SRAM, ignoring overhead?</p>
+
+      <div class="math-box">
+      $$ N_{\max} = \left\lfloor \frac{\text{SRAM}}{\text{bytes per sample}} \right\rfloor = \left\lfloor \frac{2048 \text{ B}}{2 \text{ B}} \right\rfloor = 1024 \text{ samples} $$
+      </div>
+
+      <p>In reality the stack, globals, and the Arduino core libraries already claim a few hundred bytes — so plan for headroom. This back-of-envelope habit is the difference between firmware that runs for years and firmware that mysteriously corrupts itself at 3 a.m.</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="toolchain"><span class="sec-no">3</span>How your code becomes a blinking light</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the pipeline</small></div>
+      <p>When you press <kbd>Upload</kbd>, a surprising amount happens. Your human-readable C++ is transformed, in stages, into raw machine code, then squirted byte-by-byte into the chip's Flash. Knowing this pipeline turns "it won't compile" from panic into diagnosis.</p>
+
+      <div class="mermaid">
+flowchart LR
+    A["Sketch<br/>blink.ino"] --> B["Preprocess<br/>(+ Arduino core)"]
+    B --> C["avr-gcc<br/>compile → .o"]
+    C --> D["Link<br/>→ .elf"]
+    D --> E["Extract<br/>→ .hex"]
+    E --> F["avrdude<br/>upload via USB"]
+    F --> G(["Bootloader writes<br/>Flash → runs"])
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> What the IDE hides</div>
+        <p>Your <code>.ino</code> file is not quite C++. The IDE concatenates your tabs, auto-generates function prototypes, wraps everything with the Arduino core, and inserts a hidden <code>main()</code>. The "magic" is just preprocessing — you can replicate it all on a command line with <code>arduino-cli compile</code>.</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — the bootloader</div>
+        <p>How does a fresh chip accept code over plain USB with no programmer? A small program called the <strong>bootloader</strong> lives in a protected corner of Flash. On reset it listens for ~1 second; if the IDE is talking, it writes the incoming bytes into Flash, then jumps to your program. That 1-second listen is exactly why an Uno takes a beat to start after power-up.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="sketch-anatomy"><span class="sec-no">4</span>The anatomy of a sketch: <code>setup()</code> &amp; <code>loop()</code></h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>run once, then forever</small></div>
+      <p>Every Arduino sketch has exactly two required functions. <code>setup()</code> runs <strong>once</strong> at boot — configure your pins here. <code>loop()</code> then runs <strong>over and over, forever</strong>, as fast as the CPU can go. There is no <code>return</code>, no "end of program" — embedded software never stops.</p>
+
+      <div class="mermaid">
+flowchart TB
+    P([Power / Reset]) --> S["setup() — runs ONCE"]
+    S --> L["loop() body"]
+    L --> L2{reached end?}
+    L2 -- yes --> L
+    L2 -. never exits .-> X[(halt)]
+    style X stroke-dasharray: 5 5,opacity:0.3
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> The hidden <code>main()</code></div>
+        <p>Behind the scenes the Arduino core <em>does</em> have a standard C++ <code>main()</code>. It is roughly: <code>int main(){ init(); setup(); for(;;){ loop(); } }</code>. So <code>loop()</code> is literally called inside an infinite <code>for(;;)</code>. You are always writing inside an eternal loop.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="first-blink"><span class="sec-no">5</span>Your first program: Blink, fully annotated</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">blink.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">// The Uno has a built-in LED wired to digital pin 13.
+// LED_BUILTIN is a named constant that equals 13 on the Uno.
+
+void setup() {
+  // Run ONCE. Configure pin 13 as an OUTPUT so the MCU
+  // can DRIVE a voltage onto it (instead of listening).
+  pinMode(LED_BUILTIN, OUTPUT);
+}
+
+void loop() {
+  // Run FOREVER.
+  digitalWrite(LED_BUILTIN, HIGH);  // 5 V on the pin → LED on
+  delay(500);                       // do nothing for 500 ms
+  digitalWrite(LED_BUILTIN, LOW);   // 0 V on the pin → LED off
+  delay(500);                       // wait another 500 ms
+}                                   // loop() returns → core calls it again
+</code></pre>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> What each call really does</div>
+        <p><code>pinMode(pin, OUTPUT)</code> flips a bit in a hardware register so the pin becomes a tiny controllable voltage source. <code>digitalWrite(pin, HIGH)</code> sets the pin to ~5 V; <code>LOW</code> sets it to 0 V. <code>delay(ms)</code> spins the CPU in a counting loop doing nothing useful for that many milliseconds. (That "doing nothing" is a sin we'll repent for in Chapter 5.)</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — forgetting <code>pinMode</code></div>
+        <p>If you skip <code>pinMode(.., OUTPUT)</code>, the pin stays an <em>input</em> and <code>digitalWrite(.., HIGH)</code> quietly enables an internal pull-up resistor instead of driving the pin. Your LED stays dim or dark and nothing errors. Always configure direction first.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="timing-math"><span class="sec-no">6</span>Timing math: clocks, cycles &amp; the meaning of 16 MHz</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>where time comes from</small></div>
+      <p>The Uno's crystal oscillates at <span>$f_{\text{clk}} = 16\,\text{MHz} = 16{\times}10^6$</span> cycles per second. Each instruction takes one or more <em>clock cycles</em>. The duration of a single cycle is the reciprocal:</p>
+
+      <div class="math-box">
+        $$ T_{\text{cycle}} = \frac{1}{f_{\text{clk}}} = \frac{1}{16\times10^6\,\text{Hz}} = 62.5\,\text{ns} $$
+      </div>
+
+      <p>So in the half-second your LED is on, the CPU executes about</p>
+
+      <div class="math-box">
+        $$ N = f_{\text{clk}} \cdot t = 16\times10^6 \,\tfrac{\text{cyc}}{\text{s}} \times 0.5\,\text{s} = 8\times10^6 \text{ cycles} $$
+      </div>
+
+      <p>— eight million cycles, almost all spent inside <code>delay()</code> doing absolutely nothing. Now flip it around: the <strong>blink frequency</strong> and <strong>duty cycle</strong> of our square wave are</p>
+
+      <div class="math-box">
+        $$ T = t_{\text{on}} + t_{\text{off}}, \qquad f = \frac{1}{T}, \qquad D = \frac{t_{\text{on}}}{T}\times100\% $$
+      </div>
+
+      <p>For <span>$t_{\text{on}} = t_{\text{off}} = 500\,\text{ms}$</span>: period <span>$T = 1\,\text{s}$</span>, frequency <span>$f = 1\,\text{Hz}$</span>, duty <span>$D = 50\%$</span>. Hold this formula — it is the seed of <strong>PWM</strong> in Chapter 4, where we blink so fast the eye sees brightness instead of flashing.</p>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-blink-wrap">
+        <div class="sim-title">🔬 Live: blink-waveform explorer</div>
+        <canvas id="sim-blink"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">Drag the sliders: watch how on/off times reshape the square wave and recompute <em>T</em>, <em>f</em>, and duty in real time.</p>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="why-it-matters"><span class="sec-no">7</span>Real case: the humble status LED</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>this scales to products</small></div>
+      <p>"Blink" feels like a toy, but the blinking status LED is everywhere in shipped hardware — routers, 3-D printers, medical devices, satellites. It is the cheapest possible <strong>human-readable diagnostic</strong>: a device with no screen can still tell you "booting" (fast blink), "running" (slow pulse), or "fault" (SOS pattern) using one LED and zero extra cost.</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — heartbeat as a watchdog</div>
+        <p>Mature firmware often toggles a "heartbeat" LED from inside its main loop. If the LED <em>stops</em> blinking, an engineer instantly knows the loop has hung — no debugger required. The blink pattern <em>is</em> the liveness signal. You just learned a real production technique.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>⑤ Your turn</h2>
+      <div class="layer"><span class="step">⑤</span> Practice <small>you write &amp; decide</small></div>
+      <p>Three checks. Tap an answer, type a number, or reveal a coding challenge. Your progress is saved on this device and shown on the home page.</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="ard01-memory">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You define <code>int sensorValue = 0;</code> inside <code>loop()</code>. While the program runs, where does that variable physically live?</div>
+        <ul class="ex-options">
+          <li data-correct="false">Flash memory</li>
+          <li data-correct="true">SRAM</li>
+          <li data-correct="false">EEPROM</li>
+          <li data-correct="false">The bootloader</li>
+        </ul>
+        <div class="ex-explain">Running variables live in <strong>SRAM</strong> (volatile, 2 KB on the Uno). Flash holds the <em>program</em>; EEPROM holds settings you explicitly persist. This is the Harvard-architecture split in action.</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="ard01-cycletime" data-answer="62.5" data-tol="0.6">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">A different AVR board runs at <strong>16 MHz</strong>. How long is one clock cycle, in <strong>nanoseconds</strong>? (Recall $T_{\text{cycle}} = 1/f_{\text{clk}}$, and $1\,\text{s}=10^9\,\text{ns}$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="ns"><span class="ex-unit">ns</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$T = \dfrac{1}{16\times10^6} = 62.5\times10^{-9}\,\text{s} = 62.5\,\text{ns}$. At 8 MHz it would be 125 ns; at 1 MHz, 1000 ns. Cycle time is just the reciprocal of clock frequency.</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="ard01-sos">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — Morse SOS</div>
+        <div class="ex-q">Modify Blink so the LED signals <strong>SOS</strong>: three short flashes (·) , three long (–), three short (·), then a long pause. Short = 200 ms on, long = 600 ms on, gap between flashes = 200 ms off. Think about how to avoid copy-pasting <code>digitalWrite</code> nine times.</div>
+        <details class="ex-acc">
+          <summary>Hint</summary>
+          <div class="acc-body">Write one helper, <code>flash(int onMs)</code>, that turns the LED on for <code>onMs</code>, off for 200 ms. Then call it three times with 200, three with 600, three with 200, and add a long <code>delay(700)</code> at the end of <code>loop()</code>.</div>
+        </details>
+        <details class="ex-acc">
+          <summary>Show one solution</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">sos.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const int LED = LED_BUILTIN;
+
+void setup() { pinMode(LED, OUTPUT); }
+
+// one flash: on for onMs, then a 200 ms gap
+void flash(int onMs) {
+  digitalWrite(LED, HIGH); delay(onMs);
+  digitalWrite(LED, LOW);  delay(200);
+}
+
+void loop() {
+  for (int i = 0; i &lt; 3; i++) flash(200);   // S : · · ·
+  for (int i = 0; i &lt; 3; i++) flash(600);   // O : – – –
+  for (int i = 0; i &lt; 3; i++) flash(200);   // S : · · ·
+  delay(700);                                // word gap
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">The <code>flash()</code> helper is the lesson: factor repetition into a function. This is also a preview of why <code>delay()</code> is limiting — a real product needs to read buttons <em>while</em> blinking, which blocking <code>delay()</code> forbids. Chapter 5 fixes exactly this.</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> Chapter recap</div>
+        <p>You can now explain what an MCU is, name the 328P's three memories and their jobs, trace the upload pipeline, read a sketch's <code>setup()</code>/<code>loop()</code> structure, and compute clock-cycle and blink timing from first principles. Next we make pins actually <em>do</em> things — and meet the resistor math that keeps your hardware alive.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="Back to top">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+
+<!-- chapter-specific simulator -->
+<script>
+EM.sim("sim-blink", {
+  height: 230,
+  params: [
+    { key: "on",  label: "t_on  (ms)",  min: 50, max: 1500, step: 50, value: 500, unit: "ms" },
+    { key: "off", label: "t_off (ms)", min: 50, max: 1500, step: 50, value: 500, unit: "ms" }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h, pad = 40 * dpr;
+    var hi = pad, lo = H - pad;                         // y for HIGH / LOW
+    ctx.lineWidth = 1 * dpr; ctx.strokeStyle = "#262d3a";
+    ctx.fillStyle = "#6e7681"; ctx.font = (12 * dpr) + "px monospace";
+    // baseline + level guides
+    ctx.beginPath(); ctx.moveTo(pad, hi); ctx.lineTo(W - 10 * dpr, hi);
+    ctx.moveTo(pad, lo); ctx.lineTo(W - 10 * dpr, lo); ctx.stroke();
+    ctx.fillText("5V", 6 * dpr, hi + 4 * dpr);
+    ctx.fillText("0V", 6 * dpr, lo + 4 * dpr);
+
+    var T = v.on + v.off;                               // ms per period
+    var pxPerMs = (W - pad - 14 * dpr) / (2.5 * T);     // show ~2.5 periods
+    var x = pad, t = 0, level = 1;
+    ctx.beginPath(); ctx.moveTo(x, level ? hi : lo);
+    ctx.strokeStyle = "#2ec4b6"; ctx.lineWidth = 2.5 * dpr;
+    while (x < W - 14 * dpr) {
+      var seg = (level ? v.on : v.off) * pxPerMs;
+      ctx.lineTo(x + seg, level ? hi : lo);             // horizontal
+      x += seg;
+      level = 1 - level;
+      ctx.lineTo(x, level ? hi : lo);                   // vertical edge
+    }
+    ctx.stroke();
+
+    var f = 1000 / T, D = (v.on / T) * 100;
+    return "Period <b>T</b> = " + T + " ms &nbsp;·&nbsp; Frequency <b>f</b> = " +
+           (Math.round(f * 100) / 100) + " Hz &nbsp;·&nbsp; Duty <b>D</b> = " +
+           (Math.round(D * 10) / 10) + " %";
+  }
+});
+</script>
+</body>
+</html>

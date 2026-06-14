@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Master Capstone: Real-Time Motor Control with PID — Embedded Mastery</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="track-stm32" data-track="stm32" data-chapter="10-capstone">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">STM32 · Ch 10</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">STM32 Track · Chapter 10 · Master</div>
+        <h1>Master Capstone: Real-Time Motor Control with PID</h1>
+        <p>Everything in this track was a piece of one machine. Now we assemble it: a quadrature encoder feeding a timer, a fixed-rate PID running in an interrupt, PWM driving an H-bridge, and telemetry streaming out over UART+DMA — a closed-loop DC-motor speed controller that holds a setpoint while the world pushes back. This is the grand finale, where clocks, timers, interrupts, and DMA stop being topics and become a <em>system</em>.</p>
+        <div class="meta">
+          <span>⏱ ~60 min</span><span>🧠 Control theory</span><span>⚡ Full firmware</span><span>🔧 Tuning &amp; debug</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="system-overview"><span class="sec-no">1</span>The whole machine, one loop</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>A motor is stubborn. Tell it "spin at 3000 RPM" with a fixed voltage and it will obey only until something changes — a heavier load, a warmer winding, a lower battery — and then it drifts. <strong>Open-loop</strong> control (pick a duty cycle and hope) cannot fight back. The fix is the oldest idea in engineering: <em>measure the output, compare it to what you wanted, and correct the difference, continuously.</em> That is a <strong>closed loop</strong>, and the controller in the middle is a <strong>PID</strong>.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence model</div>
+        <p>A feedback controller spins a wheel of <strong>measure → compare → correct</strong> thousands of times a second, nudging the actuator just enough to drive the <em>error</em> — the gap between setpoint and reality — toward zero.</p>
+      </div>
+
+      <p>Here is the entire system as a control-loop block diagram. Trace the signal once and you'll see every chapter of this track wearing a job title:</p>
+
+      <div class="mermaid">
+flowchart LR
+    SP([Setpoint<br/>RPM target]) --> SUM(( + / − ))
+    SUM -- "error e" --> PID["PID controller<br/>(control ISR, Ts=1ms)"]
+    PID -- "u → duty + dir" --> PWM["TIM1 PWM<br/>+ H-bridge"]
+    PWM -- "voltage" --> M(["DC motor"])
+    M -- "shaft" --> ENC["Quadrature<br/>encoder"]
+    ENC --> CNT["TIM2 encoder mode<br/>→ counts → RPM"]
+    CNT -- "measured RPM" --> SUM
+    PID -. "telemetry" .-> UART["UART + DMA<br/>→ host"]
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Who does what (the track, assembled)</div>
+        <p><strong>Ch 2 — Clocks:</strong> the 84&nbsp;MHz timer clock that times everything.<br>
+        <strong>Ch 4/5 — Timers &amp; interrupts:</strong> a timer fires the control ISR at a <em>fixed</em> rate; another counts encoder edges; a third generates PWM.<br>
+        <strong>Ch 5 — Encoder &amp; PWM modes:</strong> TIM2 in encoder mode is the speed sensor; TIM1 in PWM mode is the throttle.<br>
+        <strong>Ch 7/8 — UART &amp; DMA:</strong> telemetry leaves the chip without the CPU babysitting it.<br>
+        <strong>This chapter — PID:</strong> the brain that ties them into a loop.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="requirements"><span class="sec-no">2</span>Requirements &amp; module map</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>spec before silicon</small></div>
+      <p>Before touching a register, pin down what "good" means. A speed controller has measurable requirements, and they drive every later choice — clock rate, sample period, even which timer goes where.</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Requirement</th><th>Target</th><th>Why it matters</th></tr></thead>
+        <tbody>
+          <tr><td>Control rate <span>$f_s = 1/T_s$</span></td><td><code>1 kHz</code> (Ts = 1 ms)</td><td>Fast vs. motor's mechanical time constant; fixed for stable integral/derivative</td></tr>
+          <tr><td>Steady-state error</td><td><code>≈ 0 RPM</code></td><td>The integral term's whole job</td></tr>
+          <tr><td>Settling time</td><td>&lt; 200 ms to a step</td><td>Feels "snappy", not sloppy</td></tr>
+          <tr><td>Overshoot</td><td>&lt; 10 %</td><td>Protects mechanics; limits current spikes</td></tr>
+          <tr><td>Telemetry rate</td><td><code>50–100 Hz</code></td><td>Enough to plot a step response; cheap via DMA</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p>The firmware is four cooperating modules. Keep them decoupled — the PID should not know it is driving an H-bridge, and the encoder reader should not know about PID. Clean seams are what let you swap a motor or retune without rewriting everything.</p>
+
+      <div class="mermaid">
+flowchart TB
+    subgraph APP["Application"]
+        MAIN["main(): config + telemetry"]
+        ISR["TIM6 control ISR<br/>@ 1 kHz"]
+    end
+    subgraph DRV["Drivers"]
+        ENC["encoder_read_rpm()"]
+        MOT["motor_set(duty, dir)"]
+        TEL["telemetry_send_dma()"]
+        PID["pid_update(e)"]
+    end
+    ISR --> ENC
+    ISR --> PID
+    PID --> MOT
+    ISR --> TEL
+    MAIN --> ISR
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Timer assignment on an STM32F4</div>
+        <p>We use a Nucleo-class part (e.g. <strong>STM32F411</strong>, Cortex-M4 @ 100&nbsp;MHz). <strong>TIM2</strong> (32-bit, on APB1) = encoder counter. <strong>TIM1</strong> (advanced, on APB2) = complementary PWM for the H-bridge. <strong>TIM6</strong> (basic) = the 1&nbsp;kHz control-loop tick. Three timers, three jobs — no contention.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="measuring-speed"><span class="sec-no">3</span>Measuring speed: from edges to RPM</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>counting teeth</small></div>
+      <p>A quadrature encoder bolted to the motor shaft puts out two square waves, <strong>A</strong> and <strong>B</strong>, 90° out of phase. The phase order tells direction; the edge count tells distance. In <strong>encoder mode</strong> (Ch&nbsp;5) the timer's hardware does the decoding for free: every A/B edge increments or decrements <code>TIMx-&gt;CNT</code>. The CPU never sees an interrupt per edge — it just reads a register that already holds the position. To get <em>speed</em>, we sample that counter once per control period and look at how much it moved.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive RPM honestly</small></div>
+      <p>Let <span>$\text{CPR}$</span> be the encoder's <strong>counts per revolution</strong>. A datasheet usually quotes <em>lines</em> (PPR); in 4× quadrature decoding the timer counts every edge of both channels, so</p>
+
+      <div class="math-box">
+        $$ \text{CPR} = 4 \times \text{PPR} $$
+      </div>
+
+      <p>Say the shaft turns through <span>$\Delta\text{counts}$</span> in one control period <span>$T_s$</span> (seconds), and a gearbox of ratio <span>$G$</span> sits between motor and output (encoder on the motor side). Revolutions of the <em>output</em> shaft in that window are <span>$\Delta\text{counts}/(\text{CPR}\cdot G)$</span>, and there are <span>$60/T_s$</span> windows per minute, so:</p>
+
+      <div class="math-box">
+        $$ \text{RPM} = \frac{\Delta\text{counts}}{\text{CPR}\cdot G}\cdot\frac{60}{T_s} $$
+      </div>
+
+      <p>Worked example: a 500-line encoder (<span>$\text{PPR}=500 \Rightarrow \text{CPR}=2000$</span>), no gearbox (<span>$G=1$</span>), <span>$T_s = 1\,\text{ms}$</span>. If <span>$\Delta\text{counts}=100$</span> in one tick:</p>
+
+      <div class="math-box">
+        $$ \text{RPM} = \frac{100}{2000\cdot 1}\cdot\frac{60}{0.001} = 0.05 \times 60000 = 3000\ \text{RPM} $$
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — counter wraparound</div>
+        <p>The delta must wrap correctly. On a 16-bit counter, going from <code>65530</code> to <code>4</code> is <strong>+10</strong>, not <strong>−65526</strong>. Compute <code>delta = (int16_t)(now - prev)</code> and let two's-complement subtraction do the wrap for you, or use a 32-bit timer (TIM2/TIM5) and a wider cast. Get this wrong and your "speed" glitches violently once per overflow.</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <div class="codeblock">
+        <div class="code-head">encoder.c <span class="lang">C / STM32 (CMSIS)</span></div>
+<pre><code class="language-c">// TIM2 is preconfigured in encoder mode (TI1+TI2, 4x).
+// CPR = 4 * PPR. Ts is the control period in seconds.
+#define ENC_CPR   2000.0f   // 500-line encoder, 4x quadrature
+#define ENC_GEAR  1.0f
+#define CTRL_TS   0.001f    // 1 kHz
+
+static uint32_t enc_prev = 0;
+
+// Call exactly once per control period.
+float encoder_read_rpm(void) {
+    uint32_t now = TIM2-&gt;CNT;                 // hardware-decoded position
+    // signed delta with correct 32-bit wrap
+    int32_t  d   = (int32_t)(now - enc_prev);
+    enc_prev = now;
+    // RPM = (d / (CPR*GEAR)) * (60 / Ts)
+    return ((float)d / (ENC_CPR * ENC_GEAR)) * (60.0f / CTRL_TS);
+}
+</code></pre>
+      </div>
+      <p>One subtraction, one cast, one multiply — that is the entire speed sensor. All the heavy lifting (debouncing edges, decoding direction) is done by the timer peripheral while the CPU sleeps. That is the whole point of using the silicon instead of polling pins.</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="pid-control"><span class="sec-no">4</span>The PID controller</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>three voices arguing</small></div>
+      <p>PID is three corrections summed. <strong>P</strong>roportional reacts to the error <em>now</em> — bigger gap, harder push, but pure P always leaves a residual offset. <strong>I</strong>ntegral remembers <em>past</em> error, accumulating until even a tiny steady gap is stamped out — it kills offset but can overshoot. <strong>D</strong>erivative anticipates the <em>future</em> by reacting to how fast the error is changing — it damps, like a shock absorber. Tune their volumes and you get a controller that arrives fast, settles flat, and doesn't ring.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>continuous, then discrete</small></div>
+      <p>With error <span>$e(t) = \text{setpoint} - \text{measured}$</span>, the classic continuous control law is:</p>
+
+      <div class="math-box">
+        $$ u(t) = K_p\,e(t) + K_i\!\int_0^{t}\! e(\tau)\,d\tau + K_d\,\frac{de(t)}{dt} $$
+      </div>
+
+      <p>A microcontroller can't integrate continuously — it runs in discrete ticks of width <span>$T_s$</span>. Replace the integral with a running sum (rectangular rule) and the derivative with a backward difference. At step <span>$k$</span>:</p>
+
+      <div class="math-box">
+        $$ u_k = K_p\,e_k \;+\; K_i\,T_s\!\sum_{j=0}^{k} e_j \;+\; K_d\,\frac{e_k - e_{k-1}}{T_s} $$
+      </div>
+
+      <p>Look closely at where <span>$T_s$</span> appears: it <strong>multiplies</strong> the integral and <strong>divides</strong> the derivative. The same <span>$K_i$</span> and <span>$K_d$</span> mean completely different things if <span>$T_s$</span> wanders. That single fact is why §6 exists — the loop <em>must</em> tick at a constant rate or your tuning is a lie.</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Anti-windup — the integral's dark side</div>
+        <p>When the motor saturates (duty pinned at 100%) the output can't grow, but <span>$\sum e_j$</span> keeps piling up. When the setpoint finally eases, that bloated integral takes ages to unwind, causing a huge overshoot. The cure is <strong>clamping</strong>: stop accumulating whenever the output is saturated, and bound the integral to the range that can actually produce a legal output:</p>
+        <p>$$ I_{\min} \le K_i\,T_s\!\sum e_j \le I_{\max}, \qquad I_{\max}=u_{\max} $$</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>the update function</small></div>
+      <div class="codeblock">
+        <div class="code-head">pid.c <span class="lang">C / STM32</span></div>
+<pre><code class="language-c">typedef struct {
+    float kp, ki, kd;     // gains
+    float ts;             // sample period [s]
+    float integ;          // running ACCUMULATED integral term (already * ki*ts)
+    float prev_e;         // e_{k-1}
+    float out_min, out_max;
+} pid_t;
+
+float pid_update(pid_t *p, float setpoint, float measured) {
+    float e = setpoint - measured;             // e_k
+
+    float P = p-&gt;kp * e;                        // proportional
+    p-&gt;integ += p-&gt;ki * p-&gt;ts * e;              // accumulate Ki*Ts*Σe
+    // clamp integral (anti-windup) BEFORE using it
+    if (p-&gt;integ &gt; p-&gt;out_max) p-&gt;integ = p-&gt;out_max;
+    if (p-&gt;integ &lt; p-&gt;out_min) p-&gt;integ = p-&gt;out_min;
+    float D = p-&gt;kd * (e - p-&gt;prev_e) / p-&gt;ts; // backward difference
+    p-&gt;prev_e = e;
+
+    float u = P + p-&gt;integ + D;
+    if (u &gt; p-&gt;out_max) u = p-&gt;out_max;        // clamp output
+    if (u &lt; p-&gt;out_min) u = p-&gt;out_min;
+    return u;                                   // signed: sign = direction
+}
+</code></pre>
+      </div>
+      <p>Note <code>u</code> is <em>signed</em>. Its magnitude is "how hard"; its sign is "which way". That sign is exactly what the H-bridge needs next.</p>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="pwm-hbridge"><span class="sec-no">5</span>Turning <em>u</em> into voltage: PWM &amp; the H-bridge</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>magnitude and direction</small></div>
+      <p>The PID hands us a signed number. A motor needs two things to act on it: <strong>how much</strong> average voltage (set by PWM duty cycle) and <strong>which polarity</strong> (set by an H-bridge's switch pattern). We split <code>u</code> into <code>|u|</code> → duty and <code>sign(u)</code> → direction pins.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>duty from PWM registers</small></div>
+      <p>From Ch&nbsp;5: a timer counts to <span>$\text{ARR}$</span> and the compare register <span>$\text{CCR}$</span> sets the duty. The PWM frequency and duty are:</p>
+
+      <div class="math-box">
+        $$ f_{\text{pwm}} = \frac{f_{\text{tim}}}{(\text{PSC}+1)(\text{ARR}+1)}, \qquad D = \frac{\text{CCR}}{\text{ARR}+1} $$
+      </div>
+
+      <p>On TIM1 clocked at <span>$f_{\text{tim}}=84\,\text{MHz}$</span> (APB2 timer clock), choosing <span>$\text{PSC}=0$</span> and <span>$\text{ARR}=4199$</span> gives <span>$f_{\text{pwm}} = 84{\times}10^6/4200 = 20\,\text{kHz}$</span> — above audible range, so the motor doesn't whine, and fine enough that <span>$\text{CCR}\in[0,4200]$</span> gives ~0.024% duty resolution.</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — why 20 kHz, not 1 kHz</div>
+        <p>Drone ESCs, e-bike controllers, and CNC spindle drivers nearly all run their motor PWM at 16–30&nbsp;kHz for one reason: human hearing tops out around 20&nbsp;kHz. Push the switching above that and the magnetostriction "whine" disappears into silence. Below it, every quadcopter on the bench screams. The control <em>loop</em> still runs at 1&nbsp;kHz; only the PWM carrier is fast. Keep the two rates separate in your head.</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>split sign and magnitude</small></div>
+      <div class="codeblock">
+        <div class="code-head">motor.c <span class="lang">C / STM32</span></div>
+<pre><code class="language-c">#define PWM_ARR   4199u            // 20 kHz @ 84 MHz, PSC=0
+
+// u is the signed PID output, here scaled so |u| in [0, 1].
+void motor_set(float u) {
+    // direction: drive the H-bridge enable pins
+    if (u &gt;= 0.0f) {
+        GPIOA-&gt;BSRR = (1u &lt;&lt; 8);          // IN1 = 1  (forward)
+        GPIOA-&gt;BSRR = (1u &lt;&lt; (9 + 16));   // IN2 = 0  (reset bit 9)
+    } else {
+        GPIOA-&gt;BSRR = (1u &lt;&lt; (8 + 16));   // IN1 = 0
+        GPIOA-&gt;BSRR = (1u &lt;&lt; 9);          // IN2 = 1  (reverse)
+        u = -u;                          // take magnitude
+    }
+    if (u &gt; 1.0f) u = 1.0f;
+    // magnitude -&gt; CCR.  D = CCR/(ARR+1)  =&gt;  CCR = D*(ARR+1)
+    TIM1-&gt;CCR1 = (uint32_t)(u * (PWM_ARR + 1));
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — shoot-through</div>
+        <p>An H-bridge has two transistors per leg. If the top and bottom of one leg are ever <em>both</em> on, you short the supply through them — a "shoot-through" that can vaporize the bridge in microseconds. Real gate drivers insert <strong>dead-time</strong> (a few hundred ns where both are off) between switching. TIM1 generates this in hardware via the <code>BDTR</code> register's <code>DTG</code> field. Never drive a half-bridge from naked GPIO without dead-time.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="fixed-rate-loop"><span class="sec-no">6</span>The fixed-rate control loop</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the metronome</small></div>
+      <p>The whole loop lives inside one timer interrupt that fires every <span>$T_s$</span>. Not "roughly every millisecond when the main loop gets around to it" — <em>exactly</em> every millisecond, jitter-free, because a hardware timer (TIM6) generates the interrupt independent of whatever else the CPU is doing. Inside the ISR we run the three steps and leave. Everything else (telemetry formatting, command parsing) happens in the slow main loop.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Why fixed <span>$T_s$</span> is non-negotiable</div>
+        <p>Recall the discrete law: the integral term is <span>$K_i T_s \sum e$</span> and the derivative is <span>$K_d (e_k - e_{k-1})/T_s$</span>. Both <strong>scale directly with <span>$T_s$</span></strong>. If the period jitters — say the ISR is sometimes delayed by a busy <code>printf</code> — then the effective <span>$K_i$</span> and <span>$K_d$</span> jitter with it. A controller tuned for 1&nbsp;ms behaves differently at 1.3&nbsp;ms: the derivative kick weakens, the integral over-accumulates, and a stable loop can start to ring or even go unstable. Fixed <span>$T_s$</span> is what makes the math you tuned actually <em>be</em> the math that runs.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>generating the 1 kHz tick</small></div>
+      <p>TIM6 on APB1 sees a 84&nbsp;MHz timer clock on this part. For a 1&nbsp;kHz update we want <span>$(\text{PSC}+1)(\text{ARR}+1) = f_{\text{tim}}/f_s$</span>:</p>
+
+      <div class="math-box">
+        $$ (\text{PSC}+1)(\text{ARR}+1) = \frac{84\times10^6}{1000} = 84000 $$
+      </div>
+
+      <p>Pick <span>$\text{PSC}=83$</span> (divide by 84 → 1&nbsp;MHz tick) and <span>$\text{ARR}=999$</span> (count 1000 ticks → 1&nbsp;ms). Clean, exact, and re-derivable in your head at 3&nbsp;a.m.</p>
+
+      <div class="mermaid">
+sequenceDiagram
+    participant T as TIM6 1kHz
+    participant ISR as Control ISR
+    participant M as Main loop
+    T->>ISR: UPDATE interrupt every 1 ms
+    ISR->>ISR: read RPM, e, pid_update, motor_set
+    ISR->>M: set telemetry-ready flag
+    M->>M: format + DMA send (slow, ~50 Hz)
+    Note over ISR,M: ISR is short and deterministic;<br/>heavy work stays in main
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="full-firmware"><span class="sec-no">7</span>The full integrated firmware</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>Here is the control ISR — the beating heart. It is deliberately tiny: three driver calls and a flag. Determinism comes from doing <em>less</em>, not more, inside the interrupt.</p>
+
+      <div class="codeblock">
+        <div class="code-head">control.c <span class="lang">C / STM32 (CMSIS)</span></div>
+<pre><code class="language-c">volatile float g_setpoint_rpm = 0.0f;   // commanded by host
+volatile float g_measured_rpm = 0.0f;   // last measurement (for telemetry)
+volatile uint8_t g_tlm_ready  = 0;      // ISR -&gt; main handshake
+
+static pid_t pid = {
+    .kp = 0.0008f, .ki = 0.012f, .kd = 0.00003f,
+    .ts = CTRL_TS, .integ = 0.0f, .prev_e = 0.0f,
+    .out_min = -1.0f, .out_max = 1.0f
+};
+
+// TIM6 fires this at EXACTLY 1 kHz. Keep it short and branch-light.
+void TIM6_DAC_IRQHandler(void) {
+    if (TIM6-&gt;SR &amp; TIM_SR_UIF) {        // confirm it was the update event
+        TIM6-&gt;SR &amp;= ~TIM_SR_UIF;        // clear the interrupt flag (W0C)
+
+        float rpm = encoder_read_rpm();           // 1. measure
+        float u   = pid_update(&amp;pid,
+                               g_setpoint_rpm, rpm); // 2. compute
+        motor_set(u);                              // 3. actuate
+
+        g_measured_rpm = rpm;          // publish for telemetry
+        g_tlm_ready    = 1;            // wake the main loop's sender
+    }
+}
+</code></pre>
+      </div>
+
+      <p>The <code>main()</code> brings up clocks and peripherals, then loops forever doing only the <em>slow</em>, non-critical work: throttling telemetry to ~50&nbsp;Hz and shipping it out via UART+DMA so the CPU never blocks on the slow serial line (Ch&nbsp;7/8).</p>
+
+      <div class="codeblock">
+        <div class="code-head">main.c <span class="lang">C / STM32</span></div>
+<pre><code class="language-c">static char tlm[48];
+
+int main(void) {
+    clock_config_84mhz();      // Ch 2: PLL -&gt; 84 MHz timer clock
+    encoder_init_tim2();       // Ch 5: TIM2 encoder mode, 4x
+    pwm_init_tim1_20khz();     // Ch 5: TIM1 PWM + dead-time (BDTR)
+    uart_dma_init();           // Ch 7/8: USART2 TX via DMA1
+    ctrl_timer_init_1khz();    // TIM6, PSC=83, ARR=999, enable IRQ
+
+    g_setpoint_rpm = 1500.0f;  // demo: hold 1500 RPM
+
+    uint32_t div = 0;
+    for (;;) {
+        if (g_tlm_ready) {
+            g_tlm_ready = 0;
+            // decimate 1 kHz -&gt; ~50 Hz so we don't flood the UART
+            if (++div &gt;= 20) {
+                div = 0;
+                int n = snprintf(tlm, sizeof tlm, "%ld,%ld\n",
+                                 (long)g_setpoint_rpm,
+                                 (long)g_measured_rpm);
+                uart_dma_send((uint8_t *)tlm, n);  // non-blocking
+            }
+        }
+        // CPU is otherwise free: sleep until next event
+        __WFI();
+    }
+}
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — why DMA, not <code>printf</code></div>
+        <p>At 115200&nbsp;baud, pushing ~14 bytes of telemetry byte-by-byte with a blocking <code>HAL_UART_Transmit</code> stalls the CPU for over a millisecond — long enough to <em>miss the next control tick</em>. Hand the buffer to DMA and the transfer happens in the background while the core sleeps in <code>__WFI()</code>. This is exactly the pattern in production motor drives, flight controllers, and lab instruments: the fast deterministic loop is sacred, and slow I/O is always offloaded. Break that rule and your loop jitter (and thus your tuning) falls apart.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="tuning-debug"><span class="sec-no">8</span>Tuning &amp; debugging</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>making it actually behave</small></div>
+      <p>Gains don't come from a formula — they come from a method. A Ziegler–Nichols-style procedure gives you a sane starting point:</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Step</th><th>What you do</th><th>What you watch</th></tr></thead>
+        <tbody>
+          <tr><td>1. P only</td><td>Set <span>$K_i=K_d=0$</span>; raise <span>$K_p$</span> until the speed <em>oscillates</em> steadily</td><td>Onset of sustained oscillation → that's the ultimate gain <span>$K_u$</span></td></tr>
+          <tr><td>2. Measure</td><td>Record the oscillation period <span>$T_u$</span></td><td>Period between peaks on the telemetry plot</td></tr>
+          <tr><td>3. Apply</td><td>Classic ZN: <span>$K_p=0.6K_u$</span>, <span>$K_i=1.2K_u/T_u$</span>, <span>$K_d=0.075K_uT_u$</span></td><td>Step response: rise, overshoot, settle</td></tr>
+          <tr><td>4. Trim</td><td>Nudge by feel: more <span>$K_d$</span> to damp ringing, less <span>$K_i$</span> to cut overshoot</td><td>Overshoot &lt; 10%, settle &lt; 200 ms</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p>The single most useful diagnostic is the <strong>step response</strong>: command a sudden jump in setpoint and plot measured RPM versus the commanded value over time. Its shape <em>is</em> your tuning, read at a glance:</p>
+
+      <div class="mermaid">
+flowchart LR
+    A["Step command"] --> B{Response shape?}
+    B -- "slow, never reaches" --> C["Ki too low"]
+    B -- "big overshoot + ring" --> D["Kp/Ki too high<br/>or Kd too low"]
+    B -- "noisy / twitchy" --> E["Kd too high<br/>(amplifies noise)"]
+    B -- "fast, small overshoot, flat" --> F["Tuned!"]
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Watching the loop from outside</div>
+        <p>Three windows into a running controller, cheapest first: <strong>(1)</strong> the UART+DMA telemetry stream → plot it live in a serial plotter. <strong>(2)</strong> <strong>SWD/ITM</strong> — toggle a GPIO at the top and bottom of the ISR and scope it; the pulse width <em>is</em> your ISR execution time, and its spacing proves <span>$T_s$</span> is jitter-free. <strong>(3)</strong> the debugger's live-watch on <code>g_measured_rpm</code> and <code>pid.integ</code> — a creeping integral that never settles is a windup smell.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Common failure modes</div>
+        <p><strong>Wrong feedback sign</strong> — encoder A/B swapped, so error correction <em>adds</em> energy: the motor slams to full speed. Fix: negate the count delta or swap channels.<br>
+        <strong>ISR overrun</strong> — the control ISR takes longer than <span>$T_s$</span>; the next tick is missed and <span>$T_s$</span> silently doubles. Fix: shrink the ISR, move work to main.<br>
+        <strong>Integral windup</strong> — slow recovery and big overshoot after saturation. Fix: the clamp from §4.<br>
+        <strong>Derivative noise</strong> — a noisy encoder makes <span>$D$</span> scream; filter the measurement or lower <span>$K_d$</span>.</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="extensions"><span class="sec-no">9</span>Where to go next: cascade &amp; current limits</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>how the pros build it</small></div>
+      <p>A single speed loop is the foundation; serious drives stack loops. The standard architecture is a <strong>cascade</strong>: an outer position/speed PID whose <em>output is the setpoint</em> of an inner current (torque) PID running even faster. The inner loop limits current directly — and current limiting <em>is</em> torque limiting <em>is</em> protecting your motor and bridge from burning up.</p>
+
+      <div class="mermaid">
+flowchart LR
+    SP([Speed SP]) --> S["Speed PID<br/>(1 kHz)"]
+    S -- "current SP" --> C["Current PID<br/>(10 kHz)"]
+    C -- "duty" --> P["PWM + bridge"]
+    P --> M(["Motor"])
+    M -- "shaft speed" --> S
+    M -- "phase current<br/>(ADC shunt)" --> C
+      </div>
+
+      <p>The inner loop reads motor current from a shunt resistor via the ADC, often synchronized to the PWM (sample at the bottom of the count, when current is steady). With that in place you get hard, fast current limiting — and you are one step from the <strong>field-oriented control (FOC)</strong> that drives every modern brushless motor, from drones to EVs. The pieces you assembled here are exactly the pieces FOC is built from.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The pattern generalizes</div>
+        <p>Measure with a timer/ADC, compute in a fixed-rate ISR, actuate with PWM, observe over DMA telemetry. Swap the plant — heater, drone attitude, battery charger, laser power — and the skeleton is <em>identical</em>. You didn't just learn motor control; you learned the shape of every real-time control system.</p>
+      </div>
+
+      <!-- ============================================================ §10 -->
+      <h2 id="your-turn"><span class="sec-no">10</span>⑤ Your turn</h2>
+      <div class="layer"><span class="step">⑤</span> Practice <small>you write &amp; decide</small></div>
+      <p>Three checks: one concept, one calculation, one piece of code. Your progress is saved on this device and shown on the home page.</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="stm10-fixed-rate">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">Why must the PID control loop run at a <strong>fixed</strong> sample period <span>$T_s$</span>, rather than just "as often as the main loop gets to it"?</div>
+        <ul class="ex-options">
+          <li data-correct="false">Because the encoder hardware only updates its counter on a fixed schedule</li>
+          <li data-correct="true">Because the discrete integral ($K_iT_s\sum e$) and derivative ($K_d\,\Delta e/T_s$) terms scale with $T_s$, so a jittering period changes the effective gains and can destabilize a tuned loop</li>
+          <li data-correct="false">Because PWM cannot be generated unless the loop period is constant</li>
+          <li data-correct="false">Because UART+DMA telemetry requires a constant data rate</li>
+        </ul>
+        <div class="ex-explain">The integral multiplies by <span>$T_s$</span> and the derivative divides by it. If <span>$T_s$</span> drifts (e.g. a blocking <code>printf</code> delays the ISR), the <em>effective</em> <span>$K_i$</span> and <span>$K_d$</span> drift too — the controller you carefully tuned is no longer the controller that runs, and a stable loop can begin to ring or go unstable. The encoder, PWM, and telemetry all tolerate jitter; the <em>control math</em> does not.</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="stm10-rpm" data-answer="3000" data-tol="1">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">A 500-line encoder (so $\text{CPR}=4\times500=2000$) is on the motor shaft with no gearbox ($G=1$). The control loop runs at 1&nbsp;kHz ($T_s=0.001\,\text{s}$). In one control period the counter advances by $\Delta\text{counts}=100$. What is the speed in <strong>RPM</strong>? Use $\text{RPM} = \dfrac{\Delta\text{counts}}{\text{CPR}\cdot G}\cdot\dfrac{60}{T_s}$.</div>
+        <input class="ex-input" type="number" step="any" placeholder="RPM"><span class="ex-unit">RPM</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$\text{RPM} = \dfrac{100}{2000\cdot 1}\cdot\dfrac{60}{0.001} = 0.05 \times 60000 = 3000\ \text{RPM}$. The fraction <span>$100/2000 = 0.05$</span> is revolutions in this 1&nbsp;ms window; multiplying by <span>$60/T_s = 60000$</span> windows-per-minute gives RPM. Halve <span>$\Delta\text{counts}$</span> and you halve the speed; double <span>$T_s$</span> and the same delta reads half the RPM.</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="stm10-pid-fn">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — the discrete PID update</div>
+        <div class="ex-q">Write a C function <code>pid_update(pid_t *p, float setpoint, float measured)</code> that implements the discrete law $u_k = K_p e_k + K_i T_s\sum e + K_d (e_k - e_{k-1})/T_s$, returns a signed output clamped to <code>[out_min, out_max]</code>, and includes integral anti-windup clamping. Assume the struct holds <code>kp, ki, kd, ts, integ, prev_e, out_min, out_max</code>.</div>
+        <details class="ex-acc">
+          <summary>Hint</summary>
+          <div class="acc-body">Compute <code>e = setpoint - measured</code> first. Accumulate the integral as <code>integ += ki*ts*e</code> and clamp <code>integ</code> to the output bounds <em>before</em> using it (that's the anti-windup). The derivative is <code>kd*(e - prev_e)/ts</code> — remember to update <code>prev_e</code> afterward. Sum the three terms, clamp the total, return it. The sign of the return value is the motor direction.</div>
+        </details>
+        <details class="ex-acc">
+          <summary>Show one solution</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">pid.c <span class="lang">C / STM32</span></div>
+<pre><code class="language-c">float pid_update(pid_t *p, float setpoint, float measured) {
+    float e = setpoint - measured;             // e_k
+
+    float P = p-&gt;kp * e;                        // proportional
+
+    p-&gt;integ += p-&gt;ki * p-&gt;ts * e;              // Ki*Ts*Σe
+    if (p-&gt;integ &gt; p-&gt;out_max) p-&gt;integ = p-&gt;out_max;  // anti-windup
+    if (p-&gt;integ &lt; p-&gt;out_min) p-&gt;integ = p-&gt;out_min;
+
+    float D = p-&gt;kd * (e - p-&gt;prev_e) / p-&gt;ts; // backward difference
+    p-&gt;prev_e = e;                             // store for next tick
+
+    float u = P + p-&gt;integ + D;
+    if (u &gt; p-&gt;out_max) u = p-&gt;out_max;        // output clamp
+    if (u &lt; p-&gt;out_min) u = p-&gt;out_min;
+    return u;   // |u| -&gt; PWM duty, sign(u) -&gt; H-bridge direction
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">Two clamps, not one: clamp the <em>integral</em> so it can't wind up past what the actuator can deliver, and clamp the <em>total output</em> to the legal duty range. Storing <code>prev_e</code> is what makes the derivative a true difference across ticks — and it's exactly why the loop must run at fixed <span>$T_s$</span>.</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> Chapter recap</div>
+        <p>You assembled the entire STM32 track into one closed-loop machine. You can derive RPM from encoder counts with correct wraparound, write the discrete PID law and explain why a fixed <span>$T_s$</span> is load-bearing, split a signed control output into PWM magnitude and H-bridge direction at 20&nbsp;kHz, run the whole loop in a deterministic 1&nbsp;kHz timer ISR while offloading telemetry to UART+DMA, and tune and debug it from a step response. The same skeleton — measure, compute in a fixed-rate ISR, actuate, observe over DMA — drives heaters, drones, and EV motors alike. That is the shape of real-time control, and now it's yours.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="Back to top">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

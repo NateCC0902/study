@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Master Capstone: A Complete Embedded System — Embedded Mastery</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="track-arduino" data-track="arduino" data-chapter="09-capstone">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">Arduino · Ch 09</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Arduino Track · Chapter 09 · Master</div>
+        <h1>Master Capstone: A Complete Embedded System</h1>
+        <p>Eight chapters of fragments — GPIO, ADC, PWM, timers, Serial, EEPROM, state machines, power. Now we fuse them into <em>one</em> real product: a <strong>Smart Environmental Monitor &amp; Alarm</strong>. By the end you will have a single sketch that reads the world, decides, acts, remembers, and sleeps — the full anatomy of shipped firmware.</p>
+        <div class="meta">
+          <span>⏱ ~75 min</span><span>🧠 Systems integration</span><span>⚡ Full build</span><span>🏭 Production patterns</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="system-overview"><span class="sec-no">1</span>The system: what we are building</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>see the whole machine first</small></div>
+      <p>A capstone is not "everything at once" — it is a <em>small system whose every part you already understand</em>, wired together so the seams show. Our device watches a room and warns you when it gets too hot. Concretely it must:</p>
+      <ul>
+        <li>read <strong>temperature</strong> from a TMP36 (or thermistor) on an analog pin — <em>Ch 3, ADC</em>;</li>
+        <li>read ambient <strong>light</strong> from an LDR voltage divider — <em>Ch 3</em>;</li>
+        <li>show <strong>status</strong> on the built-in LED (slow heartbeat = OK, fast = alarm) — <em>Ch 1/4</em>;</li>
+        <li>sound a <strong>PWM buzzer</strong> when temperature crosses a threshold, with <strong>hysteresis</strong> so it doesn't chatter — <em>Ch 4</em>;</li>
+        <li>let a <strong>button</strong> cycle display/alarm <strong>modes</strong> through a finite-state machine — <em>Ch 8</em>;</li>
+        <li>sample on a <strong>non-blocking schedule</strong> — never a <code>delay()</code> in the hot path — <em>Ch 5/8</em>;</li>
+        <li><strong>persist</strong> the alarm threshold and running min/max to <strong>EEPROM</strong> — <em>Ch 7</em>;</li>
+        <li><strong>stream</strong> readings over <strong>Serial</strong> as CSV for logging — <em>Ch 6</em>;</li>
+        <li><strong>sleep</strong> between samples to stretch a coin cell to months — <em>Ch 8, power</em>.</li>
+      </ul>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence model</div>
+        <p>Every embedded product is the same loop: <strong>sense → decide → act → remember → wait</strong>. The capstone just makes all five visible at once, with real parts and real numbers.</p>
+      </div>
+
+      <p>Here is the data flowing through the device. Sensors feed the MCU; the MCU drives outputs and persistence; the button feeds back into the decision logic.</p>
+
+      <div class="mermaid">
+flowchart LR
+    TMP["TMP36<br/>temp → A0"] --> MCU
+    LDR["LDR divider<br/>light → A1"] --> MCU
+    BTN["Button<br/>mode → D2"] --> MCU
+    MCU["ATmega328P<br/>sense · decide · act"]
+    MCU --> LED["Built-in LED<br/>D13 status"]
+    MCU --> BUZ["Buzzer<br/>D9 PWM alarm"]
+    MCU --> SER["Serial<br/>CSV log"]
+    MCU <--> EE[("EEPROM<br/>threshold · min/max")]
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="architecture"><span class="sec-no">2</span>Requirements &amp; modular architecture</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>cut the monolith into modules</small></div>
+      <p>The fastest way to write unmaintainable firmware is one giant <code>loop()</code> that does everything. The fix is <strong>modularity</strong>: each concern becomes a small unit with a clear job and a clean interface. You can then test, reason about, and replace each in isolation — the single most valuable habit separating a hobby sketch from a product.</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Module</th><th>Responsibility</th><th>Public interface</th><th>From chapter</th></tr></thead>
+        <tbody>
+          <tr><td><code>sensors</code></td><td>read raw ADC, convert to °C &amp; lux</td><td><code>readTempC()</code>, <code>readLight()</code></td><td>Ch 3</td></tr>
+          <tr><td><code>scheduler</code></td><td>fire tasks on a non-blocking cadence</td><td><code>due(&amp;last, period)</code></td><td>Ch 5/8</td></tr>
+          <tr><td><code>alarm</code></td><td>threshold + hysteresis, drive buzzer</td><td><code>updateAlarm(tempC)</code></td><td>Ch 4</td></tr>
+          <tr><td><code>fsm</code></td><td>mode transitions on button events</td><td><code>fsmStep(event)</code></td><td>Ch 8</td></tr>
+          <tr><td><code>store</code></td><td>load/save config &amp; stats to EEPROM</td><td><code>loadCfg()</code>, <code>saveCfg()</code></td><td>Ch 7</td></tr>
+          <tr><td><code>power</code></td><td>sleep between samples (WDT wake)</td><td><code>napMs()</code></td><td>Ch 8</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The architectural contract</div>
+        <p><code>loop()</code> becomes a thin <strong>orchestrator</strong>: it asks the scheduler "is a sample due?", calls <code>sensors</code>, hands the reading to <code>alarm</code> and <code>store</code>, lets <code>fsm</code> react to the button, then calls <code>power</code>. No business logic lives in <code>loop()</code> itself — it only <em>routes</em>. Each module hides its registers and magic numbers behind a verb.</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — why modules earn their keep</div>
+        <p>Swap the TMP36 for a thermistor next year? You touch <em>only</em> <code>sensors.readTempC()</code> — the alarm, FSM, EEPROM, and Serial code never know the part changed. That decoupling is exactly how a real firmware team ships a "v2 with a cheaper sensor" without a full rewrite. Interfaces are insurance.</p>
+      </div>
+
+      <h3 id="wiring">Wiring &amp; connections — the pins that ground it</h3>
+      <p>Modules are abstractions, but every one of them eventually touches a <em>pin</em> — the real system boundary. Pin choice is not arbitrary: the buzzer needs a <strong>PWM-capable</strong> pin, the button wants an interrupt-capable pin (D2/D3 on the Uno), and the analog sensors need actual <strong>analog</strong> pins (A0–A5). Here is the bill of connections this architecture maps onto.</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Part</th><th>Uno pin</th><th>Why this pin</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td>TMP36 V<sub>out</sub></td><td><code>A0</code></td><td>analog input → ADC</td><td>V<sub>cc</sub>→3.3 V / 5 V, GND→GND</td></tr>
+          <tr><td>LDR divider tap</td><td><code>A1</code></td><td>analog input → ADC</td><td>LDR to 5 V, 10 kΩ to GND</td></tr>
+          <tr><td>Mode button</td><td><code>D2</code></td><td>external INT0 capable</td><td>other leg to GND, <code>INPUT_PULLUP</code></td></tr>
+          <tr><td>Piezo buzzer</td><td><code>D9</code></td><td>Timer1 PWM (<code>OC1A</code>)</td><td>other leg to GND</td></tr>
+          <tr><td>Status LED</td><td><code>D13</code></td><td><code>LED_BUILTIN</code></td><td>already on the board</td></tr>
+          <tr><td>Serial</td><td><code>D0/D1</code></td><td>hardware UART</td><td>via USB to host</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the ADC reference voltage</div>
+        <p>By default <code>analogReference(DEFAULT)</code> measures against V<sub>cc</sub> (≈5 V on a USB-powered Uno, but it sags). For sensor accuracy use the chip's internal <strong>1.1 V band-gap</strong> reference via <code>analogReference(INTERNAL)</code> — it's stable and rejects supply noise. Your conversion math <em>must</em> use the same V<sub>ref</sub> you selected, or every reading is silently wrong. We make this explicit in the sensor module next.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="scheduler"><span class="sec-no">3</span>The non-blocking scheduler skeleton</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>time without stopping</small></div>
+      <p>In Chapter 1 we sinned with <code>delay()</code>; in Chapter 5 we repented with <code>millis()</code>. A product can never block, because it must read a button <em>while</em> it samples and blinks. The pattern is a tiny helper: "has <code>period</code> elapsed since I last ran this task?" If yes, run it and stamp the time.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">scheduler.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">// Returns true at most once per `period` ms, then re-arms.
+// `last` is a caller-owned timestamp (one per task).
+// Using subtraction of unsigned longs makes this overflow-safe:
+// even when millis() wraps at ~49.7 days, (now - last) stays correct.
+bool due(unsigned long &amp;last, unsigned long period) {
+  unsigned long now = millis();
+  if (now - last &gt;= period) {
+    last += period;          // advance by exactly one slot — no drift
+    return true;
+  }
+  return false;
+}
+
+// --- usage: each task carries its own `last` ---
+unsigned long tSample = 0, tLog = 0, tBlink = 0;
+
+void loop() {
+  if (due(tSample, 2000)) { /* read sensors every 2 s   */ }
+  if (due(tLog,   10000)) { /* emit a CSV row every 10 s */ }
+  if (due(tBlink,  500))  { /* toggle heartbeat LED      */ }
+  // loop() never blocks — all three tasks share the CPU
+}
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Why <code>last += period</code> beats <code>last = now</code></div>
+        <p>If you write <code>last = now</code>, you lose the few milliseconds spent <em>inside</em> the task — over hours the cadence drifts late. Advancing by exactly <code>period</code> keeps the schedule phase-locked: a "2-second" sample stays 2 seconds on average forever. This is the same idea as a real-time tick.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="sensors"><span class="sec-no">4</span>The sensor module &amp; calibration math</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>from counts to °C</small></div>
+      <p>The ADC is a 10-bit converter: it maps an input voltage in <span>$[0, V_{\text{ref}}]$</span> onto an integer code in <span>$[0, 1023]$</span>. Recovering the voltage is one line of algebra:</p>
+
+      <div class="math-box">
+        $$ V_{\text{out}} = \frac{\text{ADC}}{1023}\, V_{\text{ref}} $$
+      </div>
+
+      <p>The <strong>TMP36</strong> is beautifully linear: its output rises <span>$10\,\text{mV}$</span> per °C, offset so that <span>$0\,^\circ\text{C}$</span> reads <span>$500\,\text{mV}$</span>. Invert that line to get temperature:</p>
+
+      <div class="math-box">
+        $$ T_{^\circ C} = \frac{V_{\text{out}} - 0.5\,\text{V}}{0.01\,\text{V/}^\circ\text{C}} = \frac{V_{\text{out}} - 0.5}{0.01} $$
+      </div>
+
+      <p>Worked example: with <span>$V_{\text{ref}} = 5\,\text{V}$</span> and an ADC reading of <span>$154$</span>, we get <span>$V_{\text{out}} = \tfrac{154}{1023}\cdot 5 \approx 0.753\,\text{V}$</span>, so <span>$T = \tfrac{0.753 - 0.5}{0.01} \approx 25.3\,^\circ\text{C}$</span> — room temperature. Note the TMP36's <span>$10\,\text{mV/}^\circ\text{C}$</span> means each ADC code at 5 V is worth only <span>$\tfrac{5/1023}{0.01} \approx 0.49\,^\circ\text{C}$</span> of resolution — switch to the 1.1 V reference and resolution sharpens to <span>$\approx 0.11\,^\circ\text{C}$</span>.</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Alternative — a thermistor (NTC, Beta model)</div>
+        <p>If you use a 10 kΩ NTC thermistor instead, its resistance follows the <strong>Beta equation</strong>. With reference resistance <span>$R_0$</span> at reference temperature <span>$T_0$</span> (in <em>kelvin</em>) and material constant <span>$B$</span> (typ. ~3950 K):</p>
+        $$ \frac{1}{T} = \frac{1}{T_0} + \frac{1}{B}\ln\!\left(\frac{R}{R_0}\right) $$
+        <p>Read <span>$R$</span> from the divider — if the NTC is the top leg with fixed <span>$R_{\text{fix}}$</span> to ground: <span>$R = R_{\text{fix}}\,\dfrac{V_{\text{ref}} - V_{\text{out}}}{V_{\text{out}}}$</span>. Then convert kelvin back to °C with <span>$T_{^\circ C} = T - 273.15$</span>.</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>both conversions, one interface</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">sensors.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;math.h&gt;
+
+const uint8_t PIN_TEMP  = A0;
+const uint8_t PIN_LIGHT = A1;
+
+// We selected analogReference(DEFAULT) → Vref = supply ≈ 5.0 V.
+// If you call analogReference(INTERNAL), set VREF = 1.1 here instead.
+const float VREF     = 5.0;
+const float ADC_FULL = 1023.0;
+
+// Average several reads to knock down ADC noise (cheap low-pass).
+static uint16_t readAvg(uint8_t pin, uint8_t n = 8) {
+  uint32_t acc = 0;
+  for (uint8_t i = 0; i &lt; n; i++) acc += analogRead(pin);
+  return (uint16_t)(acc / n);
+}
+
+// --- TMP36 path: 10 mV/°C, 500 mV at 0 °C ---
+float readTempC() {
+  float v = readAvg(PIN_TEMP) * (VREF / ADC_FULL);  // counts → volts
+  return (v - 0.5) / 0.01;                           // volts → °C
+}
+
+// --- Thermistor path (Beta model), if you wire an NTC instead ---
+// Uncomment to use; same float return type, drop-in replacement.
+// float readTempC_NTC() {
+//   const float R_FIX = 10000.0, R0 = 10000.0;     // ohms
+//   const float B = 3950.0, T0 = 298.15;           // K (25 °C)
+//   float v = readAvg(PIN_TEMP) * (VREF / ADC_FULL);
+//   float r = R_FIX * (VREF - v) / v;              // divider → resistance
+//   float invT = 1.0/T0 + (1.0/B) * log(r / R0);   // Beta equation
+//   return (1.0 / invT) - 273.15;                  // K → °C
+// }
+
+// Light as a 0–100 "brightness" index (LDR brighter → higher voltage).
+uint8_t readLight() {
+  return (uint8_t)(readAvg(PIN_LIGHT) * 100UL / 1023);
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — averaging is not a substitute for settling</div>
+        <p>The AVR's single ADC is multiplexed across all analog pins. After you switch channels (A0 → A1), the sample-and-hold capacitor needs time to charge through the source impedance. A high-impedance source like an LDR divider can give a <em>ghost</em> of the previous channel on the first read. Throw away one dummy <code>analogRead()</code> after switching pins, or keep source impedance &lt; 10 kΩ.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="mode-fsm"><span class="sec-no">5</span>The mode FSM</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>one button, three behaviors</small></div>
+      <p>A single button must mean different things at different times — that is precisely what a <strong>finite-state machine</strong> is for (Chapter 8). Our device has three modes; each press advances to the next and wraps around. The FSM owns the <em>current mode</em> and the legal <em>transitions</em>; nothing else may change the mode.</p>
+
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> NORMAL
+    NORMAL --> SILENT: press
+    SILENT --> SETPOINT: press
+    SETPOINT --> NORMAL: press
+    note right of NORMAL
+      heartbeat + alarm armed
+    end note
+    note right of SILENT
+      alarm muted, still logs
+    end note
+    note right of SETPOINT
+      press nudges threshold +1°C
+    end note
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>the FSM as a table-free switch</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">fsm.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">enum Mode : uint8_t { NORMAL, SILENT, SETPOINT, MODE_COUNT };
+enum Event : uint8_t { EV_NONE, EV_PRESS };
+
+volatile Mode mode = NORMAL;     // the single owner of "current mode"
+
+// Pure transition function: given the current mode and an event,
+// return the next mode. No side effects → trivial to reason about &amp; test.
+Mode fsmNext(Mode m, Event e) {
+  if (e != EV_PRESS) return m;          // only a press moves us
+  switch (m) {
+    case NORMAL:   return SILENT;
+    case SILENT:   return SETPOINT;
+    case SETPOINT: return NORMAL;
+    default:       return NORMAL;
+  }
+}
+
+// Apply an event and run any per-mode "on entry" action.
+void fsmStep(Event e) {
+  Mode next = fsmNext(mode, e);
+  if (next != mode) {
+    mode = next;                        // commit the transition
+    if (mode == SETPOINT) {
+      // entering SETPOINT does nothing yet; presses here adjust threshold
+    }
+  } else if (e == EV_PRESS &amp;&amp; mode == SETPOINT) {
+    bumpThreshold();                    // in SETPOINT, a press nudges +1 °C
+  }
+}
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Separate the decision from the action</div>
+        <p><code>fsmNext()</code> is a <strong>pure function</strong> — same inputs, same output, no hardware touched. That makes the transition logic unit-testable on your laptop and impossible to corrupt by accident. <code>fsmStep()</code> is the thin shell that commits the new state and fires effects. Pushing the SETPOINT bump into the "self-loop" branch is a deliberate trick: in that mode a press <em>isn't</em> a transition, it's an in-state action.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — button bounce</div>
+        <p>A mechanical button doesn't make one clean edge; it <em>bounces</em>, firing several transitions in a few milliseconds. Debounce it: in the D2 interrupt, record <code>millis()</code> and ignore any edge within ~30 ms of the last. Without debounce, one physical press jumps two or three modes and the user thinks the firmware is haunted. We wire this in §9.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="alarm-hysteresis"><span class="sec-no">6</span>The alarm: PWM, threshold &amp; hysteresis</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>why a single threshold chatters</small></div>
+      <p>Naively: "if <span>$T &gt; T_{\text{set}}$</span>, alarm on; else off." But real temperature wobbles by tenths of a degree from ADC noise. Sit right at the threshold and the alarm flickers on/off many times a second — maddening and a sign of an amateur. The fix is <strong>hysteresis</strong>: two thresholds with a <em>deadband</em> between them.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>two thresholds, one deadband</small></div>
+      <p>Pick a setpoint <span>$T_{\text{set}}$</span> and a deadband width <span>$\Delta$</span>. The alarm turns <strong>on</strong> when temperature rises past the upper edge and turns <strong>off</strong> only when it falls back below the lower edge:</p>
+
+      <div class="math-box">
+        $$ T_{\text{hi}} = T_{\text{set}} + \tfrac{\Delta}{2}, \qquad T_{\text{lo}} = T_{\text{set}} - \tfrac{\Delta}{2} $$
+      </div>
+
+      <p>The alarm state <span>$a$</span> is then a <em>latched</em> function of temperature and its own previous value:</p>
+
+      <div class="math-box">
+        $$ a_{n} = \begin{cases} 1 &amp; T \ge T_{\text{hi}} \\ 0 &amp; T \le T_{\text{lo}} \\ a_{n-1} &amp; T_{\text{lo}} &lt; T &lt; T_{\text{hi}} \end{cases} $$
+      </div>
+
+      <p>Inside the deadband the alarm <em>holds</em> its last state — that memory is what kills the chatter. Concretely, with <span>$T_{\text{set}} = 30\,^\circ\text{C}$</span> and <span>$\Delta = 2\,^\circ\text{C}$</span>: it screams once <span>$T$</span> reaches <span>$31\,^\circ\text{C}$</span> and won't fall silent until <span>$T$</span> drops to <span>$29\,^\circ\text{C}$</span>. Noise of a few tenths can never flip it.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>hysteresis + a real PWM tone</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">alarm.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t PIN_BUZZER = 9;     // Timer1 OC1A — PWM/tone capable
+const float   DEADBAND   = 2.0;   // °C total width (Δ)
+
+float   gThresholdC = 30.0;       // T_set, loaded from EEPROM
+bool    gAlarmOn    = false;      // a_{n-1} — the latched state
+
+// Returns true if the alarm is (now) active. Pure hysteresis logic.
+bool updateAlarm(float tempC) {
+  float tHi = gThresholdC + DEADBAND / 2.0;   // T_hi
+  float tLo = gThresholdC - DEADBAND / 2.0;   // T_lo
+
+  if (tempC &gt;= tHi)       gAlarmOn = true;    // cross up  → latch on
+  else if (tempC &lt;= tLo)  gAlarmOn = false;   // cross down → latch off
+  // else: inside deadband → gAlarmOn keeps its previous value
+
+  return gAlarmOn;
+}
+
+// Drive the piezo. tone() configures Timer1 to emit a square wave
+// at the given frequency on PIN_BUZZER without blocking loop().
+void driveBuzzer(bool on, bool silenced) {
+  if (on &amp;&amp; !silenced) tone(PIN_BUZZER, 2000);  // 2 kHz — piezo's loud band
+  else                 noTone(PIN_BUZZER);       // releases the timer
+}
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Why 2 kHz, and why <code>tone()</code></div>
+        <p>Piezo buzzers have a mechanical resonance, typically 2–4 kHz, where they are dramatically louder for the same drive — picking 2 kHz buys you free volume. <code>tone()</code> sets up Timer1 in CTC mode to toggle the pin in hardware, so the square wave keeps playing while your <code>loop()</code> does other work. That's PWM-as-an-output-peripheral, exactly the Chapter 4 idea. Calling <code>tone()</code> also disables <code>analogWrite()</code> on pins 9 and 10 — they share Timer1.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="persistence-power"><span class="sec-no">7</span>Persistence &amp; sleep</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>remember across power loss; doze between samples</small></div>
+      <p>Two non-volatile jobs remain. First, <strong>persistence</strong>: the user's threshold and the running min/max should survive a reset, so we keep them in EEPROM (Chapter 7). Second, <strong>power</strong>: between 2-second samples the CPU has nothing to do — putting it to sleep drops current from ~15 mA to microamps (Chapter 8), turning a coin cell from days into months.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>struct-in, struct-out EEPROM</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">store.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;EEPROM.h&gt;
+
+struct Config {
+  uint16_t magic;        // sentinel: is EEPROM initialised for *us*?
+  float    thresholdC;   // user setpoint
+  float    minC, maxC;   // running extremes
+};
+
+const int      CFG_ADDR  = 0;
+const uint16_t CFG_MAGIC = 0xE5A1;   // arbitrary "this is our format" tag
+
+// Load config, or write sane defaults the first time we ever boot.
+void loadCfg(Config &amp;c) {
+  EEPROM.get(CFG_ADDR, c);           // bulk read the struct
+  if (c.magic != CFG_MAGIC) {        // blank/foreign EEPROM → seed it
+    c.magic      = CFG_MAGIC;
+    c.thresholdC = 30.0;
+    c.minC       =  999.0;           // sentinels so first sample wins
+    c.maxC       = -999.0;
+    EEPROM.put(CFG_ADDR, c);
+  }
+}
+
+// Persist only when changed — EEPROM endures ~100k writes per cell,
+// so we never write every loop, only on real edits.
+void saveCfg(const Config &amp;c) { EEPROM.put(CFG_ADDR, c); }
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — EEPROM wear</div>
+        <p>An AVR EEPROM cell is rated for roughly <span>$10^5$</span> erase/write cycles. Write min/max <em>every</em> 2-second sample and you'd exhaust a cell in <span>$\tfrac{10^5 \times 2\,\text{s}}{86400} \approx 2.3$</span> days. Only call <code>saveCfg()</code> when a value actually changes (a new record, or the user bumps the threshold), and <code>EEPROM.put()</code> already skips bytes that are unchanged.</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>sleep with the watchdog timer</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">power.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;avr/sleep.h&gt;
+#include &lt;avr/wdt.h&gt;
+#include &lt;avr/power.h&gt;
+
+volatile bool wdtFired = false;
+
+// The watchdog ISR just wakes us; the real work happens back in loop().
+ISR(WDT_vect) { wdtFired = true; }
+
+// Sleep ~2 s in the lowest-power mode, woken by the watchdog timer.
+void napPwrDown() {
+  // Configure WDT for interrupt (not reset) every ~2 s.
+  // 2 s prescaler = WDP[3:0] = 0b0111.
+  cli();
+  wdt_reset();
+  WDTCSR |= (1 &lt;&lt; WDCE) | (1 &lt;&lt; WDE);          // unlock change
+  WDTCSR  = (1 &lt;&lt; WDIE) | (1 &lt;&lt; WDP2) | (1 &lt;&lt; WDP1) | (1 &lt;&lt; WDP0); // 2 s, INT mode
+  sei();
+
+  set_sleep_mode(SLEEP_MODE_PWR_DOWN);         // deepest sleep
+  sleep_enable();
+  power_adc_disable();                          // ADC off saves ~mA
+  sleep_mode();                                 // &lt;-- CPU halts here
+  // ...wakes here on WDT or button INT...
+  sleep_disable();
+  power_adc_enable();
+}
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — the watchdog is also your safety net</div>
+        <p>We use the watchdog to <em>wake</em> from sleep, but in production it earns its name a second way: configure it in <em>reset</em> mode (<code>WDE</code> set) and call <code>wdt_reset()</code> from a known-good point each loop. If your firmware ever hangs — a sensor I²C bus locks up, say — the watchdog times out and reboots the device automatically. Unattended hardware in the field <em>relies</em> on this. Same peripheral, two life-saving jobs.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="full-sketch"><span class="sec-no">8</span>The full integrated sketch &amp; debugging</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>everything, wired together</small></div>
+      <p>Here is the orchestrator that ties all six modules into one shipping sketch. Read <code>loop()</code> first — it is pure routing, exactly the contract from §2. The module functions above slot straight in; this file shows the glue, the button ISR with debounce, the Serial CSV stream, and the stats/persistence logic.</p>
+
+      <div class="codeblock">
+        <div class="code-head">env_monitor.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">// ================= Smart Environmental Monitor &amp; Alarm =================
+// Integrates: ADC sensors, non-blocking scheduler, hysteresis alarm
+// (PWM tone), button FSM, EEPROM persistence, Serial CSV, WDT sleep.
+// Pins: A0 temp, A1 light, D2 button, D9 buzzer, D13 status LED.
+
+#include &lt;EEPROM.h&gt;
+#include &lt;avr/sleep.h&gt;
+#include &lt;avr/wdt.h&gt;
+
+// ---- pins ----
+const uint8_t PIN_TEMP = A0, PIN_LIGHT = A1;
+const uint8_t PIN_BTN  = 2,  PIN_BUZZER = 9, PIN_LED = LED_BUILTIN;
+
+// ---- tunables ----
+const float    VREF = 5.0, ADC_FULL = 1023.0;
+const float    DEADBAND = 2.0;
+const uint16_t CFG_MAGIC = 0xE5A1;
+const int      CFG_ADDR  = 0;
+
+// ---- persisted config ----
+struct Config { uint16_t magic; float thresholdC, minC, maxC; } cfg;
+
+// ---- FSM ----
+enum Mode : uint8_t { NORMAL, SILENT, SETPOINT };
+volatile Mode mode = NORMAL;
+
+// ---- alarm latch ----
+bool gAlarmOn = false;
+
+// ---- button (debounced edge from ISR) ----
+volatile bool          btnEvent = false;
+volatile unsigned long btnLast  = 0;
+
+void onButton() {                       // INT0 falling-edge ISR
+  unsigned long now = millis();         // millis() runs in ISRs (timer-based)
+  if (now - btnLast &gt; 30) {             // 30 ms debounce window
+    btnLast  = now;
+    btnEvent = true;                    // hand the event to loop()
+  }
+}
+
+// ---- scheduler ----
+unsigned long tSample = 0, tBlink = 0;
+bool due(unsigned long &amp;last, unsigned long period) {
+  unsigned long now = millis();
+  if (now - last &gt;= period) { last += period; return true; }
+  return false;
+}
+
+// ---- sensors ----
+uint16_t readAvg(uint8_t pin, uint8_t n = 8) {
+  uint32_t acc = 0;
+  for (uint8_t i = 0; i &lt; n; i++) acc += analogRead(pin);
+  return acc / n;
+}
+float readTempC() {
+  float v = readAvg(PIN_TEMP) * (VREF / ADC_FULL);
+  return (v - 0.5) / 0.01;              // TMP36: 10 mV/°C, 0.5 V @ 0 °C
+}
+uint8_t readLight() { return readAvg(PIN_LIGHT) * 100UL / 1023; }
+
+// ---- persistence ----
+void loadCfg() {
+  EEPROM.get(CFG_ADDR, cfg);
+  if (cfg.magic != CFG_MAGIC) {
+    cfg = { CFG_MAGIC, 30.0, 999.0, -999.0 };
+    EEPROM.put(CFG_ADDR, cfg);
+  }
+}
+void saveCfg() { EEPROM.put(CFG_ADDR, cfg); }
+
+// ---- alarm hysteresis ----
+bool updateAlarm(float tempC) {
+  float tHi = cfg.thresholdC + DEADBAND / 2.0;
+  float tLo = cfg.thresholdC - DEADBAND / 2.0;
+  if      (tempC &gt;= tHi) gAlarmOn = true;
+  else if (tempC &lt;= tLo) gAlarmOn = false;
+  return gAlarmOn;                      // else: hold previous (deadband)
+}
+
+// ---- FSM ----
+void fsmStep() {
+  switch (mode) {
+    case NORMAL:   mode = SILENT;   break;
+    case SILENT:   mode = SETPOINT; break;
+    case SETPOINT:                       // press here adjusts setpoint...
+      // first press from SETPOINT wraps to NORMAL; handled below
+      mode = NORMAL; break;
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(PIN_LED, OUTPUT);
+  pinMode(PIN_BTN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(PIN_BTN), onButton, FALLING);
+  loadCfg();
+  Serial.println(F("# millis,tempC,light,thresh,alarm,mode,min,max"));
+}
+
+void loop() {
+  // --- 1. handle button events (FSM) ---
+  if (btnEvent) {
+    btnEvent = false;
+    if (mode == SETPOINT) {              // in SETPOINT a press bumps threshold
+      cfg.thresholdC += 1.0;
+      if (cfg.thresholdC &gt; 45.0) cfg.thresholdC = 15.0;  // wrap range
+      saveCfg();                          // persist the user's choice
+    } else {
+      fsmStep();                          // otherwise advance mode
+    }
+  }
+
+  // --- 2. sample + decide + remember (every 2 s) ---
+  if (due(tSample, 2000)) {
+    float t = readTempC();
+    uint8_t lx = readLight();
+    bool ringing = updateAlarm(t);
+
+    // update persisted extremes only on a real record (saves EEPROM wear)
+    bool rec = false;
+    if (t &lt; cfg.minC) { cfg.minC = t; rec = true; }
+    if (t &gt; cfg.maxC) { cfg.maxC = t; rec = true; }
+    if (rec) saveCfg();
+
+    // act: buzzer, unless muted in SILENT mode
+    bool muted = (mode == SILENT);
+    if (ringing &amp;&amp; !muted) tone(PIN_BUZZER, 2000);
+    else                  noTone(PIN_BUZZER);
+
+    // stream a CSV row over Serial (Ch 6)
+    Serial.print(millis());   Serial.print(',');
+    Serial.print(t, 2);       Serial.print(',');
+    Serial.print(lx);         Serial.print(',');
+    Serial.print(cfg.thresholdC, 1); Serial.print(',');
+    Serial.print(ringing);    Serial.print(',');
+    Serial.print((uint8_t)mode); Serial.print(',');
+    Serial.print(cfg.minC, 1); Serial.print(',');
+    Serial.println(cfg.maxC, 1);
+  }
+
+  // --- 3. heartbeat: slow when OK, fast when alarming ---
+  unsigned long beat = gAlarmOn ? 120 : 500;
+  if (due(tBlink, beat)) digitalWrite(PIN_LED, !digitalRead(PIN_LED));
+
+  // --- 4. (optional) sleep here when idle for battery life ---
+  // If no buzzer is active and serial has flushed, napPwrDown() would
+  // drop us to µA between samples; omitted from the hot loop above so
+  // the heartbeat stays smooth on a USB-powered demo bench.
+}
+</code></pre>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> Notice what <code>loop()</code> does <em>not</em> contain</div>
+        <p>No <code>delay()</code>. No ADC register pokes. No EEPROM addresses. No hysteresis arithmetic. Every hard detail lives behind a named verb, and <code>loop()</code> reads almost like the §1 sentence: <em>sense → decide → act → remember → wait</em>. That readability <strong>is</strong> the architecture paying off.</p>
+      </div>
+
+      <div class="layer"><span class="step">④</span> Real case <small>how pros debug an integrated system</small></div>
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — isolate, then trace</div>
+        <p>When a multi-module system misbehaves, never debug all of it at once. <strong>Isolate</strong>: comment out the alarm and sleep, confirm sensors + Serial alone produce sane CSV. Then re-enable one module at a time. <strong>Trace</strong>: your Serial CSV stream <em>is</em> your logic analyzer — pipe it into a plot and you can literally watch the temperature curve cross <span>$T_{\text{hi}}$</span> and the <code>alarm</code> column flip to 1. Most "impossible" bugs (a hysteresis edge off by one, a threshold that didn't persist) become obvious the instant you graph the log. Printf-over-Serial remains the most-used embedded debugger on Earth for exactly this reason.</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Extension ideas (for when this is too easy)</div>
+        <p>Add a <strong>rolling-average</strong> filter to smooth temperature. Add a <strong>FAULT</strong> state that latches if the sensor reads an impossible value (open/short → ADC pinned at 0 or 1023). Drive an <strong>I²C OLED</strong> for a real display. Add a <strong>humidity</strong> sensor and a dew-point calc. Log to an SD card with timestamps. Every one of these slots into an existing module without disturbing the others — prove the architecture to yourself.</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>⑤ Your turn</h2>
+      <div class="layer"><span class="step">⑤</span> Practice <small>you decide &amp; build</small></div>
+      <p>Three checks worthy of a capstone. One architecture call, one hysteresis budget, one feature you add yourself. Progress is saved on this device.</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="ard09-arch-tradeoff">
+        <div class="ex-head"><span class="badge">Q1</span> Architecture decision</div>
+        <div class="ex-q">Your teammate proposes saving <code>min</code>/<code>max</code> to EEPROM on <em>every</em> 2-second sample "so we never lose data." The threshold rarely changes; min/max change occasionally. What's the strongest objection?</div>
+        <ul class="ex-options">
+          <li data-correct="false">EEPROM writes are too slow and would block <code>loop()</code> for seconds</li>
+          <li data-correct="true">EEPROM cells endure ~100k writes; writing every 2 s wears one out in a few days</li>
+          <li data-correct="false">EEPROM is volatile, so the data would be lost on reset anyway</li>
+          <li data-correct="false">The <code>Config</code> struct is too large to fit in 1 KB of EEPROM</li>
+        </ul>
+        <div class="ex-explain">An AVR EEPROM cell is rated ~10⁵ writes. At one write per 2 s that's <span>$\tfrac{10^5\times2}{86400}\approx2.3$</span> days to failure. The fix — write only on a <em>real record or user edit</em> — is exactly what the sketch does. (EEPROM is non-volatile, and a single <code>EEPROM.put()</code> of ~14 bytes takes only a few ms, so the other options are wrong on the facts.)</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="ard09-hysteresis" data-answer="29" data-tol="0.01">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it — hysteresis edge</div>
+        <div class="ex-q">The alarm uses setpoint <span>$T_{\text{set}} = 30\,^\circ\text{C}$</span> and deadband <span>$\Delta = 2\,^\circ\text{C}$</span>, so it turns on at <span>$T_{\text{hi}} = T_{\text{set}} + \Delta/2$</span>. Once ringing, at what temperature (°C) does it turn <strong>off</strong>? (Recall $T_{\text{lo}} = T_{\text{set}} - \Delta/2$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="°C"><span class="ex-unit">°C</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$T_{\text{lo}} = 30 - \tfrac{2}{2} = 29\,^\circ\text{C}$. It latches on at <span>$T_{\text{hi}}=31\,^\circ\text{C}$</span> and stays on until temperature falls all the way to <span>$29\,^\circ\text{C}$</span>. The <span>$2\,^\circ\text{C}$</span> gap between on and off is the deadband that kills chatter — any noise smaller than that can never flip the alarm.</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="ard09-rolling-avg">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — rolling-average smoothing</div>
+        <div class="ex-q">ADC noise makes the raw temperature jitter. Add a <strong>rolling average</strong> over the last <code>N = 4</code> samples so the alarm reacts to the <em>trend</em>, not single-sample spikes. Replace <code>readTempC()</code>'s output in <code>loop()</code> with a smoothed value, using a fixed circular buffer (no dynamic memory). Keep it O(1) per sample.</div>
+        <details class="ex-acc">
+          <summary>Hint</summary>
+          <div class="acc-body">Keep a static array <code>buf[4]</code> and a running <code>sum</code>. Each new sample: subtract the slot you're about to overwrite, write the new value, add it to <code>sum</code>, advance the index modulo 4. The average is <code>sum / 4</code>. No loops over the buffer needed — that's the O(1) trick.</div>
+        </details>
+        <details class="ex-acc">
+          <summary>Show one solution</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">smooth.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">// O(1) rolling average over the last 4 temperature samples.
+float smoothTempC(float sample) {
+  const uint8_t N = 4;
+  static float    buf[N] = {0};      // circular buffer (static = persists)
+  static float    sum    = 0;
+  static uint8_t  idx    = 0;
+  static bool     primed = false;
+
+  sum -= buf[idx];                   // remove the value we'll overwrite
+  buf[idx] = sample;                 // store the new sample
+  sum += sample;                     // add it to the running sum
+  idx = (idx + 1) % N;               // advance circularly
+  if (idx == 0) primed = true;       // buffer has wrapped once
+
+  // before the buffer fills, divide by however many we have
+  return primed ? (sum / N) : (sum / (idx == 0 ? N : idx));
+}
+
+// in loop(), feed the raw read through the filter:
+//   float t = smoothTempC(readTempC());
+//   bool ringing = updateAlarm(t);
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">The <code>static</code> locals are the whole trick: they keep their values between calls without polluting global namespace. Subtracting the outgoing sample and adding the incoming one keeps the work constant regardless of <code>N</code> — a real moving-average filter, the same primitive used in DSP and sensor fusion. Bump <code>N</code> to trade responsiveness for smoothness.</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> Chapter recap</div>
+        <p>You built a complete product. You can now decompose a system into testable modules behind verb-named interfaces; schedule work without ever blocking; convert raw ADC counts to °C via the TMP36 line or the thermistor Beta equation; tame an alarm with a two-threshold hysteresis deadband and drive it with a hardware PWM tone; route a single button through a finite-state machine; persist config in EEPROM without wearing it out; sleep the CPU with the watchdog; and debug the whole thing by isolating modules and tracing a Serial CSV stream. That loop — <strong>sense, decide, act, remember, wait</strong> — is every embedded product you will ever ship. You've reached the end of the Arduino track a real firmware engineer.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="Back to top">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

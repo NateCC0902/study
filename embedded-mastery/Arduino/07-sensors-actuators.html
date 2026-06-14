@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Sensors &amp; Actuators: Real-World Interfacing — Embedded Mastery</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="track-arduino" data-track="arduino" data-chapter="07-sensors-actuators">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">Arduino · Ch 07</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Arduino Track · Chapter 07 · Advanced</div>
+        <h1>Sensors &amp; Actuators: Real-World Interfacing</h1>
+        <p>Until now your pins talked to LEDs and other pins. Now they meet the messy physical world — distance, temperature, mains-powered fans, spinning motors. The world fights back with noise, voltage spikes, and back-EMF. This chapter is about connecting to it <em>reliably</em>, so your robot survives its first collision and your relay board survives its first switch-off.</p>
+        <div class="meta">
+          <span>⏱ ~50 min</span><span>🧠 Signal chain</span><span>⚡ HC-SR04 · DHT · H-bridge</span><span>🔧 Flyback &amp; isolation</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="signal-chain"><span class="sec-no">1</span>The signal chain: sensors measure, actuators act</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Every embedded system that touches the real world is a <strong>signal chain</strong>: the physical world is sensed, turned into a voltage, conditioned, read by the MCU, decided upon, and then pushed back out to an <strong>actuator</strong> that changes the world. Sensors are the chain's input half; actuators are the output half. Your firmware is the thin layer of judgment in the middle.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence model</div>
+        <p>A <strong>sensor</strong> converts a physical quantity into an electrical signal the MCU can read; an <strong>actuator</strong> converts an electrical signal the MCU emits back into a physical effect. Everything in this chapter is one of those two, plus the discipline to wire them so they don't destroy each other.</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    W([Physical world]) --> S["Sensor<br/>(transducer)"]
+    S --> C["Signal conditioning<br/>(divider · level · filter)"]
+    C --> M["MCU<br/>(ADC / digital read)"]
+    M --> D{Decide}
+    D --> DR["Driver<br/>(H-bridge · relay · MOSFET)"]
+    DR --> A["Actuator<br/>(motor · servo · relay)"]
+    A --> W
+      </div>
+
+      <p>Two ideas dominate whether a connection works at all. The first is <strong>voltage level</strong>: an ATmega328P pin is happy at 0–5&nbsp;V and is destroyed above ~5.5&nbsp;V; a 3.3&nbsp;V board like an ESP32 dies above ~3.6&nbsp;V. The second is <strong>impedance</strong> — loosely, how much current a node can source or sink. A sensor output may be a weak, high-impedance signal that a long noisy wire corrupts; an MCU pin can only source ~20–40&nbsp;mA, nowhere near enough to spin a motor. The whole craft is matching levels and impedances so each stage can actually drive the next.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The pin is not a power supply</div>
+        <p>An ATmega328P I/O pin is rated for ~20&nbsp;mA continuous (40&nbsp;mA absolute max), with a per-chip total around 200&nbsp;mA. An LED is fine. A relay coil (~70&nbsp;mA), a servo, or a DC motor (hundreds of mA to amps) is <strong>not</strong> — those need a driver transistor or dedicated chip between the pin and the load. Drive a motor straight off a pin and you will brown out the chip or burn the pin.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="ultrasonic"><span class="sec-no">2</span>Measuring distance: the HC-SR04 &amp; the speed of sound</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>echolocation in a $2 module</small></div>
+      <p>The <strong>HC-SR04</strong> is a sonar. You poke its <code>TRIG</code> pin with a brief pulse; it emits a 40&nbsp;kHz ultrasonic "chirp," then raises its <code>ECHO</code> pin <strong>HIGH</strong> and holds it high until the chirp bounces off something and returns. The <em>width</em> of that ECHO pulse is the round-trip flight time of sound. Time it, and you know how far away the obstacle is — just like a bat.</p>
+
+      <div class="mermaid">
+sequenceDiagram
+    participant MCU
+    participant HCSR04 as HC-SR04
+    participant Obj as Obstacle
+    MCU->>HCSR04: TRIG HIGH for 10 µs
+    HCSR04->>Obj: 8 × 40 kHz burst
+    HCSR04->>MCU: ECHO goes HIGH
+    Obj-->>HCSR04: sound reflects back
+    HCSR04->>MCU: ECHO goes LOW (after t_echo)
+    Note over MCU: pulse width = round-trip time
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive the distance formula</small></div>
+      <p>Sound travels at roughly <span>$v \approx 343\ \text{m/s}$</span> in dry air at 20&nbsp;°C. The ECHO pulse measures the time for the chirp to fly <em>out</em> to the obstacle <em>and back</em> — twice the distance. So the one-way distance is half the flight path:</p>
+
+      <div class="math-box">
+        $$ d = \frac{v \cdot t_{\text{echo}}}{2} $$
+      </div>
+
+      <p>Now make it practical. The Arduino measures <span>$t_{\text{echo}}$</span> in <strong>microseconds</strong>, and we want <span>$d$</span> in <strong>centimetres</strong>. Convert the speed of sound into cm/µs:</p>
+
+      <div class="math-box">
+        $$ v = 343\ \tfrac{\text{m}}{\text{s}} = 343\times\frac{100\ \text{cm}}{10^{6}\ \mu\text{s}} = 0.0343\ \tfrac{\text{cm}}{\mu\text{s}} $$
+      </div>
+
+      <p>Substitute into the distance formula and collect the constants:</p>
+
+      <div class="math-box">
+        $$ d_{\text{cm}} = \frac{0.0343 \cdot t_{\mu s}}{2} = \frac{t_{\mu s}}{58.3} \;\approx\; \frac{t_{\mu s}}{58} $$
+      </div>
+
+      <p>That is the famous <strong>"divide by 58"</strong> rule every robotics tutorial quotes. It is just <span>$2/0.0343 = 58.3$</span>, rounded. Using 58 instead of 58.3 over-reports distance by about 0.5% — negligible next to the temperature dependence of <span>$v$</span> itself, which drifts ~0.17% per °C. If you need accuracy, compute <span>$v = 331.4 + 0.6\,T_{°C}$</span> m/s and divide by the matching constant.</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Worked example</div>
+        <p>ECHO stays HIGH for <span>$t_{\text{echo}} = 1740\ \mu\text{s}$</span>. Then <span>$d = 1740 / 58 = 30\ \text{cm}$</span>. Sanity check with SI: <span>$d = 0.0343 \times 1740 / 2 = 29.9\ \text{cm}$</span>. The obstacle is about 30&nbsp;cm away.</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p><code>pulseIn(pin, HIGH)</code> is the perfect tool here: it blocks until the pin goes HIGH, starts a microsecond timer, and returns the pulse width in µs when the pin goes LOW again. We give it a timeout so a missing echo (object too far, or no object) doesn't hang the loop forever.</p>
+
+      <div class="codeblock">
+        <div class="code-head">hcsr04.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t TRIG = 9;
+const uint8_t ECHO = 10;
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(TRIG, OUTPUT);
+  pinMode(ECHO, INPUT);
+  digitalWrite(TRIG, LOW);   // ensure a clean LOW before the first pulse
+}
+
+float measureCm() {
+  // 1) Fire a clean 10 us trigger pulse.
+  digitalWrite(TRIG, LOW);  delayMicroseconds(2);
+  digitalWrite(TRIG, HIGH); delayMicroseconds(10);   // datasheet: &gt;= 10 us
+  digitalWrite(TRIG, LOW);
+
+  // 2) Time how long ECHO stays HIGH (round-trip flight time, in us).
+  //    Timeout 30000 us caps range at ~5 m and prevents a hang.
+  unsigned long t = pulseIn(ECHO, HIGH, 30000UL);
+  if (t == 0) return -1.0;          // no echo within timeout
+
+  // 3) Convert: d_cm = t_us / 58.3  (= half of 0.0343 cm/us round trip).
+  return t / 58.3f;
+}
+
+void loop() {
+  float cm = measureCm();
+  if (cm &lt; 0) Serial.println(F("out of range"));
+  else { Serial.print(cm, 1); Serial.println(F(" cm")); }
+  delay(60);                        // &gt;= 60 ms between pings: avoid hearing
+}                                   // the previous chirp's late echoes
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the 5 V ECHO line on a 3.3 V board</div>
+        <p>The classic HC-SR04 runs on 5&nbsp;V and drives ECHO to <strong>5&nbsp;V</strong>. Feed that straight into a 3.3&nbsp;V ESP32 or STM32 pin and you slowly cook it. Drop ECHO with a resistor divider (e.g. 1&nbsp;kΩ in series, 2&nbsp;kΩ to ground gives <span>$5\cdot\tfrac{2}{3}=3.3$</span>&nbsp;V) or a level shifter. TRIG is an input on the module, so the 3.3&nbsp;V HIGH it receives is fine.</p>
+      </div>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-sonar-wrap">
+        <div class="sim-title">🔬 Live: echo time → distance</div>
+        <canvas id="sim-sonar"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">Drag the ECHO pulse width and watch the obstacle move. The readout applies <em>d</em> = <em>t</em>/58.3 in real time — exactly what your firmware computes.</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="digital-protocol"><span class="sec-no">3</span>One-wire timing: the DHT11/DHT22 protocol</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>a whole conversation on one wire</small></div>
+      <p>The HC-SR04 hands you an analog-ish pulse width. Many digital sensors instead speak a <strong>bit-banged serial protocol</strong> over a single data line, where <em>the duration of each HIGH pulse encodes a bit</em>. The <strong>DHT11</strong> (temperature + humidity, cheap, low resolution) and <strong>DHT22</strong> (a.k.a. AM2302, finer resolution) are the canonical example, and they teach the pattern you'll see in WS2812 LEDs and many others.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The DHT handshake, in words</div>
+        <p>1) The MCU pulls the line <strong>LOW for ≥18&nbsp;ms</strong> (DHT11) to wake the sensor, then releases it. 2) The sensor answers with an 80&nbsp;µs LOW then 80&nbsp;µs HIGH. 3) It streams <strong>40 bits</strong> (16 humidity, 16 temperature, 8 checksum). Each bit starts with a 50&nbsp;µs LOW; then a <strong>~26&nbsp;µs HIGH means 0</strong>, a <strong>~70&nbsp;µs HIGH means 1</strong>. You decode by timing the HIGH.</p>
+      </div>
+
+      <div class="mermaid">
+sequenceDiagram
+    participant MCU
+    participant DHT
+    MCU->>DHT: pull LOW &gt;= 18 ms (start)
+    MCU->>DHT: release (pull-up takes line HIGH)
+    DHT->>MCU: 80 us LOW + 80 us HIGH (present)
+    loop 40 bits
+        DHT->>MCU: 50 us LOW (bit start)
+        DHT->>MCU: HIGH ~26us = 0  /  ~70us = 1
+    end
+    Note over MCU: byte5 == (b0+b1+b2+b3) &amp; 0xFF ? valid
+      </div>
+
+      <p>The timing is so tight (microseconds) that reading a DHT reliably means disabling interrupts during the capture, which is exactly why you use a vetted library rather than hand-rolling it. But you must understand the protocol to debug it: a checksum failure usually means an interrupt (a millis tick, a serial byte) stretched one of those HIGH windows and flipped a bit.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>the checksum</small></div>
+      <p>The 40 bits arrive as five bytes. The last is a checksum: the low 8 bits of the sum of the first four. You verify with</p>
+
+      <div class="math-box">
+        $$ \text{checksum} \;\overset{?}{=}\; (b_0 + b_1 + b_2 + b_3)\ \&amp;\ \texttt{0xFF} $$
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">dht_decode.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">// Conceptual decode of the 5 captured bytes (a real driver captures the
+// 40 edge timings first; here we show only the validation + scaling).
+bool dhtDecode(const uint8_t b[5], float &amp;rh, float &amp;tC) {
+  uint8_t sum = b[0] + b[1] + b[2] + b[3];   // 8-bit wrap is intentional
+  if (sum != b[4]) return false;             // checksum mismatch -&gt; reject
+
+  // DHT22: 16-bit values, 0.1 unit resolution, MSB of temp = sign.
+  rh = ((b[0] &lt;&lt; 8) | b[1]) * 0.1f;
+  int16_t raw = ((b[2] &amp; 0x7F) &lt;&lt; 8) | b[3];
+  tC = raw * 0.1f;
+  if (b[2] &amp; 0x80) tC = -tC;                  // top bit set =&gt; negative
+  return true;
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — sampling a DHT too fast</div>
+        <p>A DHT11 updates at ~1&nbsp;Hz, a DHT22 at ~0.5&nbsp;Hz. Poll faster and you get stale or corrupt reads. Also: the data line needs a <strong>4.7–10&nbsp;kΩ pull-up</strong> to VCC, because the protocol relies on the line floating HIGH when neither side drives it. Forget the pull-up and you get all-zero or all-one garbage.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="inductive-loads"><span class="sec-no">4</span>Actuators &amp; the flyback diode: taming inductive kick</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>why coils bite back</small></div>
+      <p>Relays, solenoids, and motors all contain a <strong>coil</strong> — an inductor. An inductor hates a sudden change in current: its whole nature is to keep current flowing. So the instant you switch one OFF, the magnetic field collapses and the coil generates a large reverse voltage spike (<strong>back-EMF</strong>) trying to maintain that current. That spike can reach hundreds of volts and will arc across your switching transistor or weld your relay contacts.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>the inductor's revenge</small></div>
+      <p>The voltage across an inductor is proportional to how fast its current changes:</p>
+
+      <div class="math-box">
+        $$ v_L = L\,\frac{di}{dt} $$
+      </div>
+
+      <p>When a transistor switches a coil off, it tries to drop the current from its running value to zero in nanoseconds. With <span>$dt \to 0$</span>, that derivative explodes and <span>$v_L$</span> spikes enormous. A <strong>flyback diode</strong> (a.k.a. freewheeling diode) wired <em>across the coil, reverse-biased</em> during normal operation, gives that trapped current a harmless loop to circulate in when the switch opens. The current now decays gently as</p>
+
+      <div class="math-box">
+        $$ i(t) = I_0\,e^{-t/\tau}, \qquad \tau = \frac{L}{R} $$
+      </div>
+
+      <p>and the spike is clamped to roughly one diode drop (~0.7&nbsp;V) above the supply instead of hundreds of volts. One cheap <strong>1N4007</strong> across every coil. This is non-negotiable.</p>
+
+      <div class="mermaid">
+flowchart LR
+    V["+V supply"] --> COIL["Relay / motor coil"]
+    COIL --> Q["Switch<br/>(NPN / MOSFET)"]
+    Q --> GND["GND"]
+    V -. "diode cathode" .- D[/"flyback diode<br/>1N4007"/]
+    D -. "anode" .- COIL
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Diode orientation — get this right</div>
+        <p>The diode's <strong>cathode (banded end) goes to +V</strong>, its anode to the transistor/coil junction. So during normal operation it is reverse-biased and invisible. Only when the coil flings its voltage <em>above</em> +V does it conduct, shunting the current in a circle. Install it backwards and you short your supply through a forward diode — instant smoke.</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> AC loads need a snubber, not a diode</div>
+        <p>A flyback diode only works for <strong>DC</strong> coils. If your relay <em>contacts</em> switch an inductive <strong>AC</strong> load (a mains motor, a transformer), the arc is on the contact side and a diode can't help — you use an <strong>RC snubber</strong> (e.g. 100&nbsp;Ω + 100&nbsp;nF) or a varistor across the contacts to absorb the arc energy and stop contact erosion.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="relays-isolation"><span class="sec-no">5</span>Relays, opto-isolation &amp; switching dangerous loads</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>a tiny signal commanding a big one</small></div>
+      <p>A <strong>relay</strong> is an electrically operated switch: a small coil current pulls a mechanical contact closed, letting a completely separate (and possibly mains-voltage) circuit conduct. Its superpower is <strong>galvanic isolation</strong> — the 5&nbsp;V control side shares no copper with the 230&nbsp;V load side, so a fault on the load can't fry your MCU. The standard hobby relay board adds an <strong>opto-coupler</strong> so even the coil-driver transistor is optically isolated from your microcontroller: the only thing crossing the boundary is light.</p>
+
+      <div class="mermaid">
+flowchart LR
+    MCU["MCU pin<br/>(5 V logic)"] --> OPTO["Opto-coupler<br/>(light gap)"]
+    OPTO --> DRV["Coil driver<br/>+ flyback diode"]
+    DRV --> COIL["Relay coil"]
+    COIL -. "magnetic" .-> SW["Contacts (isolated)"]
+    SW --> LOAD["Mains load<br/>(fan / lamp / pump)"]
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>active-low boards bite beginners</small></div>
+      <p>Most hobby relay boards are <strong>active-LOW</strong>: the relay energizes when you drive the input pin LOW, because the opto-coupler's LED is wired between VCC and your pin. This also means the relay may click ON at boot, while the pin floats — set the pin HIGH (de-energized) <em>before</em> setting it OUTPUT to avoid a glitch.</p>
+
+      <div class="codeblock">
+        <div class="code-head">relay.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t RELAY = 7;   // active-LOW opto board: LOW = ON, HIGH = OFF
+
+void setup() {
+  digitalWrite(RELAY, HIGH);   // de-energized FIRST, before pinMode...
+  pinMode(RELAY, OUTPUT);      // ...so we don't click ON during boot
+}
+
+inline void relayOn()  { digitalWrite(RELAY, LOW);  }   // note: inverted
+inline void relayOff() { digitalWrite(RELAY, HIGH); }
+
+void loop() {
+  relayOn();  delay(2000);     // load powered for 2 s
+  relayOff(); delay(2000);     // and off for 2 s
+}
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — when isolation is the whole point</div>
+        <p>In an industrial PLC, the 24&nbsp;V logic and the 400&nbsp;V three-phase motor it commands are deliberately kept on separate ground planes joined only through opto-couplers and relay contacts. The reason is brutal and concrete: a motor fault can dump a kilovolt transient onto its wiring, and the isolation barrier is the only thing standing between that transient and a $50,000 controller. The same principle scales down to your $3 relay board — never let mains and logic share copper.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — mains is not a tutorial</div>
+        <p>230&nbsp;V / 120&nbsp;V mains can kill you. If you are not certain of creepage distances, enclosure, fusing, and earthing, switch a <strong>low-voltage DC load</strong> (a 12&nbsp;V fan, an LED strip) for practice and leave mains to qualified work. The firmware is identical; the consequences of a slip are not.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="motors-hbridge"><span class="sec-no">6</span>DC motors &amp; the H-bridge: direction + speed</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>four switches that reverse a motor</small></div>
+      <p>A DC motor spins one way when current flows through it, the other way when current reverses. To reverse current from a single supply you need an <strong>H-bridge</strong>: four switches arranged like the letter H around the motor. Close the top-left + bottom-right pair and current flows one way; close top-right + bottom-left and it flows the other. A driver chip like the <strong>L298N</strong> (older, BJT, ~1.7&nbsp;V drop, up to 2&nbsp;A/channel) or the far more efficient <strong>DRV8833</strong> (MOSFET, low drop, up to ~1.5&nbsp;A/channel) packages two H-bridges so you can drive two motors.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — shoot-through</div>
+        <p>Never close both switches on the <em>same side</em> of the H (e.g. top-left + bottom-left). That shorts the supply straight to ground through two transistors — "shoot-through" — and destroys the bridge in microseconds. The forbidden input combination is the reason driver chips exist: they enforce dead-time and reject illegal states for you.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>speed from PWM duty</small></div>
+      <p>The H-bridge sets direction; <strong>PWM</strong> (Chapter 4) on the enable pin sets speed. A DC motor's average applied voltage is the supply scaled by the duty cycle, and to a first approximation its no-load speed is proportional to that average voltage:</p>
+
+      <div class="math-box">
+        $$ \bar{V}_{\text{motor}} = D \cdot V_{\text{supply}}, \qquad \omega \;\approx\; \frac{\bar{V}_{\text{motor}} - I\,R_a}{k_e} $$
+      </div>
+
+      <p>where <span>$D$</span> is duty (0–1), <span>$k_e$</span> is the motor's back-EMF constant, and <span>$I R_a$</span> is the armature-resistance drop. The takeaway: <strong>duty cycle is your throttle</strong>. At <span>$D = 0.5$</span> on a 12&nbsp;V supply the motor sees ~6&nbsp;V average and runs near half its no-load speed (under load it's softer because of the <span>$IR_a$</span> term). The H-bridge transistors must also be PWM-friendly, which is why we switch the <strong>enable</strong> line, not the direction lines.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>direction + speed with a DRV8833-style driver</small></div>
+      <p>Here we use the L298N convention: two direction inputs (<code>IN1</code>, <code>IN2</code>) set polarity, and a PWM-capable <code>ENA</code> pin sets speed via <code>analogWrite</code>. The truth table below the code is the whole mental model.</p>
+
+      <div class="codeblock">
+        <div class="code-head">hbridge.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t IN1 = 4, IN2 = 5;   // direction control
+const uint8_t ENA = 6;            // PWM speed (pin 6 = Timer0 OC0A on Uno)
+
+void setup() {
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT); pinMode(ENA, OUTPUT);
+}
+
+// speed: 0..255 PWM duty; dir: +1 forward, -1 reverse, 0 = coast/brake
+void drive(int speed, int dir) {
+  if (dir &gt; 0)      { digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);  }
+  else if (dir &lt; 0) { digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH); }
+  else              { digitalWrite(IN1, LOW);  digitalWrite(IN2, LOW);  } // coast
+  analogWrite(ENA, constrain(speed, 0, 255));   // duty = speed/255
+}
+
+void loop() {
+  drive(200, +1); delay(1500);   // forward, ~78% duty
+  drive(0,    0); delay(400);    // coast
+  drive(120, -1); delay(1500);   // reverse, ~47% duty
+  drive(0,    0); delay(400);
+}
+</code></pre>
+      </div>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th><code>IN1</code></th><th><code>IN2</code></th><th>Motor</th><th>Effect</th></tr></thead>
+        <tbody>
+          <tr><td>HIGH</td><td>LOW</td><td>→ forward</td><td>current A→B</td></tr>
+          <tr><td>LOW</td><td>HIGH</td><td>← reverse</td><td>current B→A</td></tr>
+          <tr><td>LOW</td><td>LOW</td><td>coast</td><td>both low side off → freewheel</td></tr>
+          <tr><td>HIGH</td><td>HIGH</td><td>brake</td><td>both terminals shorted → fast stop</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Servos vs. DC motors vs. steppers</div>
+        <p><strong>Hobby servo</strong> (Chapter on PWM): you command an <em>angle</em> with a 1–2&nbsp;ms pulse every 20&nbsp;ms; it has its own internal H-bridge and feedback. <strong>DC motor</strong>: you command direction + speed; <em>you</em> supply the H-bridge. <strong>Stepper</strong>: discrete steps via a sequenced multi-coil driver (A4988/DRV8825). Different jobs, different drivers — but every one of them needs flyback protection because every one is a coil.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="power-discipline"><span class="sec-no">7</span>Power discipline: separate supplies, common ground</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>why your MCU resets when the motor starts</small></div>
+      <p>The single most common beginner failure: the robot drives forward and the Arduino reboots. Cause: the motor's inrush current (it can briefly pull <strong>5–10×</strong> its running current at stall/startup) collapses the shared 5&nbsp;V rail below the brown-out threshold, and the MCU resets. The fix is <strong>power discipline</strong>.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The three rules of mixed-signal power</div>
+        <p><strong>1. Separate the motor supply.</strong> Run motors/relays from their own battery or regulator, never through the MCU's 5&nbsp;V pin.<br>
+        <strong>2. Common ground.</strong> All supplies' grounds <em>must</em> be tied together — otherwise control signals have no shared reference and the H-bridge reads garbage. This is the rule beginners skip and then can't explain why nothing works.<br>
+        <strong>3. Decouple everything.</strong> A 100&nbsp;nF ceramic close to each chip's VCC, plus a bulk 100–470&nbsp;µF electrolytic across the motor supply, to absorb switching transients.</p>
+      </div>
+
+      <div class="mermaid">
+flowchart TB
+    BAT["Battery / motor supply"] --> REG["5V regulator"]
+    REG --> MCU["MCU VCC"]
+    BAT --> DRV["Motor driver VM"]
+    MCU -. "signal" .-> DRV
+    GND([COMMON GROUND]) --- MCU
+    GND --- DRV
+    GND --- BAT
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>budgeting current</small></div>
+      <p>Add up worst-case currents before you choose a supply. For a two-motor robot: two motors at stall, a sonar, and the MCU:</p>
+
+      <div class="math-box">
+        $$ I_{\text{total}} = \sum_k I_k = 2\,(0.8\,\text{A}) + 0.015\,\text{A} + 0.05\,\text{A} \approx 1.67\,\text{A} $$
+      </div>
+
+      <p>Pick a supply rated comfortably above that — say 2.5&nbsp;A — so transients don't sag the rail. Then size your wires and the driver's current rating to the same budget. An L298N caps around 2&nbsp;A/channel <em>and</em> wastes ~1.7&nbsp;V per channel as heat; a DRV8833 keeps far more of your battery in the motor. Current budgeting is the difference between a robot that runs all afternoon and one that resets every time it turns.</p>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="real-case-robot"><span class="sec-no">8</span>Real case: an obstacle-avoiding robot</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>this is the whole chapter in one loop</small></div>
+      <p>Everything above composes into a tiny autonomous robot: an HC-SR04 looks ahead, the firmware decides, and an H-bridge steers two DC motors. Sense → decide → act — the signal chain from §1, made real.</p>
+
+      <div class="codeblock">
+        <div class="code-head">avoider.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">// Pins: sonar on 9/10, left motor IN1/IN2 + ENL, right motor IN3/IN4 + ENR.
+const uint8_t TRIG=9, ECHO=10;
+const uint8_t IN1=4, IN2=5, ENL=6, IN3=7, IN4=8, ENR=11;
+const float   STOP_CM = 25.0f;     // turn away if obstacle closer than this
+
+float ping() {
+  digitalWrite(TRIG, LOW);  delayMicroseconds(2);
+  digitalWrite(TRIG, HIGH); delayMicroseconds(10);
+  digitalWrite(TRIG, LOW);
+  unsigned long t = pulseIn(ECHO, HIGH, 30000UL);
+  return t ? t / 58.3f : 999.0f;   // no echo =&gt; treat as "far"
+}
+
+void wheels(int l, int lDir, int r, int rDir) {
+  digitalWrite(IN1, lDir &gt; 0); digitalWrite(IN2, lDir &lt; 0); analogWrite(ENL, l);
+  digitalWrite(IN3, rDir &gt; 0); digitalWrite(IN4, rDir &lt; 0); analogWrite(ENR, r);
+}
+
+void setup() {
+  pinMode(TRIG, OUTPUT); pinMode(ECHO, INPUT);
+  uint8_t outs[] = {IN1,IN2,ENL,IN3,IN4,ENR};
+  for (uint8_t p : outs) pinMode(p, OUTPUT);
+}
+
+void loop() {
+  if (ping() &lt; STOP_CM) {           // obstacle ahead: spin in place to the right
+    wheels(180, +1, 180, -1);
+    delay(350);
+  } else {                          // clear: drive forward at ~70% duty
+    wheels(180, +1, 180, +1);
+  }
+  delay(60);                        // honor the &gt;=60 ms sonar spacing
+}
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — this pattern ships in real products</div>
+        <p>A robot vacuum is exactly this loop scaled up: cliff sensors and bumpers feed a decision layer that commands a dual H-bridge for the drive wheels and a brushless driver for the suction motor — each inductive load with its own freewheeling protection, all on a star-grounded power tree fed from one battery through separate regulators. The $20 desk robot and the $400 vacuum run the same skeleton you just read. Master the skeleton and you can build either.</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>⑤ Your turn</h2>
+      <div class="layer"><span class="step">⑤</span> Practice <small>you write &amp; decide</small></div>
+      <p>Three checks. Tap an answer, type a number, or reveal a coding challenge. Your progress is saved on this device and shown on the home page.</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="ard07-flyback-ground">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You wire a DC motor to an external 9&nbsp;V battery through an H-bridge, with the Arduino on its own 5&nbsp;V supply. The motor twitches randomly and the bridge reads garbage commands. You add a flyback diode and it still misbehaves. What is the most likely <em>remaining</em> mistake?</div>
+        <ul class="ex-options">
+          <li data-correct="false">The flyback diode is too small — use a bigger one</li>
+          <li data-correct="true">The two supplies' grounds aren't tied together (no common ground)</li>
+          <li data-correct="false">The motor needs a higher PWM frequency</li>
+          <li data-correct="false">The Arduino pin can't source enough current for the motor</li>
+        </ul>
+        <div class="ex-explain">With separate supplies you <strong>must</strong> join their grounds. Logic signals are voltages <em>relative to ground</em>; without a shared reference the driver can't tell HIGH from LOW and reads garbage. The flyback diode protects against back-EMF (a different problem), and the Arduino pin only drives the driver's logic input, not the motor — so common ground is the missing piece.</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="ard07-sonar-distance" data-answer="30" data-tol="1">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">Your HC-SR04's ECHO pulse measures <strong>1740&nbsp;µs</strong> wide. How far away is the obstacle, in <strong>centimetres</strong>? (Use the rule $d_{\text{cm}} = t_{\mu s}/58$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="cm"><span class="ex-unit">cm</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$d = 1740 / 58 = 30\ \text{cm}$. Cross-check in SI: $d = v\,t/2 = 0.0343\,(\text{cm}/\mu s) \times 1740\,\mu s / 2 = 29.9\ \text{cm}$. The "/58" rule is just $2/0.0343$, rounded — fast enough to run every loop.</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="ard07-pulsein-distance">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — distance with <code>pulseIn</code></div>
+        <div class="ex-q">Write a function <code>float distanceCm()</code> for an HC-SR04 on <code>TRIG = 3</code>, <code>ECHO = 2</code>. It must fire a proper 10&nbsp;µs trigger pulse, time the echo with a timeout, and return centimetres (or <code>-1</code> if no echo arrives). Then print a reading once per second.</div>
+        <details class="ex-acc">
+          <summary>Hint</summary>
+          <div class="acc-body">The sequence is: drive TRIG LOW briefly, HIGH for 10&nbsp;µs (<code>delayMicroseconds(10)</code>), back LOW. Then <code>pulseIn(ECHO, HIGH, 30000)</code> gives the width in µs; divide by 58.3. A return of <code>0</code> from <code>pulseIn</code> means the timeout expired — translate that into your <code>-1</code> sentinel.</div>
+        </details>
+        <details class="ex-acc">
+          <summary>Show one solution</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">distance.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t TRIG = 3;
+const uint8_t ECHO = 2;
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(TRIG, OUTPUT);
+  pinMode(ECHO, INPUT);
+  digitalWrite(TRIG, LOW);
+}
+
+float distanceCm() {
+  digitalWrite(TRIG, LOW);  delayMicroseconds(2);
+  digitalWrite(TRIG, HIGH); delayMicroseconds(10);   // 10 us trigger
+  digitalWrite(TRIG, LOW);
+
+  unsigned long t = pulseIn(ECHO, HIGH, 30000UL);    // us, ~5 m cap
+  if (t == 0) return -1.0f;                          // no echo
+  return t / 58.3f;                                  // d_cm = t_us / 58.3
+}
+
+void loop() {
+  float cm = distanceCm();
+  if (cm &lt; 0) Serial.println(F("no echo"));
+  else { Serial.print(cm, 1); Serial.println(F(" cm")); }
+  delay(1000);
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">The timeout is the production-grade detail: without it, a missing echo makes <code>pulseIn</code> block for up to a second and your control loop stalls. Capping at 30&nbsp;ms bounds the worst case to ~5&nbsp;m of range and keeps the loop responsive.</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> Chapter recap</div>
+        <p>You can now reason about a full signal chain from sensor to actuator: time an HC-SR04 echo and convert it to distance with <span>$d_{\text{cm}} = t_{\mu s}/58.3$</span>; decode a DHT one-wire frame and verify its checksum; protect every inductive load with a correctly oriented flyback diode (<span>$v_L = L\,di/dt$</span> is why), and reach for an RC snubber on AC contacts; switch dangerous loads behind opto-isolated relays; drive a DC motor's direction with an H-bridge and its speed with PWM duty while avoiding shoot-through; and keep the whole thing alive with separate supplies, a <strong>common ground</strong>, decoupling, and an honest current budget. That's everything a small autonomous robot needs — sense, decide, act, and survive its own actuators.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="Back to top">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+
+<!-- chapter-specific simulator: echo time -> distance -->
+<script>
+EM.sim("sim-sonar", {
+  height: 240,
+  params: [
+    { key: "echo", label: "ECHO width (µs)", min: 116, max: 5800, step: 58, value: 1740, unit: "µs" }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h;
+    var pad = 46 * dpr;
+    var cm = v.echo / 58.3;                 // the firmware's exact formula
+    var maxCm = 5800 / 58.3;                // full-scale range (~99 cm shown axis)
+    var yMid = H / 2;
+
+    // axis / track line
+    ctx.strokeStyle = "#262d3a"; ctx.lineWidth = 1 * dpr;
+    ctx.beginPath(); ctx.moveTo(pad, yMid); ctx.lineTo(W - 14 * dpr, yMid); ctx.stroke();
+
+    // sensor (left)
+    ctx.fillStyle = "#2ec4b6";
+    ctx.fillRect(pad - 22 * dpr, yMid - 16 * dpr, 22 * dpr, 32 * dpr);
+    ctx.fillStyle = "#6e7681"; ctx.font = (12 * dpr) + "px monospace";
+    ctx.fillText("HC-SR04", 6 * dpr, yMid - 24 * dpr);
+
+    // obstacle position scaled across the track
+    var x = pad + (cm / maxCm) * (W - pad - 30 * dpr);
+    // sound pulses (animated dashes between sensor and obstacle)
+    ctx.strokeStyle = "#3a8bdd"; ctx.lineWidth = 2 * dpr;
+    ctx.setLineDash([6 * dpr, 6 * dpr]);
+    ctx.beginPath(); ctx.moveTo(pad, yMid); ctx.lineTo(x, yMid); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // obstacle (wall)
+    ctx.fillStyle = "#e0b341";
+    ctx.fillRect(x, yMid - 26 * dpr, 10 * dpr, 52 * dpr);
+
+    // distance label
+    ctx.fillStyle = "#cfd6e0"; ctx.font = (13 * dpr) + "px monospace";
+    ctx.fillText((Math.round(cm * 10) / 10) + " cm", x - 4 * dpr, yMid - 34 * dpr);
+
+    var d1 = Math.round(cm * 10) / 10;
+    var dSI = Math.round((0.0343 * v.echo / 2) * 10) / 10;
+    return "ECHO <b>t</b> = " + v.echo + " µs &nbsp;·&nbsp; <b>d</b> = t/58.3 = <b>" +
+           d1 + " cm</b> &nbsp;·&nbsp; SI check (v·t/2) = " + dSI + " cm";
+  }
+});
+</script>
+</body>
+</html>

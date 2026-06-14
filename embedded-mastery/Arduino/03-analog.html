@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>The Analog World: ADC, Sensors &amp; Signal Conditioning — Embedded Mastery</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="track-arduino" data-track="arduino" data-chapter="03-analog">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">Arduino · Ch 03</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Arduino Track · Chapter 03 · Intermediate</div>
+        <h1>The Analog World: ADC, Sensors &amp; Signal Conditioning</h1>
+        <p>So far your pins have lived in a binary universe — <code>HIGH</code> or <code>LOW</code>, on or off. But temperature, light, pressure, and battery voltage are <em>continuous</em>. To read them you need the chip's most under-appreciated peripheral: the <strong>analog-to-digital converter</strong>. We'll build it from intuition, derive its precision to the millivolt, and wire up real sensors that ship in real products.</p>
+        <div class="meta">
+          <span>⏱ ~45 min</span><span>🧠 Quantization</span><span>⚡ Real sensors</span><span>📐 Divider math</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="analog-vs-digital"><span class="sec-no">1</span>Analog vs digital: the world is a smooth curve</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>A digital signal has exactly two states. An <strong>analog</strong> signal can be <em>any</em> value in a range, varying smoothly through time — the voltage from a microphone, the slow drift of a temperature sensor, the position of a knob. Nature does not deal in <code>HIGH</code> and <code>LOW</code>; it deals in infinitely fine gradations.</p>
+
+      <p>Your 8-bit AVR, however, only understands numbers. It cannot hold "3.27 volts" as a continuous quantity — it must convert that voltage into an <em>integer</em> it can store and do math on. The peripheral that performs this translation is the <strong>ADC</strong> (analog-to-digital converter), and <code>analogRead()</code> is your one-line door to it.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence model</div>
+        <p>An ADC is a <strong>ruler for voltage</strong>. It lays a fixed number of evenly spaced tick marks across its measurement range and reports <em>which tick</em> your input voltage is closest to — as a plain integer.</p>
+      </div>
+
+      <p>That word "closest" is the whole story. A ruler with millimetre ticks cannot tell you something is 4.37 mm — it rounds to 4 mm. An ADC does the same to voltage. This rounding is called <strong>quantization</strong>, and understanding it is the difference between trusting your sensor data and being fooled by it.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Two pin worlds</div>
+        <p>The Uno's pins labelled <code>D0</code>–<code>D13</code> are <strong>digital</strong> (two states). The six pins labelled <code>A0</code>–<code>A5</code> route to the <strong>ADC</strong> and can each be <em>read</em> as a continuous voltage. (They double as digital pins too — but only A0–A5 reach the converter.)</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="adc-resolution"><span class="sec-no">2</span>Resolution: how many ticks on the ruler?</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive the precision</small></div>
+      <p>An ADC's <strong>resolution</strong> is how many distinct values it can output, set by its bit count <span>$N$</span>. With <span>$N$</span> bits you can encode</p>
+
+      <div class="math-box">
+        $$ \text{levels} = 2^{N} $$
+      </div>
+
+      <p>The ATmega328P's ADC is <strong>10-bit</strong>, so it produces</p>
+
+      <div class="math-box">
+        $$ 2^{10} = 1024 \text{ levels}, \quad \text{numbered as codes } 0,1,2,\dots,1023 $$
+      </div>
+
+      <p>Code <code>0</code> means "voltage at or below the bottom of the range"; code <code>1023</code> means "at or above the top." Everything in between maps to one of the 1022 interior ticks. The size of one tick — the smallest voltage change the ADC can resolve — is the <strong>LSB</strong> (least-significant bit), found by dividing the full range by the number of <em>steps</em>:</p>
+
+      <div class="math-box">
+        $$ V_{\text{LSB}} = \frac{V_{\text{ref}}}{2^{N}} = \frac{V_{\text{ref}}}{1024} $$
+      </div>
+
+      <p>With the Uno's default reference of <span>$V_{\text{ref}} = 5\,\text{V}$</span>:</p>
+
+      <div class="math-box">
+        $$ V_{\text{LSB}} = \frac{5\,\text{V}}{1024} \approx 4.883\,\text{mV} $$
+      </div>
+
+      <p>That is your floor: the Uno cannot distinguish two voltages closer than ~4.9 mV apart. Want finer resolution? Either shrink <span>$V_{\text{ref}}$</span> (a 1.1 V internal reference gives ~1.07 mV/LSB but only over 0–1.1 V) or move to a chip with a 12- or 16-bit ADC.</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Quantization error is bounded</div>
+        <p>Because the ADC rounds to the nearest tick, any single reading is off by at most <strong>half a tick</strong>. The worst-case quantization error is</p>
+        <div class="math-box">$$ \varepsilon_{q} = \pm\tfrac{1}{2}V_{\text{LSB}} = \pm\frac{V_{\text{ref}}}{2048} \approx \pm 2.44\,\text{mV} $$</div>
+        <p>This error is inherent — it exists even with a perfect, noise-free input. It is the price of representing a smooth world with integers.</p>
+      </div>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>ADC bits <span>$N$</span></th><th>Levels <span>$2^N$</span></th><th>LSB at 5 V</th><th>Typical home</th></tr></thead>
+        <tbody>
+          <tr><td>8-bit</td><td>256</td><td><code>19.5 mV</code></td><td>Cheap converters</td></tr>
+          <tr><td><strong>10-bit</strong></td><td><strong>1024</strong></td><td><code>4.88 mV</code></td><td><strong>Arduino Uno (ATmega328P)</strong></td></tr>
+          <tr><td>12-bit</td><td>4096</td><td><code>1.22 mV</code></td><td>STM32, ESP32, Due</td></tr>
+          <tr><td>16-bit</td><td>65536</td><td><code>76.3 µV</code></td><td>External ADCs (ADS1115)</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="conversion-analogread"><span class="sec-no">3</span>From code to volts: <code>analogRead()</code> and AREF</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>invert the mapping</small></div>
+      <p><code>analogRead(pin)</code> hands you the integer code, not a voltage. To recover the voltage you invert the ruler. The subtle bit: although there are 1024 <em>levels</em>, the full-scale reading spans 1023 <em>steps</em> from code 0 to code 1023, so the Arduino convention maps the code linearly onto <span>$[0, V_{\text{ref}}]$</span> with</p>
+
+      <div class="math-box">
+        $$ V = \frac{\text{adc}}{1023}\, V_{\text{ref}} $$
+      </div>
+
+      <p>So a reading of <code>512</code> at <span>$V_{\text{ref}} = 5\,\text{V}$</span> is <span>$\tfrac{512}{1023}\times 5 \approx 2.503\,\text{V}$</span> — almost exactly mid-scale, as you'd expect. (You'll meet this exact computation again in the exercises.)</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">read_voltage.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t SENSE_PIN = A0;     // analog input A0
+const float   VREF      = 5.0;    // reference voltage (Uno default)
+
+void setup() {
+  Serial.begin(9600);
+  // Analog pins do NOT need pinMode for analogRead — the ADC
+  // multiplexer handles selection. But leave them un-driven.
+}
+
+void loop() {
+  int   raw     = analogRead(SENSE_PIN);   // 0..1023, takes ~104 µs
+  float volts   = (raw / 1023.0) * VREF;   // invert the quantizer
+
+  Serial.print(raw);
+  Serial.print(F("  ->  "));
+  Serial.print(volts, 3);                  // 3 decimal places
+  Serial.println(F(" V"));
+  delay(200);
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — integer division eats your reading</div>
+        <p>Write <code>raw / 1023</code> (both integers) and C++ does <em>integer</em> division: any code below 1023 becomes <code>0</code>. You must force floating point with <code>raw / 1023.0</code> (note the <code>.0</code>) so the fractional voltage survives. This silent bug bites nearly every beginner exactly once.</p>
+      </div>
+
+      <p>What is <span>$V_{\text{ref}}$</span> physically? It's the voltage the ADC compares against — its "top of ruler." On the Uno you choose it with <code>analogReference()</code>:</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Option</th><th>Reference</th><th>LSB</th><th>Use when…</th></tr></thead>
+        <tbody>
+          <tr><td><code>DEFAULT</code></td><td>5 V (V<sub>CC</sub>)</td><td>4.88 mV</td><td>General use; range matches 5 V logic</td></tr>
+          <tr><td><code>INTERNAL</code></td><td>1.1 V (on-chip bandgap)</td><td>1.07 mV</td><td>Small signals; stable even if V<sub>CC</sub> sags</td></tr>
+          <tr><td><code>EXTERNAL</code></td><td>voltage on the <code>AREF</code> pin</td><td>V<sub>AREF</sub>/1024</td><td>You supply a precision reference</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — AREF short-circuit</div>
+        <p>If you wire an external voltage to the <code>AREF</code> pin and <em>then</em> call <code>analogReference(EXTERNAL)</code>, you're fine. Do it in the other order — leaving the default internal reference connected while driving AREF — and you short the internal source to your external one. Always select <code>EXTERNAL</code> <strong>before</strong> the first <code>analogRead()</code>.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="sampling-nyquist"><span class="sec-no">4</span>How fast can it sample? Prescaler &amp; Nyquist</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>where the speed comes from</small></div>
+      <p>A conversion is not instant — the ADC uses <strong>successive approximation</strong>, essentially a binary search that halves a comparison voltage ten times to pin down all ten bits. It runs from its own clock, derived from the 16 MHz system clock through a <strong>prescaler</strong>. The AVR datasheet specifies the ADC clock should sit between 50 kHz and 200 kHz for full 10-bit accuracy, so the Arduino core picks a prescaler of <strong>128</strong>:</p>
+
+      <div class="math-box">
+        $$ f_{\text{ADC}} = \frac{f_{\text{clk}}}{128} = \frac{16\,\text{MHz}}{128} = 125\,\text{kHz} $$
+      </div>
+
+      <p>One normal conversion takes <strong>13 ADC clock cycles</strong>. So the time per sample and the resulting throughput are</p>
+
+      <div class="math-box">
+        $$ t_{\text{conv}} = \frac{13}{f_{\text{ADC}}} = \frac{13}{125\,000} \approx 104\,\mu\text{s}, \qquad f_{s} = \frac{f_{\text{ADC}}}{13} \approx 9.6\,\text{ksps} $$
+      </div>
+
+      <p>That's it — roughly <strong>9600 samples per second</strong> at the default settings, the number behind the <code>~104 µs</code> comment in the code above. You can drop the prescaler to 16 (1 MHz ADC clock) for ~77 ksps if you accept slightly noisier low bits — a common trick for audio-rate sampling.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Nyquist in one line</div>
+        <p>To reconstruct a signal of frequency <span>$f_{\text{sig}}$</span> you must sample faster than <strong>twice</strong> it:</p>
+        <div class="math-box">$$ f_{s} > 2\,f_{\text{sig}} $$</div>
+        <p>At 9.6 ksps the Uno can faithfully capture signals up to ~4.8 kHz. Feed it anything faster and it <em>aliases</em> — a 10 kHz tone masquerades as a slow phantom wave. That's why audio gear puts a low-pass "anti-aliasing" filter before the ADC.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="voltage-dividers"><span class="sec-no">5</span>The voltage divider: your universal sensor interface</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>turn resistance into voltage</small></div>
+      <p>Most cheap sensors don't output a voltage — they change their <em>resistance</em>: an LDR gets less resistive in light, a thermistor less resistive when warm. But the ADC only reads voltage. The bridge between the two is the most-used circuit in all of electronics: the <strong>voltage divider</strong>.</p>
+
+      <p>Put two resistors in series across your supply. The midpoint between them sits at a voltage set by their ratio. If <span>$R_1$</span> is on top (toward V<sub>in</sub>) and <span>$R_2$</span> on the bottom (toward ground), the midpoint voltage is</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive it from Ohm's law</small></div>
+      <div class="math-box">
+        $$ V_{\text{out}} = V_{\text{in}}\,\frac{R_2}{R_1 + R_2} $$
+      </div>
+
+      <p>Why? The same current <span>$I = V_{\text{in}}/(R_1+R_2)$</span> flows through both resistors (series). The voltage across the bottom resistor is <span>$I\,R_2$</span>; substitute <span>$I$</span> and the <span>$R_1+R_2$</span> denominator appears. Sanity-check the extremes: if <span>$R_2 \to 0$</span> the output is 0 V; if <span>$R_2 \to \infty$</span> the output approaches the full <span>$V_{\text{in}}$</span>. The ratio simply slides the midpoint up and down.</p>
+
+      <div class="mermaid">
+flowchart LR
+    SENSOR["Resistive sensor<br/>LDR / thermistor"] --> DIV["Voltage divider<br/>fixed R + sensor"]
+    DIV --> ADC["ADC<br/>10-bit quantizer"]
+    ADC --> CODE["analogRead()<br/>code 0..1023"]
+    CODE --> CALC["Your code<br/>volts → physical units"]
+      </div>
+
+      <p>That chain — <strong>sensor → divider → ADC → code → physical units</strong> — is the skeleton of nearly every analog measurement you'll ever build. Master it once and every resistive sensor becomes the same problem.</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Picking the fixed resistor</div>
+        <p>For best sensitivity, choose the <em>fixed</em> resistor near the sensor's resistance <strong>at the value you care most about</strong>. A 10 kΩ thermistor at room temperature pairs beautifully with a 10 kΩ fixed resistor — the divider output then swings most steeply right where you're measuring.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="real-sensors"><span class="sec-no">6</span>Three real sensors: LDR, thermistor &amp; TMP36</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>and the math behind each</small></div>
+
+      <p><strong>The LDR (light).</strong> A light-dependent resistor drops from megohms in the dark to a few hundred ohms in bright light. Wire it as the top resistor of a divider with a fixed 10 kΩ to ground; brighter light raises the ADC reading. No fancy math — you just map the code to "darker/lighter" or calibrate against known lux.</p>
+
+      <p><strong>The NTC thermistor (temperature, nonlinear).</strong> Its resistance falls as it heats, but <em>exponentially</em>, not linearly. The simple <strong>Beta model</strong> relates its resistance <span>$R$</span> to temperature in kelvin:</p>
+
+      <div class="math-box">
+        $$ \frac{1}{T} = \frac{1}{T_0} + \frac{1}{B}\ln\!\left(\frac{R}{R_0}\right) $$
+      </div>
+
+      <p>Here <span>$R_0$</span> is the rated resistance at reference temperature <span>$T_0$</span> (usually 25 °C = 298.15 K), and <span>$B$</span> is the datasheet "Beta" constant (~3950 K for common 10 kΩ parts). You read the divider, solve for the thermistor's <span>$R$</span>, then plug into the equation. For higher accuracy the full <strong>Steinhart–Hart</strong> equation adds two more coefficients, but Beta is within a fraction of a degree over a normal room-to-oven range.</p>
+
+      <div class="codeblock">
+        <div class="code-head">thermistor.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;math.h&gt;
+
+const float VREF   = 5.0;
+const float R_FIX  = 10000.0;   // 10 kΩ fixed resistor (to GND)
+const float R0     = 10000.0;   // thermistor 10 kΩ @ 25 °C
+const float T0     = 298.15;    // 25 °C in kelvin
+const float BETA   = 3950.0;    // datasheet Beta constant (K)
+
+void setup() { Serial.begin(9600); }
+
+void loop() {
+  int   raw   = analogRead(A0);
+  float v     = (raw / 1023.0) * VREF;
+
+  // Thermistor is the TOP resistor; R_FIX to GND is the bottom.
+  // Vout = VREF * R_FIX / (R_therm + R_FIX)  ->  solve for R_therm:
+  float rTherm = R_FIX * (VREF / v - 1.0);
+
+  // Beta equation: 1/T = 1/T0 + (1/B)·ln(R/R0)
+  float invT  = 1.0 / T0 + (1.0 / BETA) * log(rTherm / R0);
+  float tempC = (1.0 / invT) - 273.15;   // kelvin -> Celsius
+
+  Serial.print(tempC, 2);
+  Serial.println(F(" C"));
+  delay(500);
+}
+</code></pre>
+      </div>
+
+      <p><strong>The TMP36 (temperature, linear and easy).</strong> This active sensor does the hard work internally and outputs a clean voltage: 500 mV at 0 °C, rising a tidy <strong>10 mV per °C</strong>. No divider, no logarithms — just invert a line:</p>
+
+      <div class="math-box">
+        $$ T_{\circ C} = \frac{V_{\text{out}} - 0.5\,\text{V}}{0.01\,\text{V}/^{\circ}\text{C}} $$
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">tmp36.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const float VREF = 5.0;
+
+void setup() { Serial.begin(9600); }
+
+void loop() {
+  int   raw   = analogRead(A0);
+  float v     = (raw / 1023.0) * VREF;       // sensor output, volts
+  float tempC = (v - 0.5) / 0.01;            // 500 mV @ 0°C, 10 mV/°C
+
+  Serial.print(tempC, 1);
+  Serial.println(F(" C"));
+  delay(500);
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the 5 V reference wobbles</div>
+        <p>Every formula above assumes <span>$V_{\text{ref}}$</span> is exactly 5.000 V. Powered over USB, your "5 V" rail can sag to 4.7 V under load, skewing every reading by ~6%. For temperature work, switch to <code>analogReference(INTERNAL)</code> (the rock-stable 1.1 V bandgap) or measure your actual V<sub>CC</sub> and use it as <span>$V_{\text{ref}}$</span> — a trick we use next.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="noise-averaging"><span class="sec-no">7</span>Noise &amp; averaging: buying bits with √N</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>signal-to-noise scaling</small></div>
+      <p>Raw ADC readings jitter. Electrical noise, a noisy supply, and the quantization floor itself make consecutive samples of a steady voltage dance by a count or two. The cheapest cure is <strong>oversampling</strong>: take many readings and average them.</p>
+
+      <p>If the noise is random and uncorrelated, averaging <span>$N$</span> samples leaves the <em>signal</em> unchanged but shrinks the noise's standard deviation by <span>$\sqrt{N}$</span>. So the signal-to-noise ratio improves as</p>
+
+      <div class="math-box">
+        $$ \text{SNR}_{\text{avg}} = \sqrt{N}\;\cdot\;\text{SNR}_{\text{single}} $$
+      </div>
+
+      <p>Averaging 16 samples cuts noise by <span>$\sqrt{16}=4\times$</span>; 64 samples by <span>$8\times$</span>. There's a catch baked into the square root — diminishing returns. Going from 16 to 64 samples (4× the work) only doubles your noise reduction. Each extra <em>bit</em> of effective resolution costs <span>$4\times$</span> the samples, since <span>$\sqrt{4}=2$</span>.</p>
+
+      <div class="codeblock">
+        <div class="code-head">averaged_read.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">// Read a pin N times and return the mean as a float code.
+float readAveraged(uint8_t pin, uint8_t n) {
+  uint32_t sum = 0;                  // 32-bit: 64 × 1023 won't overflow
+  for (uint8_t i = 0; i &lt; n; i++) {
+    sum += analogRead(pin);
+    // a tiny settling delay helps after switching ADC channels
+    delayMicroseconds(50);
+  }
+  return (float)sum / n;             // averaged code, 0..1023
+}
+
+void loop() {
+  float code  = readAveraged(A0, 64);     // 64-sample mean
+  float volts = (code / 1023.0) * 5.0;
+  Serial.println(volts, 4);
+  delay(100);
+}
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Hardware beats software</div>
+        <p>Software averaging helps, but kill noise at the source first: solder a <strong>0.1 µF decoupling capacitor</strong> from the analog pin (or AREF) to ground. It forms a low-pass filter with the sensor's resistance, swallowing high-frequency hash before it ever reaches the sample-and-hold. One cheap ceramic cap often does more than 64 averaged reads.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="battery-monitor"><span class="sec-no">8</span>Real case: monitoring a battery you can't read directly</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>this ships in products</small></div>
+      <p>Here's a problem every battery-powered product faces. A 2-cell LiPo pack sits around <strong>8.4 V</strong> fully charged — but the ADC tops out at 5 V. Feed 8.4 V into <code>A0</code> and you'll let the magic smoke out of the chip. The fix is exactly the divider you just learned: scale the battery voltage down into the ADC's safe window, then scale the <em>number</em> back up in software.</p>
+
+      <p>Choose <span>$R_1 = 100\,\text{k}\Omega$</span> (top, to the battery) and <span>$R_2 = 47\,\text{k}\Omega$</span> (bottom, to ground). At a full 8.4 V the divider output is</p>
+
+      <div class="math-box">
+        $$ V_{\text{out}} = 8.4 \times \frac{47\text{k}}{100\text{k}+47\text{k}} = 8.4 \times 0.320 \approx 2.69\,\text{V} $$
+      </div>
+
+      <p>Comfortably under 5 V. The ratio <span>$(R_1+R_2)/R_2 \approx 3.13$</span> is your software multiplier: measure <span>$V_{\text{out}}$</span>, multiply back up, recover the true pack voltage. Large resistor values (hundreds of kΩ) keep the divider's idle current in microamps — important when you're trying to make a battery last.</p>
+
+      <div class="codeblock">
+        <div class="code-head">battery_monitor.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t BATT_PIN = A0;
+const float   VREF     = 5.0;
+const float   R1       = 100000.0;   // top resistor (to battery +)
+const float   R2       = 47000.0;    // bottom resistor (to GND)
+
+// Divider gain we must undo in software:
+const float DIVIDER_GAIN = (R1 + R2) / R2;   // ≈ 3.128
+
+void setup() { Serial.begin(9600); }
+
+void loop() {
+  // average to tame noise on a long sense wire
+  uint32_t sum = 0;
+  for (uint8_t i = 0; i &lt; 16; i++) sum += analogRead(BATT_PIN);
+  float code   = sum / 16.0;
+
+  float vAdc   = (code / 1023.0) * VREF;      // voltage at the pin
+  float vBatt  = vAdc * DIVIDER_GAIN;         // scale back to pack voltage
+
+  Serial.print(F("Battery: "));
+  Serial.print(vBatt, 2);
+  Serial.println(F(" V"));
+
+  if (vBatt &lt; 6.4) Serial.println(F("!! LOW — shut down soon"));
+  delay(1000);
+}
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — the potentiometer is a divider too</div>
+        <p>That knob on your dashboard? A <strong>potentiometer is a voltage divider with a moving tap</strong>. Wire the outer pins to 5 V and GND, the wiper to <code>A0</code>, and turning it sweeps the wiper voltage from 0 to 5 V — codes 0 to 1023. Volume knobs, joysticks, throttle grips, and motor-speed dials are all this exact circuit. You just learned the most common analog input in consumer electronics.</p>
+      </div>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-adc-wrap">
+        <div class="sim-title">🔬 Live: ADC quantization explorer</div>
+        <canvas id="sim-adc"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">Drag the input voltage: watch the continuous value snap to the nearest 10-bit tick. The readout shows the raw code, the quantized voltage the chip actually reports, and the quantization error you can never escape.</p>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>⑤ Your turn</h2>
+      <div class="layer"><span class="step">⑤</span> Practice <small>you write &amp; decide</small></div>
+      <p>Three checks. Tap an answer, type a number, or reveal a coding challenge. Your progress is saved on this device and shown on the home page.</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="ard03-resolution">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">The Uno's ADC is 10-bit with a 5 V reference, giving an LSB of ~4.88 mV. What does that LSB value actually <em>mean</em> for your measurements?</div>
+        <ul class="ex-options">
+          <li data-correct="false">The ADC takes 4.88 ms per conversion.</li>
+          <li data-correct="true">The smallest voltage change the ADC can distinguish is ~4.88 mV; finer differences round to the same code.</li>
+          <li data-correct="false">The maximum voltage the pin can read is 4.88 mV.</li>
+          <li data-correct="false">Every reading is randomly wrong by exactly 4.88 mV.</li>
+        </ul>
+        <div class="ex-explain">The LSB is the <strong>voltage represented by one code step</strong>: $V_{\text{LSB}} = V_{\text{ref}}/2^{N} = 5/1024 \approx 4.88\,\text{mV}$. Two inputs closer than that map to the same integer — that's the resolution floor. Quantization error is bounded at <em>half</em> an LSB (±2.44 mV), and conversion <em>time</em> (~104 µs) is a separate property entirely.</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="ard03-code-to-volts" data-answer="2.5" data-tol="0.05">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q"><code>analogRead()</code> returns <strong>512</strong> with <span>$V_{\text{ref}} = 5\,\text{V}$</span>. What voltage is on the pin, in volts? (Use $V = \dfrac{\text{adc}}{1023}\,V_{\text{ref}}$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="volts"><span class="ex-unit">V</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$V = \dfrac{512}{1023}\times 5 = 2.503\,\text{V} \approx 2.50\,\text{V}$. Code 512 is essentially mid-scale, so it maps to half of the 5 V range — exactly what intuition predicts. (Dividing by 1024 instead of 1023 gives 2.500 V; the difference is one part in a thousand, well inside tolerance.)</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="ard03-averaging">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — N-sample averaging</div>
+        <div class="ex-q">A light sensor on <code>A0</code> jitters by ±3 codes. Write a function <code>float smoothRead(uint8_t pin, uint16_t n)</code> that returns the <strong>mean of <code>n</code> samples</strong> as a float code (0–1023), then use it to print a stable voltage. Think carefully about the data type of your running sum — what happens if you accumulate 1000 readings in an <code>int</code>?</div>
+        <details class="ex-acc">
+          <summary>Hint</summary>
+          <div class="acc-body">A single <code>int</code> on the AVR is 16-bit and maxes out at 32767. Summing just 33 full-scale readings (33 × 1023 = 33759) already overflows it and wraps to garbage. Use a <strong>32-bit</strong> accumulator (<code>uint32_t</code>), add each <code>analogRead()</code> in a loop, then divide by <code>n</code> as a float so the fractional part survives.</div>
+        </details>
+        <details class="ex-acc">
+          <summary>Show one solution</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">smooth_read.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">// Return the mean of n samples as a fractional code (0..1023).
+float smoothRead(uint8_t pin, uint16_t n) {
+  uint32_t sum = 0;                 // 32-bit so big n can't overflow
+  for (uint16_t i = 0; i &lt; n; i++) {
+    sum += analogRead(pin);
+  }
+  return (float)sum / n;            // cast BEFORE dividing → keeps fraction
+}
+
+void setup() { Serial.begin(9600); }
+
+void loop() {
+  float code  = smoothRead(A0, 64);          // √64 = 8× less noise
+  float volts = (code / 1023.0) * 5.0;
+  Serial.println(volts, 4);                  // 4 decimals now meaningful
+  delay(100);
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">The two traps are the <strong>32-bit sum</strong> (a 16-bit <code>int</code> overflows after ~32 full-scale reads) and casting to <code>float</code> <em>before</em> the division (so you don't truncate the average). With 64 samples the noise drops by $\sqrt{64}=8\times$ — now those four decimal places actually mean something instead of flickering randomly.</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> Chapter recap</div>
+        <p>You can now explain why the analog world must be quantized, compute an ADC's resolution and LSB from its bit count ($V_{\text{LSB}} = V_{\text{ref}}/2^{N}$), convert a raw code back to volts, and reason about sampling rate and Nyquist. You can wire a resistive sensor through a voltage divider ($V_{\text{out}} = V_{\text{in}}\,R_2/(R_1+R_2)$), linearise a TMP36 or apply the thermistor Beta equation, and beat noise down with $\sqrt{N}$ averaging and a decoupling cap. The battery monitor and potentiometer prove these aren't toys — they're the analog front-end of real products. Next we make pins produce smoothly varying <em>outputs</em> with PWM.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="Back to top">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+
+<!-- chapter-specific simulator: ADC quantization explorer -->
+<script>
+EM.sim("sim-adc", {
+  height: 250,
+  params: [
+    { key: "vin",  label: "V_in",  min: 0,    max: 5,   step: 0.001, value: 3.271, unit: "V" },
+    { key: "vref", label: "V_ref", min: 1.1,  max: 5,   step: 0.1,   value: 5.0,   unit: "V" }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h, pad = 46 * dpr;
+    var top = pad, bot = H - pad;
+
+    // clamp input to the reference range
+    var vin = Math.min(v.vin, v.vref);
+
+    // 10-bit quantization
+    var levels = 1024;
+    var lsb    = v.vref / levels;                 // volts per code step
+    var code   = Math.round((vin / v.vref) * 1023);
+    if (code > 1023) code = 1023;
+    if (code < 0)    code = 0;
+    var vq     = (code / 1023) * v.vref;          // voltage the chip reports
+    var err    = vq - vin;                        // quantization error
+
+    // --- draw the "ruler": faint tick marks across the range ---
+    ctx.strokeStyle = "#262d3a"; ctx.lineWidth = 1 * dpr;
+    ctx.fillStyle = "#6e7681"; ctx.font = (12 * dpr) + "px monospace";
+    var nTicks = 10;                               // show 10 coarse guide ticks
+    for (var i = 0; i <= nTicks; i++) {
+      var y = top + (bot - top) * (i / nTicks);
+      ctx.beginPath();
+      ctx.moveTo(pad, y); ctx.lineTo(W - 16 * dpr, y); ctx.stroke();
+      var vlabel = v.vref * (1 - i / nTicks);
+      ctx.fillText(vlabel.toFixed(1) + "V", 6 * dpr, y + 4 * dpr);
+    }
+
+    // map a voltage to a y pixel (top = vref, bottom = 0)
+    function yOf(volt) { return bot - (volt / v.vref) * (bot - top); }
+
+    var xMid = (pad + W - 16 * dpr) / 2;
+
+    // --- continuous input: green marker on the left half ---
+    ctx.strokeStyle = "#2ec4b6"; ctx.lineWidth = 2.5 * dpr;
+    var yIn = yOf(vin);
+    ctx.beginPath();
+    ctx.moveTo(pad + 8 * dpr, yIn); ctx.lineTo(xMid, yIn); ctx.stroke();
+    ctx.fillStyle = "#2ec4b6";
+    ctx.beginPath(); ctx.arc(pad + 8 * dpr, yIn, 5 * dpr, 0, 6.2832); ctx.fill();
+
+    // --- quantized output: amber marker snapped to the tick ---
+    ctx.strokeStyle = "#f4a259"; ctx.lineWidth = 2.5 * dpr;
+    var yQ = yOf(vq);
+    ctx.beginPath();
+    ctx.moveTo(xMid, yQ); ctx.lineTo(W - 16 * dpr, yQ); ctx.stroke();
+    ctx.fillStyle = "#f4a259";
+    ctx.beginPath(); ctx.arc(W - 16 * dpr, yQ, 5 * dpr, 0, 6.2832); ctx.fill();
+
+    // connector showing the rounding jump
+    ctx.strokeStyle = "#5a6273"; ctx.lineWidth = 1 * dpr;
+    ctx.setLineDash([4 * dpr, 4 * dpr]);
+    ctx.beginPath(); ctx.moveTo(xMid, yIn); ctx.lineTo(xMid, yQ); ctx.stroke();
+    ctx.setLineDash([]);
+
+    return "Code <b>" + code + "</b>/1023 &nbsp;·&nbsp; LSB = " +
+           (lsb * 1000).toFixed(2) + " mV &nbsp;·&nbsp; quantized = <b>" +
+           vq.toFixed(3) + " V</b> &nbsp;·&nbsp; error = " +
+           (err >= 0 ? "+" : "") + (err * 1000).toFixed(2) + " mV";
+  }
+});
+</script>
+</body>
+</html>

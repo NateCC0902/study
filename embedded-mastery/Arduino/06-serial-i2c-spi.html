@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Communication: UART, I²C &amp; SPI — Embedded Mastery</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="track-arduino" data-track="arduino" data-chapter="06-serial-i2c-spi">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">Arduino · Ch 06</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Arduino Track · Chapter 06 · Intermediate→Advanced</div>
+        <h1>Communication: UART, I²C &amp; SPI</h1>
+        <p>An MCU is only as useful as the things it can <em>talk</em> to. Sensors, displays, SD cards, radios, other microcontrollers — all of them speak one of three buses. Learn these three and you can wire your chip to almost anything on Earth. We build each from its wires up, do the timing math, and end by running all three <em>at once</em>.</p>
+        <div class="meta">
+          <span>⏱ ~50 min</span><span>🧠 Bus protocols</span><span>⚡ Multi-device</span><span>🔧 Wire &amp; SPI libs</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="parallel-vs-serial"><span class="sec-no">1</span>Parallel vs serial: trading wires for time</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>You have a byte — eight bits — and you need to move it from chip A to chip B. There are exactly two ways. <strong>Parallel:</strong> run eight wires, slap all eight bits on at once, done in a single clock tick. <strong>Serial:</strong> run <em>one</em> wire and shove the bits down it one after another, eight ticks for one byte. Parallel is faster per clock but eats pins and PCB area; serial is slower per clock but sips pins and routes beautifully.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The fundamental trade</div>
+        <p>Every bus in this chapter is <strong>serial</strong>: it trades <em>time</em> (more clock ticks per byte) for <em>wires</em> (fewer physical pins). On an MCU with ~20 usable pins, wires are the scarce resource — so serial wins almost everywhere.</p>
+      </div>
+
+      <p>"But parallel is faster!" — it was, in the 1990s, for short cables. Then clock speeds climbed and parallel hit a wall: at high frequency the eight wires no longer stay in step (<strong>skew</strong>) and crosstalk wrecks the data. That is why USB, SATA, PCIe, HDMI, and Ethernet are all <em>serial</em> today. On a microcontroller the three serial buses you must know are <strong>UART</strong>, <strong>I²C</strong>, and <strong>SPI</strong>. They differ in how many wires they use, whether they carry a clock, and how they pick which device to talk to.</p>
+
+      <div class="mermaid">
+flowchart LR
+    subgraph P["Parallel — 8 wires"]
+        PA["MCU"] == "D0..D7<br/>1 byte / tick" ==> PB["Device"]
+    end
+    subgraph S["Serial — 1 wire"]
+        SA["MCU"] -- "bit7→bit0<br/>8 ticks / byte" --> SB["Device"]
+    end
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="uart"><span class="sec-no">2</span>UART: the asynchronous workhorse</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>no clock wire — just agree on speed</small></div>
+      <p>UART (Universal Asynchronous Receiver/Transmitter) is the simplest bus and the one you already use every time you call <code>Serial.print()</code>. It is <strong>point-to-point</strong>: exactly two devices, connected by two data wires — <strong>TX</strong> (transmit) and <strong>RX</strong> (receive) — crossed over so each one's TX feeds the other's RX. The word <em>asynchronous</em> is the whole trick: there is <strong>no shared clock wire</strong>. Instead both sides agree in advance on a speed — the <strong>baud rate</strong> — and each samples the line on its own internal clock.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Framing: the 8N1 contract</div>
+        <p>Because there is no clock, the receiver needs to know <em>when</em> a byte begins. So every byte is wrapped in a <strong>frame</strong>. The idle line sits HIGH; a falling edge is the <strong>start bit</strong> (1 bit, LOW). Then come <strong>8 data bits</strong> (LSB first), optionally a parity bit, then <strong>1 stop bit</strong> (HIGH). The common config "<strong>8N1</strong>" means 8 data bits, No parity, 1 stop bit → <strong>10 bits on the wire to carry 8 bits of payload</strong>.</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    A["MCU A<br/>TX ●──"] -->|wire| B["── ● RX<br/>MCU B"]
+    B2["MCU B<br/>TX ●──"] -->|wire| A2["── ● RX<br/>MCU A"]
+    G["GND ●━━━━━━━━━━━━━━ ● GND<br/>(shared reference — mandatory)"]
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>baud, bit time &amp; throughput</small></div>
+      <p>The <strong>baud rate</strong> is the number of signalling events — here, bits — per second. The duration of one bit on the wire, the <strong>bit time</strong>, is the reciprocal:</p>
+
+      <div class="math-box">
+        $$ t_{\text{bit}} = \frac{1}{\text{baud}} $$
+      </div>
+
+      <p>At the ubiquitous <span>$115200$</span> baud that is <span>$t_{\text{bit}} = 1/115200 \approx 8.68\,\mu\text{s}$</span>; at the old-school <span>$9600$</span> baud it balloons to <span>$104.2\,\mu\text{s}$</span> per bit. Now the key insight: 8N1 spends <strong>10 wire-bits per byte</strong> (start + 8 + stop), so the useful <strong>byte throughput</strong> is</p>
+
+      <div class="math-box">
+        $$ \text{throughput} = \frac{\text{baud}}{10} \;\text{bytes/s} \qquad\Rightarrow\qquad \frac{115200}{10} = 11{,}520\ \text{B/s} $$
+      </div>
+
+      <p>And the time to send a buffer of <span>$N$</span> bytes is simply</p>
+
+      <div class="math-box">
+        $$ t = \frac{10\,N}{\text{baud}} \qquad\Rightarrow\qquad \frac{10 \times 64}{115200} \approx 5.56\,\text{ms for 64 bytes} $$
+      </div>
+
+      <p>That <em>÷10</em> is the framing overhead — 20% of your wire time carries no payload. It is the price of having no clock wire. Notice baud and bytes/s are <strong>not</strong> the same number; mixing them up is the classic rookie error.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">uart_echo.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">void setup() {
+  // Open the hardware UART at 115200 baud, 8N1 (the default frame).
+  // On the Uno this is the same UART wired to USB, so the Serial
+  // Monitor on your PC is the "other device" on the bus.
+  Serial.begin(115200);
+  Serial.println("Type a number, I'll double it:");
+}
+
+void loop() {
+  // Serial.available() returns how many bytes have arrived in the
+  // 64-byte RX buffer the core fills via an interrupt.
+  if (Serial.available() &gt; 0) {
+    // parseInt() blocks until a full integer has been received,
+    // then converts the ASCII digits to a long.
+    long n = Serial.parseInt();
+    Serial.print("You sent ");
+    Serial.print(n);              // print = send ASCII over TX
+    Serial.print(", doubled = ");
+    Serial.println(n * 2);        // println adds "\r\n"
+  }
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — baud mismatch &amp; missing GND</div>
+        <p>If the two ends disagree on baud, the receiver samples at the wrong moments and you get <strong>garbage characters</strong> (the tell-tale "Ÿ¿Œ" salad). Set both ends identically. And UART needs a <strong>shared ground</strong>: TX/RX are voltages <em>relative to GND</em>, so without a common reference the bits are meaningless. Two un-grounded boards "talking" UART is the #1 silent failure.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="i2c"><span class="sec-no">3</span>I²C: two wires, a whole crowd of devices</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>a shared party line with addresses</small></div>
+      <p>UART is great for two devices, but it can't host a crowd. Enter <strong>I²C</strong> (Inter-Integrated Circuit, "eye-squared-see"). It uses just <strong>two wires</strong> shared by <em>every</em> device on the bus: <strong>SDA</strong> (serial data) and <strong>SCL</strong> (serial clock). Unlike UART, I²C <em>does</em> carry a clock — that is what makes it <strong>synchronous</strong> — and one device, the <strong>controller</strong> (historically "master"), drives that clock and starts every transaction. The other devices are <strong>targets</strong> ("slaves") that respond only when called by name.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Addresses: how 100+ chips share 2 wires</div>
+        <p>Every target has a <strong>7-bit address</strong> baked in by its manufacturer (sometimes a few pins let you tweak the low bits). Seven bits → <span>$2^7 = 128$</span> slots, of which 16 are reserved, leaving up to <strong>112 usable addresses</strong> — call it "~127 devices" colloquially. The controller broadcasts an address; only the target that matches answers. It's a party line where you shout a name and one person replies.</p>
+      </div>
+
+      <p>The clever part is the electrical design: both lines are <strong>open-drain</strong>. A device can only pull a line <em>down</em> to 0; it can never drive it high. Two external <strong>pull-up resistors</strong> (typically 4.7 kΩ) gently pull both lines up to <span>$V_{cc}$</span> when nobody is pulling down. This means any number of devices can share the wire without ever fighting (no two outputs shorting), and it gives I²C its signature feature: <strong>ACK/NACK</strong>. After each byte the receiver pulls SDA low for one clock to say "got it" (ACK); letting it float high means "no" (NACK).</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>pull-up sizing &amp; bus speed</small></div>
+      <p>I²C runs at <strong>100 kHz</strong> (Standard mode) or <strong>400 kHz</strong> (Fast mode); some parts go to 1 MHz+. The pull-up value is a real engineering trade-off. The line is an RC circuit: bus capacitance <span>$C_b$</span> (wires + every device's pin capacitance) charges through the pull-up <span>$R_p$</span>. The rise time must fit inside a clock period. The spec caps it at</p>
+
+      <div class="math-box">
+        $$ t_r \approx 0.847\,R_p\,C_b \;\le\; \begin{cases} 1000\ \text{ns} &amp; \text{(100 kHz)}\\ 300\ \text{ns} &amp; \text{(400 kHz)} \end{cases} $$
+      </div>
+
+      <p>With a typical <span>$C_b = 100\,\text{pF}$</span>, hitting the 300 ns Fast-mode limit needs <span>$R_p \le t_r / (0.847\,C_b) \approx 3.5\,\text{k}\Omega$</span> — which is why 4.7 kΩ works at 100 kHz but you drop to ~2.2 kΩ for 400 kHz or long buses. <strong>Too big</strong> a resistor → sluggish edges → corrupt data; <strong>too small</strong> → the open-drain transistor can't sink enough current to reach a valid LOW. There's a window, and bus capacitance sets it.</p>
+
+      <div class="mermaid">
+flowchart TB
+    VCC["Vcc 3.3V / 5V"]
+    R1["Rp 4.7kΩ"]
+    R2["Rp 4.7kΩ"]
+    VCC --> R1 --> SDA(("SDA"))
+    VCC --> R2 --> SCL(("SCL"))
+    SDA --- M["MCU<br/>(controller)"]
+    SCL --- M
+    SDA --- T1["Temp 0x48"]
+    SCL --- T1
+    SDA --- T2["RTC 0x68"]
+    SCL --- T2
+    SDA --- T3["OLED 0x3C"]
+    SCL --- T3
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — one bus, three chips, zero extra pins</div>
+        <p>That diagram is a real, shippable design: a temperature sensor (TMP102 at <code>0x48</code>), a real-time clock (DS3231 at <code>0x68</code>), and an OLED display (SSD1306 at <code>0x3C</code>) all hang off the <em>same</em> two pins (A4/A5 on an Uno). Add a fourth or fifth device and you still use only two pins. <em>That</em> is why I²C dominates sensor breakout boards — Adafruit and SparkFun ship hundreds of them.</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>read a register over the Wire library</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">i2c_read_temp.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;Wire.h&gt;
+
+const uint8_t TMP102_ADDR = 0x48;  // 7-bit target address
+const uint8_t TEMP_REG    = 0x00;  // register holding temperature
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();                    // join the bus as controller
+}
+
+void loop() {
+  // 1) Tell the sensor WHICH register we want to read from.
+  Wire.beginTransmission(TMP102_ADDR);
+  Wire.write(TEMP_REG);            // set the internal register pointer
+  Wire.endTransmission(false);     // false = repeated-START, keep bus
+
+  // 2) Now request 2 bytes back from that register.
+  Wire.requestFrom(TMP102_ADDR, (uint8_t)2);
+  uint8_t msb = Wire.read();       // most-significant byte first
+  uint8_t lsb = Wire.read();
+
+  // TMP102 packs a 12-bit value, left-justified in 16 bits.
+  int16_t raw = ((msb &lt;&lt; 8) | lsb) &gt;&gt; 4;
+  float celsius = raw * 0.0625f;   // 0.0625 °C per LSB
+
+  Serial.print("Temp: "); Serial.print(celsius); Serial.println(" C");
+  delay(1000);
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — 7-bit vs 8-bit addresses</div>
+        <p>Datasheets love to confuse you. The <strong>Wire library wants the 7-bit address</strong> (<code>0x48</code>) and appends the read/write bit itself. Many datasheets instead print the <strong>8-bit address</strong> with that bit already shifted in (<code>0x90</code> write / <code>0x91</code> read). If your device is silent, check whether you fed Wire a left-shifted address. When in doubt, run an <code>i2c_scanner</code> sketch — it pings all 127 addresses and reports who ACKs.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="spi"><span class="sec-no">4</span>SPI: four wires, full speed ahead</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>raw speed, full duplex</small></div>
+      <p>When you need <em>fast</em> — streaming pixels to a display, reading kilobytes off an SD card, talking to a radio — you reach for <strong>SPI</strong> (Serial Peripheral Interface). It spends more wires to buy more speed. Four signals: <strong>SCK</strong> (clock, from the controller), <strong>MOSI</strong> (Controller-Out Peripheral-In), <strong>MISO</strong> (Controller-In Peripheral-Out), and one <strong>CS</strong> / SS (Chip Select) <em>per device</em>. Data flows both directions <em>simultaneously</em> — that's <strong>full duplex</strong> — and there is no addressing protocol: you select a chip by pulling its CS line LOW.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The shift-register mental model</div>
+        <p>SPI is literally two shift registers connected in a ring. On each SCK edge, the controller and peripheral each shift one bit out (MOSI / MISO) and one bit in. After 8 clocks they have <strong>swapped a full byte</strong>. So every SPI transfer is an <em>exchange</em>: to read, you must also write (often a dummy byte). That symmetry is why SPI has no ACK and no flow control — it's just clocked bit-swapping, which is exactly why it's fast (tens of MHz, vs I²C's 0.4 MHz).</p>
+      </div>
+
+      <p>The cost: one dedicated CS pin per peripheral. Three SPI devices = SCK + MOSI + MISO shared + 3 CS = 6 pins, vs I²C's eternal 2. SPI trades pins for speed; I²C trades speed for pins. Pick based on which resource you're short on.</p>
+
+      <div class="mermaid">
+flowchart LR
+    M["MCU (controller)"]
+    M -- SCK --> D1["SD card"]
+    M -- MOSI --> D1
+    M -. MISO .-> M
+    D1 -- MISO --> M
+    M -- "CS1" --> D1
+    M -- "SCK / MOSI / MISO (shared)" --> D2["Display"]
+    M -- "CS2" --> D2
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>the four SPI modes (CPOL/CPHA)</small></div>
+      <p>SPI's one subtlety is <strong>timing polarity</strong>. Two bits define the clock's behaviour: <strong>CPOL</strong> (clock polarity — is idle HIGH or LOW?) and <strong>CPHA</strong> (clock phase — sample on the first or second edge?). Their four combinations are the four <strong>SPI modes</strong>:</p>
+
+      <div class="math-box">
+        $$ \text{Mode} = 2\cdot\text{CPOL} + \text{CPHA}, \qquad \text{CPOL},\text{CPHA}\in\{0,1\} $$
+      </div>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Mode</th><th>CPOL</th><th>CPHA</th><th>Idle clock</th><th>Data sampled on</th></tr></thead>
+        <tbody>
+          <tr><td><code>SPI_MODE0</code></td><td>0</td><td>0</td><td>LOW</td><td>rising edge</td></tr>
+          <tr><td><code>SPI_MODE1</code></td><td>0</td><td>1</td><td>LOW</td><td>falling edge</td></tr>
+          <tr><td><code>SPI_MODE2</code></td><td>1</td><td>0</td><td>HIGH</td><td>falling edge</td></tr>
+          <tr><td><code>SPI_MODE3</code></td><td>1</td><td>1</td><td>HIGH</td><td>rising edge</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p>The transfer time is brutally simple — no framing overhead like UART, no ACK like I²C: <span>$t = 8N / f_{\text{SCK}}$</span>. At <span>$f_{\text{SCK}} = 8\,\text{MHz}$</span>, a 512-byte SD block takes <span>$8 \times 512 / 8{\times}10^6 = 512\,\mu\text{s}$</span> — about 11× faster than the same payload over 400 kHz I²C. <strong>Match the mode to the datasheet</strong> or you'll sample bits at the wrong edge and read pure noise.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>configure a transaction</small></div>
+
+      <div class="codeblock">
+        <div class="code-head">spi_read.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;SPI.h&gt;
+
+const int CS_PIN = 10;             // chip-select for this peripheral
+
+void setup() {
+  pinMode(CS_PIN, OUTPUT);
+  digitalWrite(CS_PIN, HIGH);     // HIGH = deselected (idle)
+  SPI.begin();                    // sets SCK, MOSI, MISO directions
+}
+
+uint8_t readRegister(uint8_t reg) {
+  // A transaction locks the bus speed, bit order and mode so that
+  // two SPI devices with different settings can coexist safely.
+  SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+  digitalWrite(CS_PIN, LOW);      // select THIS device
+  SPI.transfer(reg | 0x80);       // many parts: bit7=1 means "read"
+  uint8_t value = SPI.transfer(0x00);  // send dummy, clock the reply in
+  digitalWrite(CS_PIN, HIGH);     // deselect
+  SPI.endTransaction();
+  return value;
+}
+
+void loop() { /* call readRegister(...) as needed */ }
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Why <code>SPI.transfer</code> both sends and receives</div>
+        <p>There is no separate "read" call. <code>SPI.transfer(x)</code> shifts <code>x</code> out on MOSI <em>and</em> returns whatever the peripheral shifted back on MISO — one byte each direction, same 8 clocks. To pull data <em>from</em> a device you clock out a throwaway <code>0x00</code> so the SCK keeps ticking and the reply rides in on MISO. Full duplex isn't a feature you opt into; it's just how the wire works.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="comparison"><span class="sec-no">5</span>Choosing a bus: the cheat sheet</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>this is the decision you make on every board</small></div>
+      <p>Three buses, three sweet spots. Internalize this table and bus selection becomes a five-second decision instead of an afternoon of datasheet archaeology.</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Property</th><th>UART</th><th>I²C</th><th>SPI</th></tr></thead>
+        <tbody>
+          <tr><td>Data wires</td><td>2 (TX, RX)</td><td>2 (SDA, SCL)</td><td>3 + 1 CS/device</td></tr>
+          <tr><td>Clock</td><td>None (async)</td><td>Shared (SCL)</td><td>Shared (SCK)</td></tr>
+          <tr><td>Typical speed</td><td>9.6k–115.2k baud</td><td>100k / 400k Hz</td><td>1–50+ MHz</td></tr>
+          <tr><td>Devices / bus</td><td>2 (point-to-point)</td><td>~112 (7-bit addr)</td><td>1 per CS pin</td></tr>
+          <tr><td>Duplex</td><td>Full</td><td>Half</td><td>Full</td></tr>
+          <tr><td>Pull-ups?</td><td>No</td><td>Yes (mandatory)</td><td>No</td></tr>
+          <tr><td>Addressing</td><td>None (just 2 ends)</td><td>In-protocol (7-bit)</td><td>Chip-select line</td></tr>
+          <tr><td>Distance</td><td>Meters (more w/ RS-232/485)</td><td>~1 m (on-board)</td><td>Centimeters</td></tr>
+          <tr><td>Best for</td><td>PC/debug, GPS, modems</td><td>Many slow sensors</td><td>Fast: SD, display, ADC, radio</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> A one-line decision rule</div>
+        <p><strong>Lots of slow sensors and pins are scarce?</strong> I²C. <strong>One fast device — display, SD, radio?</strong> SPI. <strong>Talking to a PC, a GPS, or another board over a cable?</strong> UART. Real products use all three simultaneously, each for what it's best at.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="all-at-once"><span class="sec-no">6</span>Real case: all three buses, one datalogger</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>this ships in products</small></div>
+      <p>Here is a genuine board you could build this weekend: an environmental datalogger. A <strong>temperature sensor on I²C</strong>, an <strong>SD card on SPI</strong>, and <strong>debug output on UART</strong> — three buses running at the same time, each playing to its strength. The MCU is the hub; nothing conflicts because each bus owns its own pins.</p>
+
+      <div class="mermaid">
+flowchart TB
+    MCU["Arduino (ATmega328P)"]
+    MCU -- "A4/A5 · I²C" --> TMP["TMP102 temp<br/>0x48"]
+    MCU -- "D10-13 · SPI" --> SD["microSD card"]
+    MCU -- "USB · UART" --> PC["PC / Serial Monitor<br/>115200 baud"]
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">datalogger.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;Wire.h&gt;      // I2C: the temperature sensor
+#include &lt;SPI.h&gt;       // SPI: the SD card (used by SD.h under the hood)
+#include &lt;SD.h&gt;
+
+const uint8_t TMP102 = 0x48;
+const int     SD_CS  = 4;        // SD breakout chip-select pin
+
+void setup() {
+  Serial.begin(115200);          // UART  → debug to the PC
+  Wire.begin();                  // I2C   → sensor bus
+  if (!SD.begin(SD_CS)) {        // SPI   → SD card (SD lib drives SPI)
+    Serial.println("SD init failed!");
+    while (1);                    // halt: no point logging with no disk
+  }
+  Serial.println("Logger ready.");
+}
+
+float readTempC() {
+  Wire.beginTransmission(TMP102);
+  Wire.write(0x00);
+  Wire.endTransmission(false);
+  Wire.requestFrom(TMP102, (uint8_t)2);
+  int16_t raw = ((Wire.read() &lt;&lt; 8) | Wire.read()) &gt;&gt; 4;
+  return raw * 0.0625f;
+}
+
+void loop() {
+  float t = readTempC();                       // ← from I2C
+  File f = SD.open("log.csv", FILE_WRITE);      // ← over SPI
+  if (f) { f.print(millis()); f.print(','); f.println(t); f.close(); }
+  Serial.print("Logged "); Serial.println(t);   // ← over UART
+  delay(2000);
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — bus contention &amp; voltage levels</div>
+        <p>Three buses coexist <em>only</em> because they're on different pins — never wire an SPI MISO onto an I²C SDA. Two subtler traps: (1) on an Uno, pins <strong>D11–13</strong> are the SPI bus, so don't reuse them for something else; (2) watch <strong>voltage levels</strong> — a 3.3 V SD card on a 5 V Uno needs a level shifter on MOSI/SCK or you'll slowly cook it. Mixed-voltage buses are the silent killers of hobby projects.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>⑤ Your turn</h2>
+      <div class="layer"><span class="step">⑤</span> Practice <small>you write &amp; decide</small></div>
+      <p>Three checks. Tap an answer, type a number, or reveal a coding challenge. Your progress is saved on this device and shown on the home page.</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="ard06-buschoice">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You need to hang <strong>eight slow temperature sensors</strong> off one MCU while burning as few pins as possible. Which bus, and how many wires does it take for all eight?</div>
+        <ul class="ex-options">
+          <li data-correct="false">SPI — it's the fastest, so always use it (10 wires: 3 shared + 8 CS)</li>
+          <li data-correct="true">I²C — 2 wires total; each sensor has its own 7-bit address on the shared bus</li>
+          <li data-correct="false">UART — 2 wires per sensor, so 16 wires</li>
+          <li data-correct="false">SPI — 2 wires, just like I²C</li>
+        </ul>
+        <div class="ex-explain">For <em>many slow devices on few pins</em>, I²C is the answer: all eight sensors share the same <strong>2 wires</strong> (SDA + SCL), each distinguished by its 7-bit address. SPI would need a separate CS pin per device (3 shared + 8 = 11 pins); UART is point-to-point so it can't bus them at all. Speed isn't the constraint here — pin count is.</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="ard06-uarttime" data-answer="5.56" data-tol="0.2">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">You send a <strong>64-byte</strong> packet over UART at <strong>115200 baud, 8N1</strong>. How long does the transmission take, in <strong>milliseconds</strong>? (Recall 8N1 uses 10 wire-bits per byte, so $t = \dfrac{10N}{\text{baud}}$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="ms"><span class="ex-unit">ms</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$t = \dfrac{10 \times 64}{115200} = \dfrac{640}{115200} \approx 5.56\times10^{-3}\,\text{s} = 5.56\,\text{ms}$. Equivalently the throughput is $115200/10 = 11{,}520$ B/s, and $64 / 11520 \approx 5.56$ ms. The factor of 10 (not 8) is the framing overhead — start + 8 data + stop bits.</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="ard06-i2cregread">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — read one I²C register</div>
+        <div class="ex-q">Write a function <code>uint8_t readReg(uint8_t addr, uint8_t reg)</code> that, using the <code>Wire</code> library, reads a <strong>single 8-bit register</strong> from an I²C device: point the device's register pointer at <code>reg</code>, then request and return <strong>one</strong> byte. This is the universal "read a register" pattern for nearly every I²C chip.</div>
+        <details class="ex-acc">
+          <summary>Hint</summary>
+          <div class="acc-body">The pattern is two phases. <strong>Write phase:</strong> <code>beginTransmission(addr)</code>, <code>write(reg)</code>, then <code>endTransmission(false)</code> — the <code>false</code> sends a <em>repeated START</em> instead of releasing the bus. <strong>Read phase:</strong> <code>requestFrom(addr, 1)</code>, then <code>Wire.read()</code> returns the byte.</div>
+        </details>
+        <details class="ex-acc">
+          <summary>Show one solution</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">read_reg.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;Wire.h&gt;
+
+// Read one 8-bit register from any I2C device.
+uint8_t readReg(uint8_t addr, uint8_t reg) {
+  Wire.beginTransmission(addr);   // start a write to the device
+  Wire.write(reg);                // set its internal register pointer
+  Wire.endTransmission(false);    // repeated-START: keep the bus
+
+  Wire.requestFrom(addr, (uint8_t)1);   // ask for 1 byte
+  return Wire.available() ? Wire.read() : 0;
+}
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
+  uint8_t whoAmI = readReg(0x68, 0x75); // MPU-6050 WHO_AM_I → 0x68
+  Serial.print("WHO_AM_I = 0x");
+  Serial.println(whoAmI, HEX);
+}
+
+void loop() {}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">The <code>endTransmission(false)</code> is the crux: a plain <code>true</code> would send a STOP, freeing the bus, and some devices reset their pointer on STOP. The repeated-START keeps the conversation atomic. Reading a <code>WHO_AM_I</code> register first is the classic sanity check — if it returns the datasheet's magic number, your wiring and address are correct.</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> Chapter recap</div>
+        <p>You can now reason about <strong>serial vs parallel</strong> as a wires-for-time trade, and you know the three buses cold. <strong>UART</strong>: 2 wires, no clock, agree on baud, 10 bits/byte, throughput = baud/10. <strong>I²C</strong>: 2 shared wires with pull-ups, 7-bit addresses for ~100+ devices, ACK/NACK, 100k/400 kHz. <strong>SPI</strong>: 4 wires, full-duplex shift-register exchange, one CS per device, MHz-fast, four CPOL/CPHA modes. You wrote register reads over Wire and SPI, sized pull-ups, computed transmission times, and ran all three buses on one datalogger. Next we'll put these buses to work driving real sensors and actuators.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="Back to top">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Digital I/O: GPIO, Ohm's Law, Buttons &amp; Debouncing — Embedded Mastery</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="track-arduino" data-track="arduino" data-chapter="02-gpio">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">Arduino · Ch 02</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Arduino Track · Chapter 02 · Beginner→Intermediate</div>
+        <h1>Digital I/O: GPIO, Ohm's Law, Buttons &amp; Debouncing</h1>
+        <p>A pin is the chip's handshake with the physical world. In Chapter 1 we blinked one. Now we make pins <em>do work</em> — drive LEDs without burning them, listen to buttons without lying to ourselves, and tame the messy electrical reality of a metal contact slapping shut. This is where firmware meets a soldering iron.</p>
+        <div class="meta">
+          <span>⏱ ~45 min</span><span>🧠 GPIO model</span><span>⚡ Ohm's law</span><span>🔘 Buttons</span><span>🪲 Debounce</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="gpio-as-switch"><span class="sec-no">1</span>A GPIO pin is a controllable switch</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p><strong>GPIO</strong> = General-Purpose Input/Output. Each of those numbered pins on the Uno's header is a wire that runs straight into the silicon, and a tiny bit of logic decides what that wire does. Critically, a GPIO pin has a <em>direction</em>, and it is one of exactly two things at any instant:</p>
+
+      <ul>
+        <li><strong>OUTPUT</strong> — the pin <em>drives</em>. The chip clamps the wire to either ~5&nbsp;V (<code>HIGH</code>) or 0&nbsp;V (<code>LOW</code>). You are <em>talking</em>.</li>
+        <li><strong>INPUT</strong> — the pin <em>listens</em>. The chip leaves the wire alone and measures the voltage some other circuit puts on it. You are <em>reading</em>.</li>
+      </ul>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence model</div>
+        <p>A GPIO pin is a software-controlled switch: as an <strong>OUTPUT</strong> it connects the wire to +5&nbsp;V or to ground; as an <strong>INPUT</strong> it disconnects and quietly senses whatever voltage arrives.</p>
+      </div>
+
+      <p>When an output is <code>HIGH</code>, current flows <em>out</em> of the pin into your circuit — the pin <strong>sources</strong> current. When it is <code>LOW</code>, current flows <em>into</em> the pin from your circuit down to ground — the pin <strong>sinks</strong> current. Same pin, opposite directions of flow. Which one you use changes how you wire the LED, as we'll see.</p>
+
+      <div class="mermaid">
+flowchart TB
+    REG["DDRx register bit<br/>(direction)"] --> DIR{0 or 1?}
+    DIR -- "1 = OUTPUT" --> DRV["Driver clamps wire<br/>to 5V or 0V"]
+    DIR -- "0 = INPUT" --> SNS["Hi-Z buffer<br/>reads the wire"]
+    DRV --> PIN(["Physical pin"])
+    SNS --> PIN
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Two registers behind every pin</div>
+        <p>On the AVR, a pin's <em>direction</em> is one bit in the <code>DDRx</code> register (Data Direction Register) and its <em>output level</em> is one bit in <code>PORTx</code>. Reading an input pin reads the <code>PINx</code> register. <code>pinMode()</code> and <code>digitalWrite()</code> are just friendly wrappers that flip those bits for you.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="ohms-law"><span class="sec-no">2</span>The electrical model: Ohm's law &amp; current limits</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>voltage pushes, resistance resists</small></div>
+      <p>Before you connect anything to a pin you must think in <strong>volts</strong>, <strong>amps</strong>, and <strong>ohms</strong>. Voltage (<span>$V$</span>, volts) is electrical "pressure". Current (<span>$I$</span>, amps) is the rate of charge flow. Resistance (<span>$R$</span>, ohms) opposes that flow. The relationship between them is the single most important equation in all of electronics:</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive the resistor</small></div>
+      <div class="math-box">$$ V = I \cdot R \qquad\Longleftrightarrow\qquad I = \frac{V}{R} \qquad\Longleftrightarrow\qquad R = \frac{V}{I} $$</div>
+
+      <p>Now the classic beginner mistake: wiring an LED straight from a pin to ground. An LED is a <strong>diode</strong> — past its forward voltage <span>$V_f$</span> it behaves almost like a short circuit, so current rockets up until something melts. We tame it with a series <strong>current-limiting resistor</strong>. Walk the loop with Kirchhoff's voltage law: the pin supplies <span>$V_{cc}$</span>, the LED drops <span>$V_f$</span>, and the resistor must drop whatever's left, <span>$V_{cc}-V_f$</span>. Apply Ohm's law to the resistor:</p>
+
+      <div class="math-box">$$ R = \frac{V_{cc} - V_f}{I} $$</div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Worked example — sizing an LED resistor</div>
+        <p>Drive a red LED (<span>$V_f \approx 2\,\text{V}$</span>) from a 5&nbsp;V pin and target <span>$I = 10\,\text{mA} = 0.010\,\text{A}$</span>:</p>
+        <div class="math-box">$$ R = \frac{5\,\text{V} - 2\,\text{V}}{0.010\,\text{A}} = \frac{3\,\text{V}}{0.010\,\text{A}} = 300\ \Omega $$</div>
+        <p>No 300&nbsp;Ω in your kit? Round <strong>up</strong> to the nearest stocked value (330&nbsp;Ω) — more resistance means <em>less</em> current, which is the safe direction. A 220&nbsp;Ω would push <span>$I = 3/220 \approx 13.6\,\text{mA}$</span>: still fine, just brighter.</p>
+      </div>
+
+      <p>How much heat does that resistor dissipate? Power is voltage times current, and combining with Ohm's law gives the form you'll quote most:</p>
+
+      <div class="math-box">$$ P = V \cdot I = I^2 \cdot R = \frac{V^2}{R} $$</div>
+
+      <p>For our resistor: <span>$P = I^2 R = (0.010)^2 \times 300 = 0.03\,\text{W} = 30\,\text{mW}$</span>. A standard ¼-watt (250&nbsp;mW) resistor laughs at that — nearly 10× margin. Power math only gets <em>interesting</em> when you drive motors or many LEDs, but the habit of checking it starts now.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the Uno pin current limit is real</div>
+        <p>An ATmega328P pin can <em>physically</em> source or sink about <strong>40&nbsp;mA absolute maximum</strong> — exceed it and you risk permanently damaging the pin's driver. The <strong>safe design target is ≤ 20&nbsp;mA</strong> per pin, and the whole chip has a combined limit (~200&nbsp;mA across all pins, with per-port caps). Our 10&nbsp;mA LED sits comfortably below the line. Need to drive something hungry? Use a transistor or MOSFET — never the bare pin.</p>
+      </div>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-led-wrap">
+        <div class="sim-title">🔬 Live: LED resistor &amp; power calculator</div>
+        <canvas id="sim-led"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">Drag <em>V<sub>cc</sub></em>, <em>V<sub>f</sub></em>, and target <em>I</em>. The sim solves $R=(V_{cc}-V_f)/I$ and the power $P=I^2R$, then warns in red if your current exceeds the 20&nbsp;mA safe limit.</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="driving-outputs"><span class="sec-no">3</span>Outputs: sourcing, sinking &amp; LED polarity</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>Configuring an output is two calls: set the direction once in <code>setup()</code>, then drive the level with <code>digitalWrite()</code>. Here is a single external LED on pin&nbsp;8, wired <strong>active-high</strong> (pin → resistor → LED → ground), blinking:</p>
+
+      <div class="codeblock">
+        <div class="code-head">led_output.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t LED_PIN = 8;          // our LED's anode side, via a 330R resistor
+
+void setup() {
+  pinMode(LED_PIN, OUTPUT);         // DDRB bit for D8 := 1  → pin now DRIVES
+}
+
+void loop() {
+  digitalWrite(LED_PIN, HIGH);      // pin = 5V → current SOURCES out → LED on
+  delay(300);
+  digitalWrite(LED_PIN, LOW);       // pin = 0V → no drop across LED → LED off
+  delay(300);
+}
+</code></pre>
+      </div>
+
+      <p>That LED is <strong>active-high</strong>: <code>HIGH</code> turns it on because current flows <em>out</em> of the pin (sourcing), through the LED, to ground. But you can flip the wiring. Connect <code>+5V → resistor → LED → pin</code> instead, and now the pin must go <code>LOW</code> to light it — current flows <em>into</em> the pin (sinking) toward ground. That is an <strong>active-low</strong> output.</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Wiring</th><th>Pin level to turn LED ON</th><th>Current direction</th><th>Term</th></tr></thead>
+        <tbody>
+          <tr><td>pin → R → LED → GND</td><td><code>HIGH</code> (5&nbsp;V)</td><td>out of pin</td><td>Active-high (sourcing)</td></tr>
+          <tr><td>+5V → R → LED → pin</td><td><code>LOW</code> (0&nbsp;V)</td><td>into pin</td><td>Active-low (sinking)</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Why sinking is sometimes preferred</div>
+        <p>Many MCUs (and logic families generally) can <em>sink</em> a touch more current than they source, and sinking keeps the LED at a fixed +5&nbsp;V rail rather than depending on the pin's slightly-below-5&nbsp;V high level. For one LED it rarely matters; for arrays and 7-segment displays it does. Just stay consistent and <em>know which one you wired</em> — flipped logic in software is the usual culprit when "my LED is on when it should be off".</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="inputs-pullups"><span class="sec-no">4</span>Inputs &amp; the floating-pin trap</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>an unconnected input is an antenna</small></div>
+      <p>Reading a pin sounds trivial: call <code>digitalRead()</code>, get <code>HIGH</code> or <code>LOW</code>. The trap is what happens when nothing actively drives the pin. A bare <code>INPUT</code> pin is extremely high-impedance — it barely draws any current — so if you leave it unconnected it does not read a clean 0. It <strong>floats</strong>: it picks up stray electromagnetic noise from your hand, the mains wiring, a nearby motor, and flickers randomly between <code>HIGH</code> and <code>LOW</code>.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — floating inputs</div>
+        <p>A button typically connects a pin to ground <em>when pressed</em> and connects it to <strong>nothing</strong> when released. With a plain <code>INPUT</code>, "nothing" means floating, so released reads are garbage. The fix is to gently tie the pin to a known voltage with a <strong>pull resistor</strong>.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>why "pull" needs a resistor</small></div>
+      <p>A <strong>pull-up</strong> resistor connects the pin to +5&nbsp;V; a <strong>pull-down</strong> connects it to ground. It "pulls" the idle pin to a defined level. Why not a plain wire? Because when the button <em>does</em> connect the pin to the opposite rail, the pull resistor and the button form a path from 5&nbsp;V to ground — the resistor limits that short-circuit current to something harmless:</p>
+
+      <div class="math-box">$$ I_{\text{pull}} = \frac{V_{cc}}{R_{\text{pull}}} $$</div>
+
+      <p>The AVR's <strong>internal pull-up</strong> is roughly <span>$R_{\text{pull}} \approx 20\text{–}50\,\text{k}\Omega$</span>. Take a mid value of 30&nbsp;kΩ: when the button is pressed it ties the pin to ground, and the current through the pull-up is <span>$I = 5/30000 \approx 0.17\,\text{mA}$</span> — utterly negligible, but enough to hold a solid logic level when the button is open. That high resistance is exactly why it's "weak": strong enough to define the idle state, weak enough that a button easily overrides it.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> <code>INPUT_PULLUP</code> — free, built-in, the right default</div>
+        <p>Rather than soldering an external resistor, the AVR has a pull-up built into <em>every</em> GPIO. Enable it with <code>pinMode(pin, INPUT_PULLUP)</code>. The pin idles <code>HIGH</code>; a button to ground reads <code>LOW</code> when pressed. This is the standard way to read a button on Arduino — no extra parts.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="buttons"><span class="sec-no">5</span>Reading a button: active-low logic</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>pressed = LOW, and that's not a bug</small></div>
+      <p>Wire a momentary push-button between pin&nbsp;2 and ground, enable the internal pull-up, and you get the canonical Arduino button. Here is the circuit as a graph:</p>
+
+      <div class="mermaid">
+flowchart LR
+    VCC["+5V (internal)"] -- "≈30kΩ pull-up" --> NODE(("pin D2"))
+    NODE --> MCU["digitalRead(2)"]
+    NODE -- "button (momentary)" --> GND["GND"]
+      </div>
+
+      <p>Trace the two states. <strong>Released:</strong> the button is open, so the pull-up alone wins and holds D2 at +5&nbsp;V → <code>digitalRead</code> returns <code>HIGH</code>. <strong>Pressed:</strong> the button shorts D2 to ground, overpowering the weak pull-up, so D2 sits at 0&nbsp;V → <code>digitalRead</code> returns <code>LOW</code>. The pressed state reads <code>LOW</code>: this is <strong>active-low</strong> logic, and it is the normal, correct outcome of using a pull-up.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <div class="codeblock">
+        <div class="code-head">button_read.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t BTN_PIN = 2;          // button between D2 and GND
+const uint8_t LED_PIN = LED_BUILTIN;
+
+void setup() {
+  pinMode(BTN_PIN, INPUT_PULLUP);   // idle HIGH; pressed pulls to LOW
+  pinMode(LED_PIN, OUTPUT);
+}
+
+void loop() {
+  // Active-low: LOW means pressed. Invert so 'pressed' reads as true.
+  bool pressed = (digitalRead(BTN_PIN) == LOW);
+  digitalWrite(LED_PIN, pressed ? HIGH : LOW);   // LED mirrors the button
+}
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Make intent obvious</div>
+        <p>Comparing against <code>LOW</code> and naming the result <code>pressed</code> hides the active-low inversion behind a readable word. Future-you (and the next engineer) should never have to mentally re-derive "wait, is LOW pressed or released?" — the variable name answers it.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="bounce"><span class="sec-no">6</span>The problem: contact bounce</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>metal slapping metal rings</small></div>
+      <p>A push-button is two springy metal contacts. When you press, they don't mate cleanly — they slam together, <em>bounce apart</em>, slam again, and chatter for a few milliseconds before settling. Electrically the pin doesn't see one crisp <code>HIGH→LOW</code> edge; it sees a burst of edges. Typical mechanical switches bounce for <strong>~1–10&nbsp;ms</strong>. Here's the scope trace, described in time:</p>
+
+      <div class="mermaid">
+flowchart LR
+    A["Released<br/>HIGH"] --> B["press!<br/>↯ bounce<br/>LOW-HIGH-LOW-HIGH"]
+    B --> C["settled<br/>LOW (1–10ms later)"]
+    C --> D["release!<br/>↯ bounce again"]
+    D --> E["Released<br/>HIGH"]
+      </div>
+
+      <p>The CPU runs <code>loop()</code> millions of times a second, far faster than those bounces. So a single physical press looks to naïve code like <strong>several presses</strong>. If you're toggling an LED or — worse — <em>counting</em> presses, one push registers as three, five, a random number. This is the most common "my code is haunted" bug in beginner embedded.</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — the counter that lied</div>
+        <p>An industrial parts counter watches a limit switch trip once per item on a conveyor. Un-debounced, contact bounce made it tally 12,000 parts when 9,800 had passed — a 22% phantom overcount that wrecked inventory reconciliation and shipped short. Input <strong>conditioning</strong> (debounce in firmware, sometimes an RC filter in hardware) isn't polish; it's the difference between a count you can trust and one you can't. Every PLC and every product-grade button input debounces.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="debouncing"><span class="sec-no">7</span>Debouncing: from blocking to non-blocking</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>wait for the ringing to stop</small></div>
+      <p>Debouncing means: <em>ignore the chatter and report one clean transition</em>. There are three escalating approaches.</p>
+
+      <p><strong>1. The blocking <code>delay()</code> hack.</strong> See an edge, then <code>delay(20)</code> to sleep through the bounce window, then re-read. Simple, and it works — but it freezes the entire program for 20&nbsp;ms. Nothing else can run: no other buttons, no sensors, no blinking. Fine for a one-button toy, fatal in a real product.</p>
+
+      <div class="codeblock">
+        <div class="code-head">debounce_blocking.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">if (digitalRead(BTN_PIN) == LOW) {  // possible press
+  delay(20);                        // ⛔ FREEZES everything for 20 ms
+  if (digitalRead(BTN_PIN) == LOW)  // still pressed? it was real
+    handlePress();
+}
+</code></pre>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>picking the window</small></div>
+      <p>How long to wait? Long enough to outlast the bounce, short enough to feel instant. With bounce up to <span>$t_b \approx 10\,\text{ms}$</span>, a debounce window of <span>$t_d$</span> must satisfy:</p>
+
+      <div class="math-box">$$ t_b < t_d \ll t_{\text{human}} \qquad\Rightarrow\qquad 10\,\text{ms} < t_d \ll 100\,\text{ms} $$</div>
+
+      <p>A human can't press faster than ~10 times a second (≈100&nbsp;ms apart), so anything from <strong>20–50&nbsp;ms</strong> sits safely between "longer than the bounce" and "shorter than a real second press". We'll use 25&nbsp;ms.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>the non-blocking millis() debounce</small></div>
+      <p><strong>2. The non-blocking <code>millis()</code> debounce.</strong> Instead of sleeping, we <em>remember the time of the last bounce</em> and only accept the input once it has been stable for the whole window. <code>millis()</code> returns milliseconds since boot without ever blocking. We track the last raw reading, the last <em>stable</em> reading, and a timestamp — classic <strong>state tracking</strong>:</p>
+
+      <div class="codeblock">
+        <div class="code-head">debounce_millis.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t BTN_PIN = 2;
+const unsigned long DEBOUNCE_MS = 25;     // &gt; max bounce, &lt; human reaction
+
+int  lastRaw     = HIGH;                   // previous *raw* reading
+int  stableState = HIGH;                   // last *accepted* (debounced) level
+unsigned long lastChange = 0;              // when raw last flipped
+long pressCount = 0;
+
+void setup() {
+  pinMode(BTN_PIN, INPUT_PULLUP);
+  Serial.begin(9600);
+}
+
+void loop() {
+  int raw = digitalRead(BTN_PIN);          // active-low: LOW == pressed
+
+  if (raw != lastRaw) {                     // raw flipped → (re)start the timer
+    lastChange = millis();                  // note WHEN it bounced
+    lastRaw = raw;
+  }
+
+  // Has the raw level held steady longer than the debounce window?
+  if ((millis() - lastChange) &gt;= DEBOUNCE_MS) {
+    if (raw != stableState) {               // a NEW, settled level
+      stableState = raw;
+      if (stableState == LOW) {             // settled LOW = a real press
+        pressCount++;
+        Serial.println(pressCount);
+      }
+    }
+  }
+  // loop() never blocks — other tasks can run right here, every pass.
+}
+</code></pre>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> What the timer really measures</div>
+        <p>Every time the raw pin <em>changes</em>, we reset <code>lastChange</code> to "now". So <code>millis() - lastChange</code> is "how long the pin has been quiet". We only trust the reading once that quiet stretch exceeds 25&nbsp;ms — i.e., once the bouncing has demonstrably stopped. Counting on the <code>HIGH→LOW</code> settled edge (not every edge) is what guarantees one count per press.</p>
+      </div>
+
+      <p>This is the same pattern as the non-blocking blink you'll meet in Chapter&nbsp;5: keep a timestamp, compare against <code>millis()</code>, never <code>delay()</code>. It's the backbone of doing many things at once on a single-threaded MCU.</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Don't reinvent it forever — but understand it once</div>
+        <p>Production code often reaches for a vetted library like <code>Bounce2</code>, which wraps exactly this state machine. That's fine — <em>after</em> you can write it from scratch. A library you don't understand is a bug you can't fix.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>⑤ Your turn</h2>
+      <div class="layer"><span class="step">⑤</span> Practice <small>you write &amp; decide</small></div>
+      <p>Three checks. Tap an answer, type a number, or reveal a coding challenge. Your progress is saved on this device and shown on the home page.</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="ard02-pullup">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You wire a button between pin D2 and GND and use <code>pinMode(2, INPUT_PULLUP)</code>. When the button is <strong>pressed</strong>, what does <code>digitalRead(2)</code> return, and why?</div>
+        <ul class="ex-options">
+          <li data-correct="false"><code>HIGH</code> — the pull-up forces it high whenever pressed</li>
+          <li data-correct="true"><code>LOW</code> — the button shorts the pin to ground, overriding the weak pull-up</li>
+          <li data-correct="false"><code>HIGH</code> — pressing connects the pin to +5&nbsp;V</li>
+          <li data-correct="false">It floats randomly because nothing drives the pin</li>
+        </ul>
+        <div class="ex-explain">With a pull-up the pin idles <code>HIGH</code>. Pressing connects it to ground, and since the internal pull-up is weak (~20–50&nbsp;kΩ) the button easily wins, dragging the pin to 0&nbsp;V → <code>LOW</code>. This is <strong>active-low</strong> logic: <em>pressed = LOW</em>. It's not a bug; it's the defined behaviour of a pull-up button.</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="ard02-resistor" data-answer="193" data-tol="8">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">Size the current-limiting resistor for an LED with forward voltage <strong>$V_f = 2.1\,\text{V}$</strong> driven from <strong>$V_{cc} = 5\,\text{V}$</strong> at a target current of <strong>$I = 15\,\text{mA}$</strong>. Use $R = (V_{cc}-V_f)/I$. Give $R$ in <strong>ohms</strong>.</div>
+        <input class="ex-input" type="number" step="any" placeholder="ohms"><span class="ex-unit">Ω</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$R = \dfrac{5 - 2.1}{0.015} = \dfrac{2.9}{0.015} \approx 193\,\Omega$. In practice you'd round <em>up</em> to a stocked 220&nbsp;Ω (slightly less current, the safe direction). The power burned is $P = I^2R = (0.015)^2 \times 193 \approx 43\,\text{mW}$ — easy for a ¼-watt part.</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="ard02-toggle">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — non-blocking toggle counter</div>
+        <div class="ex-q">Write a sketch that uses a <strong>non-blocking <code>millis()</code> debounce</strong> on a button (D2, <code>INPUT_PULLUP</code>) to <strong>toggle</strong> the built-in LED on each <em>clean</em> press, and print a running press count over Serial. No <code>delay()</code> anywhere. The key constraint: exactly one toggle per physical press, no matter how badly the contact bounces.</div>
+        <details class="ex-acc">
+          <summary>Hint</summary>
+          <div class="acc-body">Reuse the state-tracking pattern: store <code>lastRaw</code>, <code>stableState</code>, and <code>lastChange</code>. Reset <code>lastChange = millis()</code> whenever the raw reading flips. Only act once <code>millis() - lastChange &gt;= 25</code> <em>and</em> the settled level is a new <code>LOW</code>. On that settled-LOW edge, flip an <code>ledOn</code> boolean and <code>digitalWrite</code> it.</div>
+        </details>
+        <details class="ex-acc">
+          <summary>Show one solution</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">toggle_counter.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t BTN = 2, LED = LED_BUILTIN;
+const unsigned long DEBOUNCE_MS = 25;
+
+int  lastRaw     = HIGH;
+int  stableState = HIGH;
+unsigned long lastChange = 0;
+bool ledOn = false;
+long presses = 0;
+
+void setup() {
+  pinMode(BTN, INPUT_PULLUP);
+  pinMode(LED, OUTPUT);
+  Serial.begin(9600);
+}
+
+void loop() {
+  int raw = digitalRead(BTN);
+
+  if (raw != lastRaw) {              // bounce or real edge: restart timer
+    lastChange = millis();
+    lastRaw = raw;
+  }
+
+  if ((millis() - lastChange) &gt;= DEBOUNCE_MS) {
+    if (raw != stableState) {        // settled to a new level
+      stableState = raw;
+      if (stableState == LOW) {      // settled press → act ONCE
+        ledOn = !ledOn;              // toggle
+        digitalWrite(LED, ledOn ? HIGH : LOW);
+        presses++;
+        Serial.println(presses);
+      }
+    }
+  }
+  // ...other non-blocking work can live here; loop() never stalls.
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">The trick is acting only on the <strong>settled <code>HIGH→LOW</code> transition</strong>, not on every raw edge — that's what collapses a noisy burst into a single toggle. Because nothing blocks, you could debounce ten buttons and blink three LEDs in the same <code>loop()</code>. That composability is the whole reason we abandoned <code>delay()</code>.</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> Chapter recap</div>
+        <p>You can now reason about a GPIO pin as an OUTPUT that <em>sources/sinks</em> current or an INPUT that <em>listens</em>; size an LED resistor with $R=(V_{cc}-V_f)/I$ and check its power $P=I^2R$; respect the 20&nbsp;mA-safe / 40&nbsp;mA-max pin limit; kill floating inputs with <code>INPUT_PULLUP</code> and read active-low buttons correctly; explain contact bounce; and write a non-blocking <code>millis()</code> debounce that reports exactly one event per press. Next we put a real timer behind those edges and start doing many things at once.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="Back to top">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+
+<!-- chapter-specific simulator -->
+<script>
+EM.sim("sim-led", {
+  height: 250,
+  params: [
+    { key: "vcc", label: "Vcc (supply)",  min: 3,  max: 12, step: 0.1, value: 5,  unit: "V" },
+    { key: "vf",  label: "Vf (LED drop)", min: 1.6, max: 3.4, step: 0.1, value: 2,  unit: "V" },
+    { key: "i",   label: "I (target)",    min: 1,  max: 30, step: 1,   value: 10, unit: "mA" }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h, pad = 24 * dpr;
+    var iA = v.i / 1000;                                  // mA → A
+    var headroom = v.vcc - v.vf;                          // volts across resistor
+    var safe = (v.i <= 20) && (headroom > 0);
+
+    // --- draw a tiny schematic: Vcc -[R]- LED -GND ---
+    var midY = H * 0.42;
+    ctx.lineWidth = 2 * dpr;
+    ctx.strokeStyle = safe ? "#2ec4b6" : "#ff5c5c";
+    ctx.fillStyle = "#9aa4b2";
+    ctx.font = (13 * dpr) + "px monospace";
+
+    var x0 = pad, x1 = W - pad;
+    // supply node
+    ctx.beginPath(); ctx.moveTo(x0, midY); ctx.lineTo(x0 + 60 * dpr, midY); ctx.stroke();
+    ctx.fillText(v.vcc.toFixed(1) + "V", x0, midY - 10 * dpr);
+    // resistor (zigzag)
+    var rx = x0 + 60 * dpr, rw = 90 * dpr, zig = 8 * dpr;
+    ctx.beginPath(); ctx.moveTo(rx, midY);
+    for (var k = 0; k < 6; k++) {
+      ctx.lineTo(rx + (k + 0.5) * (rw / 6), midY + (k % 2 ? zig : -zig));
+    }
+    ctx.lineTo(rx + rw, midY); ctx.stroke();
+    // wire to LED
+    var lx = rx + rw;
+    ctx.beginPath(); ctx.moveTo(lx, midY); ctx.lineTo(lx + 50 * dpr, midY); ctx.stroke();
+    // LED triangle
+    var tx = lx + 50 * dpr;
+    ctx.beginPath();
+    ctx.moveTo(tx, midY - 12 * dpr); ctx.lineTo(tx, midY + 12 * dpr);
+    ctx.lineTo(tx + 22 * dpr, midY); ctx.closePath();
+    ctx.fillStyle = safe ? "#2ec4b6" : "#ff5c5c"; ctx.fill();
+    ctx.fillStyle = "#9aa4b2";
+    // wire to GND
+    ctx.beginPath(); ctx.moveTo(tx + 22 * dpr, midY); ctx.lineTo(x1, midY); ctx.stroke();
+    ctx.fillText("GND", x1 - 34 * dpr, midY - 10 * dpr);
+
+    // --- compute results ---
+    var out;
+    if (headroom <= 0) {
+      out = "<b style='color:#ff5c5c'>Vcc must exceed Vf</b> — no voltage left to drive current.";
+    } else {
+      var R = headroom / iA;                              // ohms
+      var P = iA * iA * R;                                // watts, I^2 R
+      var warn = (v.i > 20)
+        ? " &nbsp;·&nbsp; <b style='color:#ff5c5c'>⚠ I &gt; 20 mA — over the safe pin limit!</b>"
+        : "";
+      out = "R = (V<sub>cc</sub>−V<sub>f</sub>)/I = (" + v.vcc.toFixed(1) + "−" +
+            v.vf.toFixed(1) + ")/" + (v.i) + "mA = <b>" + (Math.round(R)) + " Ω</b>" +
+            " &nbsp;·&nbsp; P = I²R = <b>" + (Math.round(P * 1000)) + " mW</b>" + warn;
+    }
+    return out;
+  }
+});
+</script>
+</body>
+</html>

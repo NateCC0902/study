@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Timer Mastery: PWM, Input Capture &amp; Encoders — Embedded Mastery</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="track-stm32" data-track="stm32" data-chapter="05-timers">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">STM32 · Ch 05</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">STM32 Track · Chapter 05 · Advanced</div>
+        <h1>Timer Mastery: PWM, Input Capture &amp; Encoders</h1>
+        <p>The STM32 timer is the crown-jewel peripheral. Underneath it is just a counter — but wrap that counter in a prescaler, an auto-reload, and a handful of compare channels and you can generate motor drive, dim LEDs without burning CPU, measure a pulse to the nanosecond, and decode a quadrature encoder in hardware. We build all of it from one register: <code>CNT</code>.</p>
+        <div class="meta">
+          <span>⏱ ~50 min</span><span>🧠 Counters &amp; compare</span><span>⚡ PWM / capture / encoder</span><span>📐 Clock math</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="timer-is-a-counter"><span class="sec-no">1</span>A timer is just a counter that counts the clock</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Forget "timer" for a moment. A general-purpose timer like <strong>TIM2</strong> or <strong>TIM3</strong> on an STM32 is a hardware <strong>counter</strong> — a register called <code>CNT</code> that ticks up by one every clock edge it's fed. That's the whole idea. Everything else (PWM, period measurement, encoder decoding) is built by deciding <em>how fast</em> it ticks and <em>what happens at certain counts</em>.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence model</div>
+        <p>A timer is a <strong>counter (<code>CNT</code>) fed by a divided clock</strong>, that counts up to a programmable ceiling (<code>ARR</code>), wraps back to 0, and can fire actions when it passes programmable comparison points (<code>CCRx</code>).</p>
+      </div>
+
+      <p>Three knobs shape its behaviour, and you'll touch them in every single timer you ever configure:</p>
+      <ul>
+        <li><strong><code>PSC</code></strong> — the <em>prescaler</em>. It divides the incoming timer clock so <code>CNT</code> ticks more slowly. Divide-by is <span>$(\text{PSC}+1)$</span>.</li>
+        <li><strong><code>ARR</code></strong> — the <em>auto-reload register</em>. The counter counts <code>0, 1, 2, … ARR</code> then resets to 0 and raises an <em>update event</em>. So the period is <span>$(\text{ARR}+1)$</span> ticks.</li>
+        <li><strong><code>CCRx</code></strong> — the <em>capture/compare register</em> for channel <em>x</em>. In output mode it's the threshold that sets PWM duty; in input mode it <em>latches</em> the count when an edge arrives.</li>
+      </ul>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Why "+1" everywhere</div>
+        <p>The counter spends one tick on each value from 0 through ARR <em>inclusive</em>. That's <span>$\text{ARR}+1$</span> distinct values — hence period <span>$=\text{ARR}+1$</span>, not <code>ARR</code>. The same off-by-one logic makes the prescaler divide by <span>$\text{PSC}+1$</span>. Hardware counts from zero; humans forget the zero. Burn this in.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="counting-math"><span class="sec-no">2</span>The counting math: PSC, ARR &amp; the update frequency</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive it</small></div>
+      <p>The timer's input clock <span>$f_{\text{tim}}$</span> is divided by the prescaler to give the rate at which <code>CNT</code> increments:</p>
+
+      <div class="math-box">$$ f_{\text{CNT}} = \frac{f_{\text{tim}}}{\text{PSC}+1} $$</div>
+
+      <p>The counter then takes <span>$\text{ARR}+1$</span> of those ticks to overflow once. Each overflow is the <strong>update event</strong> — the heartbeat of the timer. Its frequency is the input clock divided by <em>both</em> factors:</p>
+
+      <div class="math-box">$$ f_{\text{update}} = \frac{f_{\text{tim}}}{(\text{PSC}+1)(\text{ARR}+1)} $$</div>
+
+      <p>This single equation is the foundation of the entire chapter. PWM frequency, sample-rate interrupts, software clocks — they are all just <span>$f_{\text{update}}$</span> with different ARR/CCR meanings layered on top.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the APB timer-clock ×2 rule</div>
+        <p><span>$f_{\text{tim}}$</span> is <em>not</em> always the APB bus clock you set in the clock tree. On STM32F4/F7/H7, when an APB prescaler is greater than 1, the timer clock on that bus is <strong>doubled</strong>. On a 168&nbsp;MHz F407 with APB1 at 42&nbsp;MHz (÷4), the APB1 <em>timer</em> clock is <span>$2\times42 = 84\,\text{MHz}$</span> — exactly what feeds TIM2–7. We met this rule in Chapter&nbsp;2; here it decides every number you compute. Always read <span>$f_{\text{tim}}$</span> off the CubeMX clock-tree's "to TIMx" node, not the bus label.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>solving for a target</small></div>
+      <p>In practice you work the equation <em>backwards</em>: you know <span>$f_{\text{tim}}$</span> and a target <span>$f_{\text{update}}$</span>, and you must choose PSC and ARR. Rearranging:</p>
+
+      <div class="math-box">$$ (\text{PSC}+1)(\text{ARR}+1) = \frac{f_{\text{tim}}}{f_{\text{update}}} $$</div>
+
+      <p><strong>Worked example.</strong> A 84&nbsp;MHz timer; we want a 1&nbsp;kHz update (a clean 1&nbsp;ms tick). The product we need is</p>
+
+      <div class="math-box">$$ (\text{PSC}+1)(\text{ARR}+1) = \frac{84\times10^6}{1\times10^3} = 84\,000 $$</div>
+
+      <p>Now factor 84&nbsp;000 into two integers, each <span>$\le 65536$</span> (these are 16-bit registers). A tidy split is <span>$84 \times 1000$</span>, giving <strong>PSC = 83</strong> and <strong>ARR = 999</strong>. Check it: <span>$84 \times 1000 = 84\,000$</span>, and <span>$84\times10^6 / 84\,000 = 1000\,\text{Hz}$</span>. Done.</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Choosing the split wisely</div>
+        <p>Many (PSC, ARR) pairs hit the same <span>$f_{\text{update}}$</span>, but they're not equal. For <strong>PWM</strong> you want <strong>ARR large</strong> (PSC small or zero) so duty resolution is fine — duty steps are <span>$1/(\text{ARR}+1)$</span>. For a slow software clock you want <strong>PSC large</strong> so a 16-bit ARR can still reach a long period. Pick the factor that puts resolution where you need it.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="timer-architecture"><span class="sec-no">3</span>Inside the block: how CNT, ARR &amp; CCR interact</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the datapath</small></div>
+      <p>Picture the counter as a rising sawtooth: <code>CNT</code> ramps from 0 to ARR, snaps back to 0, repeats. ARR is the ceiling that sets the <em>period</em>. Each compare register <code>CCRx</code> is a horizontal line through that sawtooth — the moment <code>CNT</code> crosses it, the channel's output flips. That crossing is what turns a counter into a PWM generator.</p>
+
+      <div class="mermaid">
+flowchart LR
+    CLK["f_tim<br/>(APB timer clk)"] --> PSC["Prescaler<br/>÷(PSC+1)"]
+    PSC --> CNT["CNT<br/>counts 0…ARR"]
+    ARR["ARR<br/>(period−1)"] -- "reload / wrap" --> CNT
+    CNT --> CMP{{"compare<br/>CNT vs CCRx"}}
+    CCR["CCRx<br/>(duty threshold)"] --> CMP
+    CMP --> OUT(["Channel output<br/>OCx → PWM pin"])
+    CNT -- "overflow" --> UEV(["Update event /<br/>interrupt"])
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Read the diagram as a sentence</div>
+        <p>The bus clock is divided by the prescaler to feed <code>CNT</code>. <code>CNT</code> ramps to <code>ARR</code> and wraps (the update event). Along the way a comparator watches <code>CNT</code> against each <code>CCRx</code>; the crossing drives the output pin. <strong>ARR sets the period; CCR sets the duty.</strong> Two registers, the whole story.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="pwm-generation"><span class="sec-no">4</span>PWM: turning the counter into an analog-ish output</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>average, not toggle</small></div>
+      <p>In <strong>PWM mode 1</strong> the channel output is high while <span>$\text{CNT} &lt; \text{CCRx}$</span> and low afterward, until the counter wraps. So in every period the pin is high for <code>CCRx</code> ticks out of <code>ARR+1</code> total. Drive a motor or an LED with this and the load responds to the <em>average</em> voltage — a fast square wave at 25% duty looks like 25% of the supply.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>duty &amp; frequency</small></div>
+      <p>Two formulas govern PWM, and they fall straight out of §2. The <strong>duty cycle</strong> is the high-time fraction of the period:</p>
+
+      <div class="math-box">$$ D = \frac{\text{CCR}}{\text{ARR}+1} $$</div>
+
+      <p>and the <strong>PWM frequency</strong> is just the update frequency (one PWM cycle per counter wrap):</p>
+
+      <div class="math-box">$$ f_{\text{PWM}} = \frac{f_{\text{tim}}}{(\text{PSC}+1)(\text{ARR}+1)} $$</div>
+
+      <p><strong>Worked example — a 20&nbsp;kHz motor PWM.</strong> 20&nbsp;kHz is the sweet spot for motor drive: above audible hiss, below switching-loss pain. With <span>$f_{\text{tim}} = 84\,\text{MHz}$</span> and PSC = 0 (no prescale, for maximum duty resolution):</p>
+
+      <div class="math-box">$$ \text{ARR}+1 = \frac{f_{\text{tim}}}{f_{\text{PWM}}} = \frac{84\times10^6}{20\times10^3} = 4200 \;\Rightarrow\; \text{ARR}=4199 $$</div>
+
+      <p>That gives 4200 duty steps — about 0.024% resolution, plenty. For <strong>25% duty</strong>:</p>
+
+      <div class="math-box">$$ \text{CCR} = D\,(\text{ARR}+1) = 0.25 \times 4200 = 1050 $$</div>
+
+      <p>So <code>PSC=0, ARR=4199, CCR=1050</code> gives a 20&nbsp;kHz, 25%-duty wave. Want 50%? Write <code>CCR=2100</code>. The beauty: once the timer is configured, changing brightness or motor speed is a <em>single register write</em> with zero CPU overhead afterwards.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>Here's the STM32 HAL version — TIM3 channel 1, 20&nbsp;kHz, starting at 25% duty. Assume the clock tree gave TIM3 an 84&nbsp;MHz timer clock.</p>
+
+      <div class="codeblock">
+        <div class="code-head">pwm.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">TIM_HandleTypeDef htim3;
+
+void PWM_Init(void)
+{
+  __HAL_RCC_TIM3_CLK_ENABLE();                 // power the timer
+
+  htim3.Instance           = TIM3;
+  htim3.Init.Prescaler     = 0;                // PSC = 0  -&gt; divide by 1
+  htim3.Init.CounterMode   = TIM_COUNTERMODE_UP;
+  htim3.Init.Period        = 4199;             // ARR = 4199 -&gt; 84MHz/4200 = 20 kHz
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  HAL_TIM_PWM_Init(&amp;htim3);
+
+  TIM_OC_InitTypeDef sConfig = {0};
+  sConfig.OCMode     = TIM_OCMODE_PWM1;        // high while CNT &lt; CCR
+  sConfig.Pulse      = 1050;                   // CCR = 1050 -&gt; 25% duty
+  sConfig.OCPolarity = TIM_OCPOLARITY_HIGH;
+  HAL_TIM_PWM_ConfigChannel(&amp;htim3, &amp;sConfig, TIM_CHANNEL_1);
+
+  HAL_TIM_PWM_Start(&amp;htim3, TIM_CHANNEL_1);    // start driving the pin
+}
+
+// Later, change duty on the fly with ZERO recompute:
+void PWM_SetDutyPercent(uint8_t pct)           // 0..100
+{
+  uint32_t arr = __HAL_TIM_GET_AUTORELOAD(&amp;htim3);   // 4199
+  uint32_t ccr = ((arr + 1U) * pct) / 100U;          // CCR = D*(ARR+1)
+  __HAL_TIM_SET_COMPARE(&amp;htim3, TIM_CHANNEL_1, ccr);
+}
+</code></pre>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> What each field maps to</div>
+        <p><code>Init.Prescaler</code> is <strong>PSC</strong>, <code>Init.Period</code> is <strong>ARR</strong>, and <code>sConfig.Pulse</code> is <strong>CCR</strong>. The HAL names hide the registers, but the math is identical. <code>__HAL_TIM_SET_COMPARE()</code> is just a write to <code>TIM3-&gt;CCR1</code> — instantaneous, glitch-free, and updated cleanly at the next reload because the registers are preloaded/buffered.</p>
+      </div>
+
+      <p>If you prefer the metal, the same configuration in bare registers makes the mapping unmistakable:</p>
+
+      <div class="codeblock">
+        <div class="code-head">pwm_regs.c <span class="lang">C / STM32 (registers)</span></div>
+<pre><code class="language-c">RCC-&gt;APB1ENR  |= RCC_APB1ENR_TIM3EN;          // clock the timer
+TIM3-&gt;PSC      = 0;                            // prescaler  = PSC
+TIM3-&gt;ARR      = 4199;                         // auto-reload = ARR (period-1)
+TIM3-&gt;CCR1     = 1050;                         // compare    = CCR (25% duty)
+TIM3-&gt;CCMR1   |= (6 &lt;&lt; TIM_CCMR1_OC1M_Pos);    // OC1M = 110 -&gt; PWM mode 1
+TIM3-&gt;CCMR1   |= TIM_CCMR1_OC1PE;              // preload CCR1 (glitch-free updates)
+TIM3-&gt;CCER    |= TIM_CCER_CC1E;                // enable channel-1 output
+TIM3-&gt;CR1     |= TIM_CR1_ARPE;                 // preload ARR too
+TIM3-&gt;EGR     |= TIM_EGR_UG;                   // force an update to load shadows
+TIM3-&gt;CR1     |= TIM_CR1_CEN;                  // CEN = 1 -&gt; counter runs
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — servo, motor &amp; LED on one peripheral</div>
+        <p>The exact same timer, retuned, drives three classic products. A <strong>hobby servo</strong> wants a 50&nbsp;Hz frame with a 1–2&nbsp;ms high pulse: set <code>PSC=83, ARR=19999</code> (1&nbsp;MHz tick → 20&nbsp;ms period), then <code>CCR=1500</code> for centre. A <strong>brushed-motor H-bridge</strong> wants 20&nbsp;kHz (the example above) so it never whines. <strong>LED dimming</strong> wants ≥1&nbsp;kHz (flicker-free to the eye) with a large ARR for smooth fades. One IP block, three industries — that's why mastering it pays off.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="input-capture"><span class="sec-no">5</span>Input capture: measuring the outside world</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>latch the count on an edge</small></div>
+      <p>PWM is the timer <em>talking</em>. <strong>Input capture</strong> is the timer <em>listening</em>. You route an external signal to a channel pin and tell the hardware: "on each rising edge, snapshot the current <code>CNT</code> into <code>CCRx</code>." The CPU isn't involved in the timing — the silicon latches the count the instant the edge arrives, so you measure period, pulse width, or frequency with near-zero jitter.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>ticks to seconds to Hz</small></div>
+      <p>Subtract two consecutive captures to get the period in <em>timer ticks</em>. Each tick lasts <span>$1/f_{\text{CNT}}$</span> seconds, so the measured frequency of the input signal is</p>
+
+      <div class="math-box">$$ f_{\text{signal}} = \frac{f_{\text{CNT}}}{\Delta\text{CNT}} = \frac{f_{\text{tim}}/(\text{PSC}+1)}{\text{CCR}_n - \text{CCR}_{n-1}} $$</div>
+
+      <p>Mind the wrap: if <span>$\text{CCR}_n &lt; \text{CCR}_{n-1}$</span> the counter overflowed between edges, so add <span>$\text{ARR}+1$</span> before subtracting. <strong>Worked example:</strong> with a 1&nbsp;MHz tick (1&nbsp;µs each) and a captured delta of 2000 ticks, the input is <span>$f = 10^6 / 2000 = 500\,\text{Hz}$</span> — a 2&nbsp;ms period, read straight off the hardware.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>capture in the ISR</small></div>
+      <div class="codeblock">
+        <div class="code-head">capture.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">// TIM2 CH1 in input-capture, rising edge. Tick = 1 us (PSC = 83 on 84 MHz).
+volatile uint32_t g_period_ticks = 0;
+static   uint32_t last = 0;
+
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim-&gt;Channel == HAL_TIM_ACTIVE_CHANNEL_1) {
+    uint32_t now = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+    uint32_t arr = __HAL_TIM_GET_AUTORELOAD(htim);
+    // wrap-safe delta: add one full period if the counter rolled over
+    g_period_ticks = (now &gt;= last) ? (now - last)
+                                   : (now + (arr + 1U) - last);
+    last = now;
+  }
+}
+
+// f_signal = 1e6 / g_period_ticks  (Hz), since one tick is 1 us here.
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — missed overflows on slow signals</div>
+        <p>The wrap-fix above only handles a <em>single</em> overflow between edges. If the input is slower than one full counter period, the counter wraps more than once and a naive delta is wrong. For low frequencies either enlarge the prescaler (slower tick, longer reach) or count update-event interrupts and fold them in. Always know your measurable range: <span>$f_{\min} = f_{\text{CNT}}/(\text{ARR}+1)$</span>.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="encoder-mode"><span class="sec-no">6</span>Encoder mode: free quadrature decoding in hardware</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the counter becomes a position</small></div>
+      <p>A quadrature encoder outputs two square waves, <strong>A</strong> and <strong>B</strong>, 90° out of phase. The phase <em>order</em> tells direction: A-leads-B is forward, B-leads-A is reverse. In <strong>encoder mode</strong> the timer wires both channels into the counter so that <code>CNT</code> increments on forward edges and decrements on reverse edges — automatically. After configuration, <code>CNT</code> simply <em>is</em> the wheel position, updated in hardware with no interrupts and no missed counts even at high RPM.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>counts, RPM &amp; the ×4</small></div>
+      <p>In the common <strong>×4 mode</strong> the timer counts every edge of both channels, so one encoder with <em>N</em> lines per revolution yields <span>$4N$</span> counts per revolution. Read the count delta over a known interval <span>$\Delta t$</span> to get speed:</p>
+
+      <div class="math-box">$$ \text{RPM} = \frac{\Delta\text{CNT}}{4N} \cdot \frac{60}{\Delta t} $$</div>
+
+      <p><strong>Worked example:</strong> a 500-line encoder (so 2000 counts/rev in ×4) advances 200 counts in a 10&nbsp;ms window. Then <span>$\text{RPM} = \frac{200}{2000}\cdot\frac{60}{0.01} = 0.1 \cdot 6000 = 600\,\text{RPM}$</span>. The counter did all the edge-tracking; your loop just reads <code>CNT</code> and subtracts.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>read position with one register</small></div>
+      <div class="codeblock">
+        <div class="code-head">encoder.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">TIM_HandleTypeDef htim4;
+
+void Encoder_Init(void)                         // TIM4 CH1=A, CH2=B
+{
+  TIM_Encoder_InitTypeDef enc = {0};
+  htim4.Instance        = TIM4;
+  htim4.Init.Prescaler  = 0;                    // count every edge, no divide
+  htim4.Init.Period     = 0xFFFF;               // 16-bit wrap (free-running)
+  htim4.Init.CounterMode = TIM_COUNTERMODE_UP;
+  enc.EncoderMode = TIM_ENCODERMODE_TI12;       // x4: count edges of A and B
+  enc.IC1Polarity = TIM_ICPOLARITY_RISING;
+  enc.IC2Polarity = TIM_ICPOLARITY_RISING;
+  HAL_TIM_Encoder_Init(&amp;htim4, &amp;enc);
+  HAL_TIM_Encoder_Start(&amp;htim4, TIM_CHANNEL_ALL);
+}
+
+// In your control loop, position is literally the counter:
+int16_t Encoder_Read(void)
+{
+  return (int16_t)__HAL_TIM_GET_COUNTER(&amp;htim4); // signed -&gt; handles reverse
+}
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — closed-loop motor control</div>
+        <p>This is the backbone of every servo drive, robot joint, and CNC axis. One timer in PWM mode commands the motor; a second timer in encoder mode reads its position — both in hardware, both interrupt-free. A periodic control loop (often a third timer firing an ISR at, say, 1&nbsp;kHz) reads the encoder delta, computes a PID correction, and writes a new <code>CCR</code>. Three timers, a complete motion-control system, and the CPU is mostly idle.</p>
+      </div>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-pwm-wrap">
+        <div class="sim-title">🔬 Live: PWM from ARR &amp; CCR (84 MHz timer clock, PSC = 0)</div>
+        <canvas id="sim-pwm"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">Drag <em>ARR</em> and <em>CCR</em>: watch the waveform, and the live <em>f<sub>PWM</sub></em> = 84&nbsp;MHz/(ARR+1) and duty = CCR/(ARR+1). CCR is clamped to ARR+1 (100% duty).</p>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>⑤ Your turn</h2>
+      <div class="layer"><span class="step">⑤</span> Practice <small>you compute &amp; decide</small></div>
+      <p>Three checks. Tap an answer, type a number, or reveal a coding challenge. Your progress is saved on this device and shown on the home page.</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="stm05-duty">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">A timer in PWM mode 1 has <code>ARR = 999</code> and <code>CCR = 250</code>. What duty cycle does the output have, and which register would you change to make it 75%?</div>
+        <ul class="ex-options">
+          <li data-correct="false">2.5% duty; change ARR to 750</li>
+          <li data-correct="true">25% duty; write CCR = 750</li>
+          <li data-correct="false">40% duty; write CCR = 400</li>
+          <li data-correct="false">25% duty; change the prescaler PSC</li>
+        </ul>
+        <div class="ex-explain">Duty is $D = \text{CCR}/(\text{ARR}+1) = 250/1000 = 25\%$. To reach 75% you change the <em>duty</em>, not the period, so write $\text{CCR} = 0.75 \times 1000 = 750$. Changing ARR or PSC would alter the <em>frequency</em>, not the duty.</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="stm05-update-freq" data-answer="1000" data-tol="5">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">A timer is clocked at <strong>16&nbsp;MHz</strong> with <code>PSC = 15</code> and <code>ARR = 999</code>. What is the update frequency $f_{\text{update}}$ in <strong>Hz</strong>? (Recall $f_{\text{update}} = \dfrac{f_{\text{tim}}}{(\text{PSC}+1)(\text{ARR}+1)}$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="Hz"><span class="ex-unit">Hz</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$(\text{PSC}+1)(\text{ARR}+1) = 16 \times 1000 = 16\,000$, so $f = \dfrac{16\times10^6}{16\,000} = 1000\,\text{Hz}$ — a clean 1&nbsp;ms tick. This is the classic "give me a 1&nbsp;kHz control-loop interrupt on a 16&nbsp;MHz timer" recipe.</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="stm05-servo-pwm">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — drive a hobby servo</div>
+        <div class="ex-q">Configure TIM3 CH1 on an 84&nbsp;MHz timer to produce a standard <strong>50&nbsp;Hz</strong> servo frame (20&nbsp;ms period) with a <strong>1.5&nbsp;ms centre pulse</strong>. Choose PSC/ARR for a convenient 1&nbsp;µs tick, then find the CCR for centre. Write the HAL init.</div>
+        <details class="ex-acc">
+          <summary>Hint</summary>
+          <div class="acc-body">Aim for a <strong>1&nbsp;µs tick</strong>: $f_{\text{CNT}} = 84\,\text{MHz}/(\text{PSC}+1) = 1\,\text{MHz} \Rightarrow \text{PSC} = 83$. Then a 20&nbsp;ms period is 20&nbsp;000 ticks, so $\text{ARR} = 19999$. A 1.5&nbsp;ms pulse is 1500 ticks, so $\text{CCR} = 1500$. (1&nbsp;ms → 1000, 2&nbsp;ms → 2000: the full servo range.)</div>
+        </details>
+        <details class="ex-acc">
+          <summary>Show one solution</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">servo.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">// 84 MHz timer -&gt; PSC=83 gives a 1 us tick (1 MHz).
+// 20 ms frame -&gt; ARR=19999. 1.5 ms centre -&gt; CCR=1500.
+TIM_HandleTypeDef htim3;
+
+void Servo_Init(void)
+{
+  __HAL_RCC_TIM3_CLK_ENABLE();
+
+  htim3.Instance         = TIM3;
+  htim3.Init.Prescaler   = 83;                 // 84MHz/84 = 1 MHz  (1 us/tick)
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period      = 19999;              // 20000 ticks = 20 ms = 50 Hz
+  HAL_TIM_PWM_Init(&amp;htim3);
+
+  TIM_OC_InitTypeDef oc = {0};
+  oc.OCMode     = TIM_OCMODE_PWM1;
+  oc.Pulse      = 1500;                         // 1.5 ms -&gt; centre position
+  oc.OCPolarity = TIM_OCPOLARITY_HIGH;
+  HAL_TIM_PWM_ConfigChannel(&amp;htim3, &amp;oc, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&amp;htim3, TIM_CHANNEL_1);
+}
+
+// Aim the servo: angle 0..180 deg -&gt; pulse 1000..2000 us.
+void Servo_SetAngle(uint8_t deg)               // 0..180
+{
+  uint32_t us = 1000U + ((uint32_t)deg * 1000U) / 180U;  // 1000..2000
+  __HAL_TIM_SET_COMPARE(&amp;htim3, TIM_CHANNEL_1, us);       // CCR in 1-us ticks
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">The 1&nbsp;µs tick is the trick: it makes CCR <em>read in microseconds directly</em>, so a 1500&nbsp;µs pulse is literally <code>CCR=1500</code>. Choosing your prescaler to give a human-friendly tick is a hallmark of clean timer code.</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> Chapter recap</div>
+        <p>A timer is a counter: <code>CNT</code> ticks at $f_{\text{tim}}/(\text{PSC}+1)$, wraps every $\text{ARR}+1$ ticks, and the update frequency is $f_{\text{tim}}/((\text{PSC}+1)(\text{ARR}+1))$ — remember the APB ×2 timer-clock rule. In <strong>PWM</strong>, ARR sets the frequency and CCR sets duty ($D=\text{CCR}/(\text{ARR}+1)$); 84&nbsp;MHz → 20&nbsp;kHz is ARR=4199, and 25% duty is CCR=1050. <strong>Input capture</strong> latches <code>CNT</code> on an edge to measure period and frequency wrap-safely. <strong>Encoder mode</strong> turns <code>CNT</code> into a hardware position counter for closed-loop motor control. One peripheral, three superpowers — and the CPU barely lifts a finger. Next we'll feed these timers into the ADC and DMA for sampling that runs entirely in hardware.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="Back to top">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+
+<!-- chapter-specific simulator -->
+<script>
+EM.sim("sim-pwm", {
+  height: 240,
+  params: [
+    { key: "arr", label: "ARR",  min: 99,  max: 8399, step: 100, value: 4199, unit: "" },
+    { key: "ccr", label: "CCR",  min: 0,   max: 8400, step: 50,  value: 1050, unit: "" }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h, pad = 40 * dpr;
+    var hi = pad, lo = H - pad;                          // y for HIGH / LOW
+    var ftim = 84e6;                                     // fixed timer clock, PSC=0
+    var period = v.arr + 1;                              // ticks per PWM cycle
+    var ccr = Math.min(v.ccr, period);                   // clamp to 100% duty
+    var duty = ccr / period;
+
+    ctx.lineWidth = 1 * dpr; ctx.strokeStyle = "#262d3a";
+    ctx.fillStyle = "#6e7681"; ctx.font = (12 * dpr) + "px monospace";
+    ctx.beginPath(); ctx.moveTo(pad, hi); ctx.lineTo(W - 10 * dpr, hi);
+    ctx.moveTo(pad, lo); ctx.lineTo(W - 10 * dpr, lo); ctx.stroke();
+    ctx.fillText("HI", 6 * dpr, hi + 4 * dpr);
+    ctx.fillText("LO", 6 * dpr, lo + 4 * dpr);
+
+    // draw ~3 PWM periods, each period = high for duty fraction then low
+    var cycles = 3;
+    var usable = W - pad - 14 * dpr;
+    var pxPerCycle = usable / cycles;
+    ctx.beginPath();
+    ctx.strokeStyle = "#2ec4b6"; ctx.lineWidth = 2.5 * dpr;
+    var x = pad;
+    ctx.moveTo(x, duty > 0 ? hi : lo);
+    for (var i = 0; i < cycles; i++) {
+      var xHighEnd = x + duty * pxPerCycle;
+      ctx.lineTo(xHighEnd, hi);                          // high segment
+      ctx.lineTo(xHighEnd, lo);                          // falling edge
+      var xCycleEnd = x + pxPerCycle;
+      ctx.lineTo(xCycleEnd, lo);                         // low segment
+      if (i < cycles - 1) ctx.lineTo(xCycleEnd, hi);     // rising edge to next
+      x = xCycleEnd;
+    }
+    ctx.stroke();
+
+    var f = ftim / period;                               // Hz
+    var fTxt = f >= 1000 ? (Math.round(f / 10) / 100) + " kHz"
+                         : (Math.round(f * 10) / 10) + " Hz";
+    return "f<sub>PWM</sub> = 84MHz/(ARR+1) = <b>" + fTxt +
+           "</b> &nbsp;·&nbsp; Duty = CCR/(ARR+1) = <b>" +
+           (Math.round(duty * 1000) / 10) + " %</b> &nbsp;·&nbsp; (CCR " +
+           ccr + " / period " + period + ")";
+  }
+});
+</script>
+</body>
+</html>

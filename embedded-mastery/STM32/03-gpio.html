@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>GPIO at the Register Level: MODER, BSRR & HAL — Embedded Mastery</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="track-stm32" data-track="stm32" data-chapter="03-gpio">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">STM32 · Ch 03</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">STM32 Track · Chapter 03 · Intermediate</div>
+        <h1>GPIO at the Register Level: MODER, BSRR &amp; HAL</h1>
+        <p>On Arduino you wrote <code>digitalWrite(13, HIGH)</code> and a pin went high. That one line hides a dozen hardware bits. On STM32 we're going to lift the hood completely: configure a pin by writing the <em>exact</em> registers the silicon reads, learn why one of them — <strong>BSRR</strong> — is the difference between correct firmware and a heisenbug that bites only when an interrupt fires. Then we'll do the same blink with HAL and know precisely what HAL did for us.</p>
+        <div class="meta">
+          <span>⏱ ~45 min</span><span>🧠 Register model</span><span>⚡ Bare-metal GPIO</span><span>🔧 HAL vs CMSIS</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="ports-and-pins"><span class="sec-no">1</span>Ports, pins &amp; the register file</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>An STM32's pins aren't loose wires you address one at a time. They're organized into <strong>ports</strong> of 16 pins each: <code>GPIOA</code>, <code>GPIOB</code>, … through <code>GPIOK</code> on the largest parts. The pin we'll obsess over all chapter — the green user LED on a Nucleo-F446 board — is <strong>PA5</strong>: port A, pin&nbsp;5.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence model</div>
+        <p>Each GPIO port is a <strong>small block of memory-mapped registers</strong>; configuring or driving a pin is nothing more than writing the right bits into the right register at the port's base address.</p>
+      </div>
+
+      <p>Because ports come in groups of 16, the hardware packs the control for all 16 pins into a handful of 32-bit registers. Two bits per pin × 16 pins = 32 bits — exactly one register. That arithmetic is not a coincidence; it's why <code>MODER</code>, <code>OSPEEDR</code>, and <code>PUPDR</code> are all "2 bits per pin" registers, and why <code>OTYPER</code> and <code>IDR</code>, which need only one bit per pin, leave their upper half unused.</p>
+
+      <p>In code, a port is a C <code>struct</code> overlaid on its base address. CMSIS (the vendor header set) gives you <code>GPIOA</code> as a pointer to that struct, so <code>GPIOA-&gt;MODER</code> dereferences straight to the silicon. Here is the register file you'll meet, in declaration order:</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Register</th><th>Bits / pin</th><th>Job</th><th>Pin <em>n</em> uses</th></tr></thead>
+        <tbody>
+          <tr><td><code>MODER</code></td><td>2</td><td>Direction: input / output / alternate / analog</td><td>bits [2n+1 : 2n]</td></tr>
+          <tr><td><code>OTYPER</code></td><td>1</td><td>Output type: push-pull / open-drain</td><td>bit [n]</td></tr>
+          <tr><td><code>OSPEEDR</code></td><td>2</td><td>Slew-rate / drive speed</td><td>bits [2n+1 : 2n]</td></tr>
+          <tr><td><code>PUPDR</code></td><td>2</td><td>Internal pull: none / pull-up / pull-down</td><td>bits [2n+1 : 2n]</td></tr>
+          <tr><td><code>IDR</code></td><td>1</td><td>Input data (read the live pin)</td><td>bit [n] (read-only)</td></tr>
+          <tr><td><code>ODR</code></td><td>1</td><td>Output data (the latched drive value)</td><td>bit [n]</td></tr>
+          <tr><td><code>BSRR</code></td><td>2</td><td>Atomic set / reset of <code>ODR</code> bits</td><td>set: bit [n] · reset: bit [n+16]</td></tr>
+          <tr><td><code>AFRL</code>/<code>AFRH</code></td><td>4</td><td>Which peripheral owns the pin (AF0–AF15)</td><td>4-bit nibble per pin</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the port is born unclocked</div>
+        <p>As we hammered in <a href="02-clocks.html">Chapter 02</a>, every peripheral wakes up with its clock <em>off</em>. Read <code>GPIOA-&gt;MODER</code> before enabling the GPIOA clock and you'll get zeros and your writes silently vanish. The very first GPIO line in any STM32 program is always an RCC clock-enable.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="moder-math"><span class="sec-no">2</span>MODER: the math of two bits per pin</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive the bit positions</small></div>
+      <p><code>MODER</code> is the register that decides what a pin <em>is</em>. Each pin gets a 2-bit field, and the four values are:</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Value</th><th>Mode</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>00</code></td><td>Input</td><td>Hi-Z digital input (read via <code>IDR</code>)</td></tr>
+          <tr><td><code>01</code></td><td>Output</td><td>General-purpose output (drive via <code>ODR</code>/<code>BSRR</code>)</td></tr>
+          <tr><td><code>10</code></td><td>Alternate</td><td>A peripheral owns the pin (timer, UART, SPI…)</td></tr>
+          <tr><td><code>11</code></td><td>Analog</td><td>ADC/DAC, or lowest-power "disconnect"</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p>The two bits for pin <span>$n$</span> sit at positions <span>$2n$</span> (low) and <span>$2n+1$</span> (high). That's the whole rule:</p>
+
+      <div class="math-box">
+        $$ \text{MODER field for pin } n \;=\; \text{bits } [\,2n+1 : 2n\,] $$
+      </div>
+
+      <p>For our LED on <strong>PA5</strong>, substitute <span>$n=5$</span>:</p>
+
+      <div class="math-box">
+        $$ 2n = 10, \qquad 2n+1 = 11 \;\;\Rightarrow\;\; \text{PA5 uses MODER bits } [\,11:10\,] $$
+      </div>
+
+      <p>To make PA5 an output we need the value <code>01</code> in that field. As a raw 32-bit word, that is <span>$1$</span> shifted left into bit&nbsp;10:</p>
+
+      <div class="math-box">
+        $$ \texttt{0b01} \ll 10 \;=\; 1 \times 2^{10} \;=\; 1024 \;=\; \texttt{0x00000400} $$
+      </div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> The read-modify-write idiom</div>
+        <p>You can't just <em>write</em> <code>1024</code> to <code>MODER</code> — that would also clobber the other 15 pins' fields to <code>00</code>. You must <strong>clear the field, then set it</strong>: first <code>MODER &amp;= ~(0b11 &lt;&lt; 10)</code> zeros both bits of PA5, then <code>MODER |= (0b01 &lt;&lt; 10)</code> writes the new value. Clear-then-set is the universal pattern for any multi-bit field.</p>
+      </div>
+
+      <p>Generalize the shift and you have the formula every register macro is built on. For a 2-bit field, pin <span>$n$</span>'s shift is <span>$2n$</span>; for the 4-bit <code>AFR</code> nibble it's <span>$4n$</span> (modulo the low/high split). Memorize the family:</p>
+
+      <div class="math-box">
+        $$ \text{shift}_{\,k\text{-bit field}}(n) \;=\; k \cdot n, \qquad \text{mask} \;=\; \big(2^{k}-1\big) \ll k n $$
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="bsrr"><span class="sec-no">3</span>BSRR: why atomic writes matter</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the race you can't see</small></div>
+      <p>Once a pin is an output, there are two ways to change its level. The obvious one is <code>ODR</code> — the output data register, one bit per pin. To set PA5 you'd write <code>GPIOA-&gt;ODR |= (1 &lt;&lt; 5)</code>. That looks innocent. It is a trap.</p>
+
+      <p><code>|=</code> is not one machine operation. The CPU must <strong>read</strong> the whole 32-bit <code>ODR</code> into a register, <strong>OR</strong> in your bit, then <strong>write</strong> the result back — three steps. If an interrupt fires <em>between</em> the read and the write, and that ISR also touches a pin on the same port, your write-back uses a stale copy of <code>ODR</code> and silently undoes the ISR's change.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the lost-update race</div>
+        <p>Main code runs <code>ODR |= (1&lt;&lt;5)</code>. It reads ODR, gets interrupted, the ISR does <code>ODR |= (1&lt;&lt;3)</code> on a different pin and returns. Main resumes and writes back its stale value — pin&nbsp;3 just got <strong>cleared</strong>. Nothing errors. The bug appears once an hour, in the field, never on your bench. This is the single most common bare-metal GPIO bug.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>the two-halves register</small></div>
+      <p>STM32 fixes this with <strong>BSRR</strong> — Bit Set/Reset Register. It is 32 bits split into two halves, and crucially it is <strong>write-only with no read</strong>, so there's nothing to read-modify-write:</p>
+
+      <div class="math-box">
+        $$ \underbrace{\text{BR}_{15}\ldots\text{BR}_{0}}_{\text{bits }[31:16]\;\text{RESET}} \;\;\Big|\;\; \underbrace{\text{BS}_{15}\ldots\text{BS}_{0}}_{\text{bits }[15:0]\;\text{SET}} $$
+      </div>
+
+      <p>Writing a <code>1</code> to bit <span>$n$</span> (low half) <em>sets</em> pin <span>$n$</span>. Writing a <code>1</code> to bit <span>$n+16$</span> (high half) <em>resets</em> it. Writing <code>0</code> anywhere does nothing. So for PA5:</p>
+
+      <div class="math-box">
+        $$ \text{set PA5: } \texttt{BSRR} = 1 \ll 5 = \texttt{0x0020}; \qquad \text{reset PA5: } \texttt{BSRR} = 1 \ll (5{+}16) = \texttt{0x0020\,0000} $$
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Why this is correct by construction</div>
+        <p>A write to <code>BSRR</code> is a <strong>single store instruction</strong> the hardware applies atomically — it touches only the bits you wrote <code>1</code> to and leaves every other pin alone. There is no read step, so there is no window for an interrupt to corrupt. <strong>Always drive outputs with BSRR, never <code>ODR |=</code>.</strong> HAL's <code>HAL_GPIO_WritePin</code> uses BSRR internally for exactly this reason.</p>
+      </div>
+
+      <p>You can even set and reset different pins in one write: <code>BSRR = (1&lt;&lt;5) | (1&lt;&lt;(3+16))</code> sets PA5 and clears PA3 simultaneously — one atomic store, two pins. If you set <em>and</em> reset the same pin in one write, reset wins: the high half has priority.</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="bitfield-map"><span class="sec-no">4</span>One pin, every register: the bitfield map</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>see all the bits at once</small></div>
+      <p>Here's PA5 traced through every register that controls it. Notice how the 2-bit registers all land on bits [11:10] for pin&nbsp;5, the 1-bit registers use just bit&nbsp;5, and BSRR splits set (bit&nbsp;5) from reset (bit&nbsp;21). Configuration is written once at setup; only BSRR (and IDR for inputs) gets touched in the hot loop.</p>
+
+      <div class="mermaid">
+flowchart TB
+    subgraph CFG["Config — written ONCE at setup"]
+        M["MODER bits 11:10 = 01<br/>(output)"]
+        O["OTYPER bit 5 = 0<br/>(push-pull)"]
+        S["OSPEEDR bits 11:10<br/>(slew rate)"]
+        P["PUPDR bits 11:10 = 00<br/>(no pull)"]
+    end
+    subgraph RT["Runtime — written every loop"]
+        BS["BSRR bit 5<br/>SET PA5"]
+        BR["BSRR bit 21<br/>RESET PA5"]
+        ID["IDR bit 5<br/>read PA5"]
+    end
+    CFG --> PIN(["PA5 — physical pin"])
+    BS --> PIN
+    BR --> PIN
+    PIN --> ID
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Where do the addresses come from?</div>
+        <p>On STM32F446, GPIOA's base is <code>0x40020000</code> and <code>MODER</code> is at offset <code>0x00</code>, <code>IDR</code> at <code>0x10</code>, <code>ODR</code> at <code>0x14</code>, <code>BSRR</code> at <code>0x18</code>. You never hard-code these — the CMSIS header <code>stm32f4xx.h</code> declares the <code>GPIO_TypeDef</code> struct so the compiler computes them. <code>GPIOA-&gt;BSRR</code> <em>is</em> <code>*(volatile uint32_t*)(0x40020000 + 0x18)</code>.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="register-blink"><span class="sec-no">5</span>Blink PA5 from registers, fully annotated</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>Now we assemble everything: enable the clock, configure PA5 as a push-pull output with no pull, and toggle it forever using BSRR. This is pure CMSIS — no HAL, no Arduino — and it is exactly what the silicon executes.</p>
+
+      <div class="codeblock">
+        <div class="code-head">blink_reg.c <span class="lang">C / CMSIS</span></div>
+<pre><code class="language-c">#include "stm32f4xx.h"   // CMSIS: GPIOA, RCC, register bit masks
+
+#define LED_PIN  5       // PA5 = green user LED on Nucleo-F446
+
+void delay(volatile uint32_t n) { while (n--) __NOP(); }
+
+int main(void) {
+    // 1) CLOCK: GPIOA lives on the AHB1 bus. Enable its clock first,
+    //    or every write below is swallowed by an unclocked peripheral.
+    RCC-&gt;AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+
+    // 2) MODE: set MODER[11:10] = 0b01 (output) for PA5.
+    //    Clear the 2-bit field first, then OR in the new value.
+    GPIOA-&gt;MODER &amp;= ~(0x3u &lt;&lt; (2 * LED_PIN));   // clear bits 11:10
+    GPIOA-&gt;MODER |=  (0x1u &lt;&lt; (2 * LED_PIN));   // 01 = output
+
+    // 3) OUTPUT TYPE: 0 = push-pull (drives both high AND low).
+    GPIOA-&gt;OTYPER &amp;= ~(0x1u &lt;&lt; LED_PIN);
+
+    // 4) PULL: 00 = no pull-up/pull-down (an LED needs neither).
+    GPIOA-&gt;PUPDR &amp;= ~(0x3u &lt;&lt; (2 * LED_PIN));
+
+    while (1) {
+        // SET PA5 — low half of BSRR. One atomic store, no read.
+        GPIOA-&gt;BSRR = (1u &lt;&lt; LED_PIN);          // == 0x00000020
+        delay(800000);
+        // RESET PA5 — high half of BSRR, bit (pin + 16).
+        GPIOA-&gt;BSRR = (1u &lt;&lt; (LED_PIN + 16));   // == 0x00200000
+        delay(800000);
+    }
+}
+</code></pre>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> What each block really does</div>
+        <p><strong>(1)</strong> flips one bit in <code>RCC-&gt;AHB1ENR</code> to route a clock to GPIOA. <strong>(2)</strong> clear-then-set on the 2-bit MODER field makes the pin a driven output. <strong>(3)</strong> &amp; <strong>(4)</strong> choose push-pull and no internal resistor. The loop never calls a function to "write" the pin — it just stores a constant into <code>BSRR</code>. That store <em>is</em> the digitalWrite, and it's atomic.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the missing <code>volatile</code></div>
+        <p><code>delay()</code>'s counter is <code>volatile</code> on purpose. Without it, an optimizing compiler sees a loop that computes nothing observable and <em>deletes it entirely</em> — your LED appears to never blink. The CMSIS register structs are already declared <code>volatile</code>, which is why <code>GPIOA-&gt;BSRR = …</code> is never optimized away.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="hal-equivalent"><span class="sec-no">6</span>The same blink in HAL — and what HAL hid</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>same result, different altitude</small></div>
+      <p>STM32's HAL (Hardware Abstraction Layer) wraps those registers in named structs and functions. Here is the identical blink. Watch how each HAL line maps to a register write you now understand.</p>
+
+      <div class="codeblock">
+        <div class="code-head">blink_hal.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">#include "stm32f4xx_hal.h"
+
+int main(void) {
+    HAL_Init();
+    // __HAL_RCC_GPIOA_CLK_ENABLE() expands to the SAME line as before:
+    //   RCC-&gt;AHB1ENR |= RCC_AHB1ENR_GPIOAEN;  (+ a read-back for sync)
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+
+    GPIO_InitTypeDef cfg = {0};
+    cfg.Pin   = GPIO_PIN_5;              // bit mask 1&lt;&lt;5, NOT the number 5
+    cfg.Mode  = GPIO_MODE_OUTPUT_PP;     // -&gt; MODER=01, OTYPER=0 (push-pull)
+    cfg.Pull  = GPIO_NOPULL;             // -&gt; PUPDR=00
+    cfg.Speed = GPIO_SPEED_FREQ_LOW;     // -&gt; OSPEEDR=00
+    HAL_GPIO_Init(GPIOA, &amp;cfg);          // does the clear-then-set for us
+
+    while (1) {
+        HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);  // reads ODR, writes BSRR
+        HAL_Delay(500);                          // 500 ms via SysTick
+    }
+}
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> HAL is a thin glove, not a black box</div>
+        <p><code>HAL_GPIO_Init</code> does precisely the clear-then-set on <code>MODER</code>/<code>OTYPER</code>/<code>OSPEEDR</code>/<code>PUPDR</code> you wrote by hand. <code>HAL_GPIO_WritePin</code> writes <code>BSRR</code> (set in the low half, reset in the high half). <code>HAL_GPIO_TogglePin</code> reads the current <code>ODR</code> bit and writes the opposite half of <code>BSRR</code>. Knowing the registers means you can read HAL's source, debug it, and bypass it where the cycles matter.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — <code>GPIO_PIN_5</code> is a mask, not an index</div>
+        <p>HAL's <code>GPIO_PIN_5</code> is <code>(1 &lt;&lt; 5) = 0x20</code>, a bitmask — not the integer 5. Pass the number 5 where HAL wants a mask and you'll configure pin&nbsp;2 and pin&nbsp;0 (because <code>5 = 0b101</code>). The bare-metal side uses the index 5 with explicit shifts; HAL uses the pre-shifted mask. Don't mix them.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="alternate-and-input"><span class="sec-no">7</span>Alternate function &amp; reading a button</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>handing a pin to a peripheral</small></div>
+      <p>So far PA5 has been a plain output we drive from software. But the same pin can instead be wired to a <em>peripheral</em>: a timer's PWM channel, a UART's TX line, an SPI clock. That's what <code>MODER = 10</code> (Alternate) means — and <code>AFRL</code>/<code>AFRH</code> select <em>which</em> of the 16 possible alternate functions (AF0–AF15) the pin routes to.</p>
+
+      <p>Each pin gets a 4-bit nibble. Pins 0–7 live in <code>AFRL</code> (the low register), pins 8–15 in <code>AFRH</code>. PA5's alternate-function 1 (AF1) is TIM2_CH1 — the timer channel we'll use for PWM in a later chapter. To route PA5 to a peripheral you set <code>MODER=10</code> and write the AF nibble:</p>
+
+      <div class="math-box">
+        $$ \text{AFR nibble shift for pin } n<8 \;=\; 4n \quad\Rightarrow\quad \text{PA5} \to \text{AFRL bits }[23:20] $$
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">af_pwm_pin.c <span class="lang">C / CMSIS</span></div>
+<pre><code class="language-c">// Route PA5 to TIM2_CH1 (alternate function AF1) for hardware PWM.
+GPIOA-&gt;MODER  &amp;= ~(0x3u &lt;&lt; (2 * 5));   // clear MODER[11:10]
+GPIOA-&gt;MODER  |=  (0x2u &lt;&lt; (2 * 5));   // 10 = ALTERNATE function
+
+GPIOA-&gt;AFR[0] &amp;= ~(0xFu &lt;&lt; (4 * 5));   // AFR[0] is AFRL; clear nibble[23:20]
+GPIOA-&gt;AFR[0] |=  (0x1u &lt;&lt; (4 * 5));   // AF1 = TIM2_CH1
+// From here the TIMER, not the CPU, owns the pin's voltage.
+</code></pre>
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>now read an input</small></div>
+      <p>Reading is the mirror image. Configure the pin as input (<code>MODER=00</code>), enable a pull-up so the line idles high, then read bit <span>$n$</span> of <code>IDR</code>. The on-board user button B1 on a Nucleo is wired to PC13 and pulls to ground when pressed, so a pull-up plus "pressed = 0" is the natural reading.</p>
+
+      <div class="codeblock">
+        <div class="code-head">button.c <span class="lang">C / CMSIS</span></div>
+<pre><code class="language-c">RCC-&gt;AHB1ENR |= RCC_AHB1ENR_GPIOCEN;      // clock port C
+
+GPIOC-&gt;MODER &amp;= ~(0x3u &lt;&lt; (2 * 13));       // 00 = input (PC13)
+GPIOC-&gt;PUPDR &amp;= ~(0x3u &lt;&lt; (2 * 13));       // clear pull field
+GPIOC-&gt;PUPDR |=  (0x1u &lt;&lt; (2 * 13));       // 01 = pull-UP, line idles high
+
+// IDR bit 13 reads the LIVE pin voltage. Button grounds it when pressed.
+if ((GPIOC-&gt;IDR &amp; (1u &lt;&lt; 13)) == 0) {
+    // pressed: pin pulled to 0 V against the pull-up
+}
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Why a pull resistor is mandatory</div>
+        <p>A bare input pin with nothing driving it is <strong>floating</strong> — its voltage drifts on noise and <code>IDR</code> returns random 1s and 0s. <code>PUPDR</code>'s internal pull-up (~40&nbsp;kΩ) ties the line to a known level so an open switch reads a clean <code>1</code> and a press reads <code>0</code>. No pull, no reliable read.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="toggle-speed"><span class="sec-no">8</span>Real case: how fast can a pin toggle?</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>this ships in products</small></div>
+      <p>"Toggle a pin" sounds trivial until you need to <em>bit-bang</em> a protocol — drive a clock, a NeoPixel strip, or a soft-SPI line by hand because no spare peripheral is free. Then the maximum toggle frequency becomes a hard limit on what you can talk to.</p>
+
+      <p>On an STM32F446 the CPU runs at up to <span>$f_{\text{clk}} = 180\,\text{MHz}$</span>, and GPIO sits on the AHB1 bus at the full <code>HCLK</code>. A <code>BSRR</code> write is a single-cycle store from the CPU's view. In a tight assembly loop that alternates set/reset, the practical ceiling is roughly <code>HCLK</code> divided by the cycles per toggle:</p>
+
+      <div class="math-box">
+        $$ f_{\text{toggle}} \;\approx\; \frac{f_{\text{clk}}}{\text{cycles per edge}} \;=\; \frac{180\,\text{MHz}}{\sim 2} \;\approx\; 90\,\text{MHz (best case, asm loop)} $$
+      </div>
+
+      <p>A realistic C <code>while(1){ BSRR=set; BSRR=reset; }</code> loop, with loop overhead, lands around <span>$10\text{–}45\,\text{MHz}$</span> depending on flash wait-states and the instruction cache. Now compare the Arduino Uno's <code>digitalWrite()</code>: it does pin-to-port lookups, interrupt-disabling, and a read-modify-write each call — about <strong>50 CPU cycles</strong> at 16&nbsp;MHz, so under <strong>~150&nbsp;kHz</strong>. Direct port writes on the AVR (<code>PORTB ^= 1&lt;&lt;5</code>) reach ~2–4&nbsp;MHz. The register-level STM32 is two to three <em>orders of magnitude</em> faster.</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — bit-banging a WS2812 LED strip</div>
+        <p>WS2812 "NeoPixel" LEDs have no clock line; each bit is encoded purely by how long the data pin stays high — a 1 is ~0.8&nbsp;µs high, a 0 is ~0.4&nbsp;µs high, with ±150&nbsp;ns tolerance. Hitting that timing means counting CPU cycles between <code>BSRR</code> writes. On a 16&nbsp;MHz AVR it's painfully tight and must be hand-written in assembly; on a 180&nbsp;MHz STM32 with single-cycle <code>BSRR</code> you have cycles to spare — which is exactly why fast LED-strip drivers moved to ARM. The toggle-speed math above is the budget that decides whether your protocol is even possible in software.</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>⑤ Your turn</h2>
+      <div class="layer"><span class="step">⑤</span> Practice <small>you write &amp; decide</small></div>
+      <p>Three checks. Tap an answer, type a number, or reveal a coding challenge. Progress is saved on this device and shown on the home page.</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="stm03-bsrr-why">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">Why is <code>GPIOA-&gt;BSRR = (1&lt;&lt;5)</code> preferred over <code>GPIOA-&gt;ODR |= (1&lt;&lt;5)</code> to set a pin?</div>
+        <ul class="ex-options">
+          <li data-correct="false">BSRR is faster because it skips the clock-enable step</li>
+          <li data-correct="true">BSRR is a single atomic write, so an interrupt can't corrupt a read-modify-write</li>
+          <li data-correct="false">ODR can only be written once per power cycle</li>
+          <li data-correct="false">BSRR drives more current onto the pin</li>
+        </ul>
+        <div class="ex-explain"><code>ODR |=</code> is a <strong>read-modify-write</strong>: read ODR, OR the bit, write back. An interrupt landing between the read and the write can change another pin on the port, and the stale write-back undoes it. <code>BSRR</code> is write-only and applies as one atomic store touching only the bits you set — no read, no race.</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="stm03-moder-bit" data-answer="10" data-tol="0">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">In <code>MODER</code>, pin <span>$n$</span>'s 2-bit field occupies bits $[\,2n{+}1 : 2n\,]$. To make <strong>PA5</strong> an output you write the value <code>01</code> into that field, i.e. <code>0b01 &lt;&lt; X</code>. What is the shift amount <strong>X</strong> (the low bit position of the field)?</div>
+        <input class="ex-input" type="number" step="any" placeholder="bit position"><span class="ex-unit">bit</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$2n = 2 \times 5 = 10$, so PA5's field is bits $[11:10]$ and the shift is <strong>10</strong>. Thus <code>0b01 &lt;&lt; 10 = 1024 = 0x400</code>, which is the value you OR into <code>MODER</code> (after clearing bits 11:10) to make PA5 an output.</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="stm03-reg-blink">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — register-level blink on PA5</div>
+        <div class="ex-q">From scratch, write the bare-metal setup that makes <strong>PA5</strong> a push-pull output and then toggles it forever <em>without</em> ever reading <code>ODR</code>. You may keep a software <code>state</code> flag and pick the BSRR half from it. No HAL allowed.</div>
+        <details class="ex-acc">
+          <summary>Hint</summary>
+          <div class="acc-body">Enable the GPIOA clock (<code>RCC-&gt;AHB1ENR |= RCC_AHB1ENR_GPIOAEN</code>), clear-then-set <code>MODER[11:10]=01</code>, then in the loop write <code>BSRR = (1&lt;&lt;5)</code> to go high and <code>BSRR = (1&lt;&lt;21)</code> — that's <code>1&lt;&lt;(5+16)</code> — to go low. Flip a local <code>state</code> each pass so you never need to read the pin back.</div>
+        </details>
+        <details class="ex-acc">
+          <summary>Show one solution</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">blink_pa5.c <span class="lang">C / CMSIS</span></div>
+<pre><code class="language-c">#include "stm32f4xx.h"
+#define PIN 5
+
+static void delay(volatile uint32_t n){ while(n--) __NOP(); }
+
+int main(void) {
+    RCC-&gt;AHB1ENR |= RCC_AHB1ENR_GPIOAEN;        // 1) clock GPIOA
+
+    GPIOA-&gt;MODER &amp;= ~(0x3u &lt;&lt; (2 * PIN));        // 2) clear MODER[11:10]
+    GPIOA-&gt;MODER |=  (0x1u &lt;&lt; (2 * PIN));        //    01 = output
+    GPIOA-&gt;OTYPER &amp;= ~(0x1u &lt;&lt; PIN);            //    push-pull
+    GPIOA-&gt;PUPDR  &amp;= ~(0x3u &lt;&lt; (2 * PIN));      //    no pull
+
+    uint32_t state = 0;
+    while (1) {
+        // pick BSRR half from state: high half (reset) when state, else set
+        GPIOA-&gt;BSRR = state ? (1u &lt;&lt; (PIN + 16))    // reset: bit 21
+                            : (1u &lt;&lt;  PIN);         // set:   bit 5
+        state ^= 1u;
+        delay(800000);
+    }
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">The lesson: every level change is a single atomic <code>BSRR</code> store, chosen by a software flag — never a read of the hardware. Swap the <code>delay()</code> for a SysTick timestamp (Chapter 02) and you have a non-blocking heartbeat. Route the same pin to TIM2_CH1 via <code>AFR</code> instead, and the timer blinks it for free while the CPU sleeps.</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> Chapter recap</div>
+        <p>You can now configure any STM32 pin straight from CMSIS: enable its port clock in <code>RCC-&gt;AHB1ENR</code>, set the 2-bit <code>MODER</code> field at bits $[2n{+}1:2n]$, choose push-pull/open-drain in <code>OTYPER</code> and a pull in <code>PUPDR</code>. You drive outputs atomically through <code>BSRR</code> — set in the low half, reset in the high half — and you know exactly why <code>ODR |=</code> is a lurking race. You can read inputs through <code>IDR</code> with a pull-up, hand a pin to a peripheral with <code>MODER=10</code> plus the <code>AFR</code> nibble, and you've seen that the same blink in HAL is just these register writes wearing names. Next we make a peripheral do the toggling for us — timers and PWM.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="Back to top">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

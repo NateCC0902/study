@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>FreeRTOS &amp; Low Power: Tasks, Scheduling &amp; Sleep Modes — Embedded Mastery</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="track-stm32" data-track="stm32" data-chapter="09-rtos-lowpower">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">STM32 · Ch 09</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">STM32 Track · Chapter 09 · Master</div>
+        <h1>FreeRTOS &amp; Low Power: Tasks, Scheduling &amp; Sleep Modes</h1>
+        <p>Two things separate a hobby project from a shipped product: it does <em>many</em> independent jobs at once without dropping a beat, and it runs for months on a coin cell. Concurrency and power. We'll earn both — first by replacing the superloop with a preemptive RTOS, then by putting the chip to sleep so deeply it sips microamps between heartbeats.</p>
+        <div class="meta">
+          <span>⏱ ~55 min</span><span>🧠 Concurrency</span><span>⚡ FreeRTOS</span><span>🔋 Low power</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="superloop-breaks"><span class="sec-no">1</span>When the superloop breaks</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Every chapter so far has lived inside one infinite <code>while(1)</code> — the <strong>superloop</strong>. Read a sensor, update a display, blink an LED, check a button, repeat. For a handful of jobs with loose timing, it's perfect: simple, deterministic, no hidden machinery.</p>
+
+      <p>It breaks the moment your jobs have <em>different, tight, independent</em> timing requirements. Imagine three jobs on one chip:</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Job</th><th>Must run</th><th>Takes</th></tr></thead>
+        <tbody>
+          <tr><td>Read IMU over SPI</td><td>every 1 ms</td><td>~0.2 ms</td></tr>
+          <tr><td>Stream telemetry over UART</td><td>every 50 ms</td><td>~8 ms (blocks!)</td></tr>
+          <tr><td>Service a display refresh</td><td>every 100 ms</td><td>~12 ms (blocks!)</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p>In a superloop, the moment you start that 8&nbsp;ms UART transmit, the IMU read is <em>stuck waiting</em> — you'll miss eight of your 1&nbsp;ms deadlines. You can hand-roll a state machine to interleave everything, but it grows into an unmaintainable tangle the instant requirements change. The honest fix is to stop pretending one loop can serve every master.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence model</div>
+        <p>An <strong>RTOS gives you many independent "loops" (tasks)</strong> that <em>appear</em> to run at once. A scheduler rapidly switches the single CPU between them, and a <strong>preemptive</strong> scheduler can yank the CPU away from a low-priority task the instant a high-priority one is ready.</p>
+      </div>
+
+      <p>"Real-time" doesn't mean "fast" — it means <strong>predictable</strong>. A real-time system guarantees that a deadline is met every single time, not on average. FreeRTOS, the most widely deployed RTOS on Cortex-M, gives you the primitives to <em>build</em> that guarantee; the math in §5 tells you whether your guarantee actually holds.</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="tasks-scheduler"><span class="sec-no">2</span>Tasks, priorities &amp; the preemptive scheduler</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>what a task actually is</small></div>
+      <p>A <strong>task</strong> in FreeRTOS is just a C function that <em>never returns</em> — it loops forever, exactly like a tiny superloop of its own. Each task gets its own <strong>stack</strong> and its own copy of the CPU registers, saved and restored on every switch. That saved state is the <strong>context</strong>; swapping it is a <strong>context switch</strong>.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> A task is a function that loops forever</div>
+        <p>It must <strong>never <code>return</code></strong> and never run to the closing brace. Either loop on <code>for(;;)</code> forever, or delete yourself with <code>vTaskDelete(NULL)</code> before falling off the end. A task that returns crashes the scheduler.</p>
+      </div>
+
+      <p>Tasks have <strong>priorities</strong> (integer; higher number = more urgent, <code>0</code> = lowest). The scheduler's rule on a Cortex-M port is brutally simple: <em>always run the highest-priority task that is ready to run.</em> If two share the top priority, it time-slices between them round-robin on each tick.</p>
+
+      <p>The scheduler is driven by a periodic timer interrupt — the <strong>tick</strong>, usually 1&nbsp;kHz (every 1&nbsp;ms), generated from SysTick (Chapter 02). On each tick the scheduler re-evaluates who should run. Between ticks, a task that <em>blocks</em> (waits for data, sleeps, takes a held mutex) yields immediately — you don't have to wait for the next tick to give up the CPU.</p>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>task states</small></div>
+      <p>At any instant every task is in exactly one of four states. Master this diagram and FreeRTOS stops being mysterious:</p>
+
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> Ready: xTaskCreate()
+    Ready --> Running: scheduler picks<br/>highest priority
+    Running --> Ready: preempted by<br/>higher-prio task
+    Running --> Blocked: vTaskDelay()<br/>or wait on queue/sem
+    Blocked --> Ready: timeout or<br/>event arrives
+    Running --> Suspended: vTaskSuspend()
+    Suspended --> Ready: vTaskResume()
+    Running --> [*]: vTaskDelete()
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The idle task is mandatory</div>
+        <p>FreeRTOS auto-creates one task at priority <code>0</code>: the <strong>idle task</strong>. It runs only when <em>every</em> other task is Blocked or Suspended. Its job is to free the memory of deleted tasks and — crucially for us — to be the hook where we <strong>put the CPU to sleep</strong> (§7). If the idle task never runs, the chip never saves power.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="creating-tasks"><span class="sec-no">3</span>Creating tasks: <code>xTaskCreate</code>, delays &amp; stacks</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>You hand the scheduler a task with <code>xTaskCreate</code>: the function pointer, a debug name, a stack size (in <em>words</em>, not bytes!), an optional parameter, a priority, and a slot for the returned handle. Then <code>vTaskStartScheduler()</code> never returns — control passes to the scheduler forever.</p>
+
+      <div class="codeblock">
+        <div class="code-head">main.c <span class="lang">C / FreeRTOS</span></div>
+<pre><code class="language-c">#include "FreeRTOS.h"
+#include "task.h"
+
+// A task is a function that loops forever. pvParameters is the
+// optional argument you passed to xTaskCreate (here: unused).
+void vBlinkTask(void *pvParameters)
+{
+    const TickType_t period = pdMS_TO_TICKS(500);  // 500 ms in ticks
+    TickType_t wake = xTaskGetTickCount();         // snapshot "now"
+    for (;;) {                                     // NEVER return
+        HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5);     // toggle the LED
+        // Sleep until exactly wake+period. Fixed rate, no drift.
+        vTaskDelayUntil(&amp;wake, period);
+    }
+}
+
+int main(void)
+{
+    HAL_Init();
+    SystemClock_Config();                          // see Chapter 02
+    MX_GPIO_Init();
+
+    // stack is in WORDS: 128 words = 512 bytes on 32-bit Cortex-M.
+    xTaskCreate(vBlinkTask,        // function
+                "blink",           // name (debug only)
+                128,               // stack depth in WORDS
+                NULL,              // parameter
+                2,                 // priority (0 = lowest)
+                NULL);             // handle (we don't need it)
+
+    vTaskStartScheduler();         // hands over the CPU — never returns
+    for (;;) { }                   // unreachable; here for safety
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — <code>vTaskDelay</code> drifts, <code>vTaskDelayUntil</code> doesn't</div>
+        <p><code>vTaskDelay(N)</code> means "block for N ticks <em>from now</em>" — so the period silently grows by however long your work took. If the loop body runs 2&nbsp;ms and you <code>vTaskDelay(pdMS_TO_TICKS(500))</code>, your true period is 502&nbsp;ms and it drifts. <code>vTaskDelayUntil(&amp;wake, N)</code> blocks until an <em>absolute</em> deadline, so the rate is rock-steady regardless of work time. Use it for any periodic sampling.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — stack overflow is silent corruption</div>
+        <p>Each task's stack is fixed at creation. A deep call chain, a big local array, or a <code>printf</code> (huge stack appetite) can run the stack past its end and quietly trample the next task's memory — a heisenbug that crashes <em>somewhere else</em>. Defenses: enable <code>configCHECK_FOR_STACK_OVERFLOW = 2</code> (writes a known pattern and checks it), call <code>uxTaskGetStackHighWaterMark()</code> to see the closest you've come to the limit, and size stacks from measurement, not guesswork.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="ipc"><span class="sec-no">4</span>Talking between tasks: queues, semaphores &amp; mutexes</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>three tools, three jobs</small></div>
+      <p>Tasks are isolated by design, so you need safe ways to pass data and coordinate. FreeRTOS gives you three primitives — and choosing the right one is a classic interview question because people confuse them constantly.</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Primitive</th><th>Carries data?</th><th>Use it for</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Queue</strong></td><td>Yes — copies items</td><td>Passing values producer→consumer (a thread-safe FIFO)</td></tr>
+          <tr><td><strong>Semaphore</strong> (binary/counting)</td><td>No — just a count</td><td><em>Signaling</em>: "an event happened" — especially ISR→task</td></tr>
+          <tr><td><strong>Mutex</strong></td><td>No — ownership token</td><td><em>Mutual exclusion</em>: guarding one shared resource (e.g. an I²C bus)</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Semaphore vs mutex — the real difference</div>
+        <p>A <strong>binary semaphore</strong> is a flag any task or ISR can "give"; whoever's waiting gets woken. It has <em>no owner</em> — perfect for ISR-to-task signaling. A <strong>mutex</strong> is a semaphore with an <em>owner</em>: only the task that took it may give it back, and it adds <strong>priority inheritance</strong>. Use a semaphore to <em>signal</em>, a mutex to <em>protect</em>.</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>ISR signals a task via a semaphore</small></div>
+      <p>The canonical pattern: an interrupt fires, but you must <em>not</em> do heavy work in an ISR. Instead the ISR <code>Give</code>s a semaphore and a high-priority task, blocked waiting on it, wakes up to do the real work. This is "deferred interrupt processing".</p>
+
+      <div class="codeblock">
+        <div class="code-head">sensor.c <span class="lang">C / FreeRTOS</span></div>
+<pre><code class="language-c">SemaphoreHandle_t xDataReady;   // created with xSemaphoreCreateBinary()
+
+// --- Interrupt: keep it tiny. Just signal and leave. ---
+void EXTI0_IRQHandler(void)
+{
+    BaseType_t hpw = pdFALSE;   // "higher-prio task woken?"
+    __HAL_GPIO_EXTI_CLEAR_IT(GPIO_PIN_0);
+    // FromISR variant is mandatory inside an interrupt:
+    xSemaphoreGiveFromISR(xDataReady, &amp;hpw);
+    // If we woke a task more urgent than the interrupted one,
+    // switch to it the instant we return from the ISR:
+    portYIELD_FROM_ISR(hpw);
+}
+
+// --- Task: does the heavy lifting outside interrupt context ---
+void vSensorTask(void *pv)
+{
+    for (;;) {
+        // Block (0 % CPU) until the ISR gives the semaphore.
+        // portMAX_DELAY = wait forever.
+        if (xSemaphoreTake(xDataReady, portMAX_DELAY) == pdTRUE) {
+            read_and_process_sample();   // safe: full task context
+        }
+    }
+}
+</code></pre>
+      </div>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>priority inversion</small></div>
+      <p>Mutexes solve a subtle, famous bug. Suppose a <strong>low</strong>-priority task L takes a mutex on the I²C bus. A <strong>high</strong>-priority task H then wants the same bus and blocks waiting for L to release it. Fine so far — but now a <strong>medium</strong>-priority task M (which doesn't need the bus) becomes ready. M preempts L, because M outranks L. So M runs, L can't finish, L can't release the mutex, and H — the <em>highest</em> priority task in the system — is stuck behind M. The priorities are effectively inverted.</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — Mars Pathfinder, 1997</div>
+        <p>This isn't a textbook hypothetical. NASA's Mars Pathfinder kept resetting itself on the Martian surface because of exactly this priority inversion on a shared data bus protected by a mutex. The watchdog saw the high-priority task starve and rebooted the spacecraft. JPL diagnosed it remotely and uploaded a patch that <strong>enabled priority inheritance</strong> — the same feature one flag turns on in FreeRTOS today.</p>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Priority inheritance</div>
+        <p>A FreeRTOS mutex fixes inversion automatically: while H waits on the mutex L holds, L is <strong>temporarily promoted</strong> to H's priority. Now M can't preempt L, so L finishes fast, releases the mutex, drops back to its own priority, and H runs. A plain semaphore has no owner, so it <em>cannot</em> do this — another reason to reach for a mutex when guarding a resource.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="scheduling-math"><span class="sec-no">5</span>Scheduling math: will it actually meet its deadlines?</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive it</small></div>
+      <p>Creating tasks is easy; <em>proving</em> they all hit their deadlines is the real engineering. Model each periodic task <span>$i$</span> by its worst-case execution time <span>$C_i$</span> (how long one run takes) and its period <span>$T_i$</span> (how often it must run). The fraction of the CPU it consumes is <span>$C_i / T_i$</span>, so total <strong>CPU utilization</strong> is the sum:</p>
+
+      <div class="math-box">
+        $$ U = \sum_{i=1}^{n} \frac{C_i}{T_i} $$
+      </div>
+
+      <p>If <span>$U &gt; 1$</span> you've asked for more than 100% of the CPU — <em>no</em> scheduler can save you; it's mathematically impossible. But <span>$U \le 1$</span> is necessary, not sufficient. For <strong>rate-monotonic scheduling</strong> (RMS — assign higher priority to the shorter-period task, the provably optimal fixed-priority rule), Liu &amp; Layland proved a clean <em>sufficient</em> bound:</p>
+
+      <div class="math-box">
+        $$ U \le n\left(2^{1/n} - 1\right) $$
+      </div>
+
+      <p>That bound shrinks as you add tasks. For one task it's <span>$1.0$</span>; for two, <span>$2(\sqrt{2}-1)\approx 0.828$</span>; and as <span>$n\to\infty$</span> it converges to a famous limit:</p>
+
+      <div class="math-box">
+        $$ \lim_{n\to\infty} n\left(2^{1/n}-1\right) = \ln 2 \approx 0.693 $$
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The 69% rule of thumb</div>
+        <p>If your total utilization stays under <strong>~69%</strong>, rate-monotonic scheduling <em>guarantees</em> every deadline is met, no matter how many tasks. Above the bound it <em>might</em> still work (the bound is conservative — you'd run an exact response-time analysis), but under it you're safe by proof.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>worked example</small></div>
+      <p>Two tasks: an IMU read taking <span>$C_1 = 2\,\text{ms}$</span> every <span>$T_1 = 10\,\text{ms}$</span>, and a control loop taking <span>$C_2 = 1\,\text{ms}$</span> every <span>$T_2 = 5\,\text{ms}$</span>. Utilization:</p>
+
+      <div class="math-box">
+        $$ U = \frac{2}{10} + \frac{1}{5} = 0.2 + 0.2 = 0.4 $$
+      </div>
+
+      <p>The two-task RMS bound is <span>$2(2^{1/2}-1) \approx 0.828$</span>. Since <span>$0.4 \le 0.828$</span>, this set is <strong>schedulable</strong> — every deadline provably met, with comfortable headroom for a third task or an interrupt storm. (And note RMS would give the 5&nbsp;ms control loop the <em>higher</em> priority, because its period is shorter.)</p>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="low-power-modes"><span class="sec-no">6</span>Low power: Run, Sleep, Stop &amp; Standby</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>trade wake-up speed for current</small></div>
+      <p>A battery product spends most of its life doing nothing. The art is making "nothing" cost almost no current. STM32 chips offer a ladder of low-power modes; each one shuts down more of the chip, saving more current but retaining less state and taking longer to wake. The numbers below are typical for an STM32L4 — the exact figures live in the datasheet, but the <em>shape</em> is universal.</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Mode</th><th>CPU</th><th>SRAM / regs retained</th><th>Wake sources</th><th>Typical current</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Run</strong></td><td>executing</td><td>all</td><td>—</td><td>~5–10 mA</td></tr>
+          <tr><td><strong>Sleep</strong></td><td>halted (clock off)</td><td>all</td><td>any interrupt</td><td>~1–2 mA</td></tr>
+          <tr><td><strong>Stop</strong></td><td>off (clocks off)</td><td>all SRAM + registers kept</td><td>EXTI line, RTC, IWDG</td><td>~1–10 µA</td></tr>
+          <tr><td><strong>Standby</strong></td><td>off (core powered down)</td><td>only backup regs + RTC</td><td>WKUP pin, RTC, reset</td><td>~0.1–1 µA</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What survives the sleep</div>
+        <p><strong>Sleep</strong> just gates the CPU clock — fastest wake, least savings, everything intact. <strong>Stop</strong> kills the clocks but <em>keeps SRAM and registers powered</em>, so you resume right where you left off; this is the workhorse for sensor nodes. <strong>Standby</strong> powers the core domain <em>off</em> — lowest current, but RAM is gone and waking is a near-full <strong>reset</strong>: you re-run <code>main()</code> and recover state only from the tiny battery-backed domain (RTC + a few backup registers).</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>battery life from average current</small></div>
+      <p>Battery life is just charge divided by the rate you drain it. With capacity <span>$Q$</span> (in mAh) and <em>average</em> current <span>$I_{\text{avg}}$</span> (in mA):</p>
+
+      <div class="math-box">
+        $$ t_{\text{life}} = \frac{Q}{I_{\text{avg}}} $$
+      </div>
+
+      <p>The whole game is duty cycling: be awake for a tiny fraction <span>$d$</span> of the time at the high run current <span>$I_{\text{run}}$</span>, and in Stop mode the rest at the tiny <span>$I_{\text{stop}}$</span>. The time-weighted average is:</p>
+
+      <div class="math-box">
+        $$ I_{\text{avg}} = d\,I_{\text{run}} + (1-d)\,I_{\text{stop}} $$
+      </div>
+
+      <p>Concrete: wake for <span>$0.2\,\text{s}$</span> every <span>$10\,\text{s}$</span> (so <span>$d = 0.02$</span>) at <span>$I_{\text{run}} = 50\,\text{mA}$</span>, idling in Stop at <span>$I_{\text{stop}} = 10\,\mu\text{A} = 0.01\,\text{mA}$</span>:</p>
+
+      <div class="math-box">
+        $$ I_{\text{avg}} = 0.02(50) + 0.98(0.01) \approx 1.0\,\text{mA} \;\Rightarrow\; t_{\text{life}} = \frac{2000\,\text{mAh}}{1.0\,\text{mA}} \approx 2000\,\text{h} \approx 83\,\text{days} $$
+      </div>
+
+      <p>The same hardware <em>without</em> sleep — held in Run at 50&nbsp;mA — would die in <span>$2000/50 = 40$</span> hours, under two days. Stop mode bought us a <strong>50× longer life</strong> from one design decision. That ratio is why this section exists.</p>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="tickless-idle"><span class="sec-no">7</span>Tickless idle: making FreeRTOS sleep</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the tick is the enemy of sleep</small></div>
+      <p>Here's the tension: that 1&nbsp;kHz tick wakes the CPU <em>every millisecond</em> just to ask "anyone ready?" If all tasks are blocked for the next 500&nbsp;ms, you've pointlessly woken 500 times, and the chip never got deep enough to save real power. The fix is <strong>tickless idle</strong>.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What tickless idle does</div>
+        <p>When the idle task runs and FreeRTOS sees that <em>every</em> task is blocked for, say, the next 500&nbsp;ms, it <strong>stops the tick</strong>, programs a low-power timer (the RTC or a wake timer) to fire in 500&nbsp;ms, and drops the chip into <strong>Stop mode</strong>. On wake it reads how long it actually slept and <em>corrects the tick count forward</em> in one jump, so the kernel's sense of time stays accurate. You set <code>configUSE_TICKLESS_IDLE = 1</code> to turn it on.</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>the idle hook that sleeps</small></div>
+      <p>The simplest entry point is the <strong>idle hook</strong> — a function FreeRTOS calls from the idle task on every spin. For a Sleep-mode design you can drop the core to sleep right here with the Cortex-M <code>WFI</code> ("wait for interrupt") instruction; for deeper Stop-mode sleeps you'd implement the full <code>portSUPPRESS_TICKS_AND_SLEEP</code> macro, but the idle hook shows the idea cleanly:</p>
+
+      <div class="codeblock">
+        <div class="code-head">freertos_hooks.c <span class="lang">C / FreeRTOS</span></div>
+<pre><code class="language-c">// Called by the idle task whenever NOTHING else is ready to run.
+// Requires configUSE_IDLE_HOOK == 1 in FreeRTOSConfig.h
+void vApplicationIdleHook(void)
+{
+    // __WFI() halts the core until the next interrupt fires.
+    // The tick interrupt (or any peripheral IRQ) wakes us, the
+    // scheduler re-checks the ready list, and life goes on.
+    // Current drops from ~mA (spinning) to a fraction of that.
+    __WFI();   // "Wait For Interrupt" — Cortex-M sleep instruction
+}
+
+// For real deep sleep, enable tickless idle instead:
+//   #define configUSE_TICKLESS_IDLE 1
+// then FreeRTOS calls portSUPPRESS_TICKS_AND_SLEEP(xExpectedIdleTime),
+// which you implement to enter STOP mode and reprogram the RTC.
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — a busy task starves the idle task</div>
+        <p>The chip only sleeps when the idle task runs, which only happens when <em>every</em> other task is Blocked. One task that polls in a tight <code>for(;;)</code> loop without ever blocking (no <code>vTaskDelay</code>, no queue wait) pins the CPU in Run mode forever — your "low-power" node now draws full current. Always block on a delay or an event; never busy-wait.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="sensor-node"><span class="sec-no">8</span>Real case: a battery sensor node</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>this ships in products</small></div>
+      <p>Let's assemble everything into a real product: a wireless soil-moisture node that must run a year on a 2000&nbsp;mAh cell. It has two jobs — sample the sensor and send a packet — and must be asleep the rest of the time. The architecture is a textbook RTOS + low-power design:</p>
+
+      <div class="mermaid">
+flowchart TB
+    RTC([RTC wake<br/>every 10 s]) --> SAMP["Sample task<br/>read ADC, ~5 ms"]
+    SAMP -->|xQueueSend| Q[["Queue<br/>(moisture reading)"]]
+    Q -->|xQueueReceive| COMMS["Comms task<br/>TX radio packet, ~150 ms"]
+    COMMS --> IDLE["Idle task<br/>all blocked"]
+    IDLE -->|tickless idle| STOP([Enter STOP mode<br/>~10 µA])
+    STOP -.RTC fires.-> RTC
+      </div>
+
+      <p>The <strong>sample task</strong> wakes on the RTC tick, reads the ADC, and pushes the reading into a <strong>queue</strong>. The <strong>comms task</strong> blocks on that queue; it only runs when a reading arrives, transmits it, then blocks again. Once both are blocked, the idle task runs and tickless idle drops the chip into Stop until the next RTC wake. Here are the two tasks and the queue wiring them together:</p>
+
+      <div class="codeblock">
+        <div class="code-head">node.c <span class="lang">C / FreeRTOS</span></div>
+<pre><code class="language-c">QueueHandle_t xMoistureQ;   // created in main, holds uint16_t readings
+
+// Producer: woken by the RTC ~every 10 s, sample and enqueue.
+void vSampleTask(void *pv)
+{
+    const TickType_t period = pdMS_TO_TICKS(10000);   // 10 s
+    TickType_t wake = xTaskGetTickCount();
+    for (;;) {
+        uint16_t moisture = adc_read(ADC_CHANNEL_3);  // ~5 ms of work
+        // Non-blocking send; drop the sample if the queue is full.
+        xQueueSend(xMoistureQ, &amp;moisture, 0);
+        vTaskDelayUntil(&amp;wake, period);               // fixed 10 s rate
+    }
+}
+
+// Consumer: sleeps until a reading exists, then transmits it.
+void vCommsTask(void *pv)
+{
+    uint16_t reading;
+    for (;;) {
+        // Block (0 % CPU) until the producer sends. portMAX_DELAY
+        // => the task is fully asleep, letting the chip reach STOP.
+        if (xQueueReceive(xMoistureQ, &amp;reading, portMAX_DELAY) == pdTRUE) {
+            radio_transmit(&amp;reading, sizeof reading);  // ~150 ms
+        }
+    }
+}
+
+int main(void)
+{
+    HAL_Init();  SystemClock_Config();  MX_ADC_Init();  MX_RTC_Init();
+    xMoistureQ = xQueueCreate(4, sizeof(uint16_t));     // depth 4
+    xTaskCreate(vSampleTask, "samp",  192, NULL, 3, NULL);
+    xTaskCreate(vCommsTask,  "comms", 256, NULL, 2, NULL);
+    vTaskStartScheduler();                              // never returns
+    for (;;) { }
+}
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — why the queue, not a shared global</div>
+        <p>You could let both tasks touch one global <code>uint16_t</code> — and you'd be one badly-timed context switch away from a torn read or a lost sample. The queue makes the handoff <strong>atomic and blocking</strong>: the consumer sleeps at <em>zero</em> CPU until data exists, which is exactly what lets the idle task run and the chip reach Stop. The queue isn't just tidy; it's what makes the low-power design <em>possible</em>. This pattern — producer, queue, consumer, deep sleep — is the skeleton of essentially every commercial battery sensor on the market.</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>⑤ Your turn</h2>
+      <div class="layer"><span class="step">⑤</span> Practice <small>you write &amp; decide</small></div>
+      <p>Three checks. Tap an answer, type a number, or reveal a coding challenge. Your progress is saved on this device and shown on the home page.</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="stm09-mutex-vs-sem">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">Two tasks share a single I²C bus, and you need to stop them from issuing overlapping transactions <em>and</em> avoid the priority-inversion bug from Mars Pathfinder. Which primitive do you reach for, and why?</div>
+        <ul class="ex-options">
+          <li data-correct="false">A binary semaphore — it has the lowest overhead</li>
+          <li data-correct="true">A mutex — it has an owner and adds priority inheritance</li>
+          <li data-correct="false">A queue — it copies the bus data safely between tasks</li>
+          <li data-correct="false">A counting semaphore initialised to the number of tasks</li>
+        </ul>
+        <div class="ex-explain">A <strong>mutex</strong> is the right tool to <em>protect a shared resource</em>: only its owner can release it, and FreeRTOS mutexes implement <strong>priority inheritance</strong>, which is exactly the fix JPL applied to Pathfinder. A binary semaphore guards mutual exclusion too but has <em>no owner</em> and <em>no inheritance</em>, so it can't prevent the inversion. A queue is for passing data, not locking.</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="stm09-utilization" data-answer="0.4" data-tol="0.02">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">A system runs two periodic tasks: an IMU read of $C_1 = 2\,\text{ms}$ every $T_1 = 10\,\text{ms}$, and a control loop of $C_2 = 1\,\text{ms}$ every $T_2 = 5\,\text{ms}$. Compute the total CPU utilization $U = \sum C_i / T_i$ (a unitless fraction between 0 and 1).</div>
+        <input class="ex-input" type="number" step="any" placeholder="U"><span class="ex-unit">(fraction)</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$U = \dfrac{2}{10} + \dfrac{1}{5} = 0.2 + 0.2 = 0.4$. The two-task rate-monotonic bound is $2(2^{1/2}-1)\approx 0.828$, and $0.4 \le 0.828$, so this set is <strong>schedulable</strong> with comfortable headroom. You're using 40% of the CPU; 60% is free for more tasks or interrupts.</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="stm09-two-tasks-queue">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — producer, queue, consumer</div>
+        <div class="ex-q">Write two FreeRTOS tasks linked by a queue. A <strong>producer</strong> reads a button (<code>read_button()</code> returns a <code>uint8_t</code>) every 100&nbsp;ms at a fixed rate and sends the value into a queue. A <strong>consumer</strong> blocks on the queue and, whenever it receives a value, calls <code>process(value)</code>. Don't forget to create the queue before starting the scheduler — and make sure the consumer truly <em>blocks</em> (so the chip can sleep) rather than polling.</div>
+        <details class="ex-acc">
+          <summary>Hint</summary>
+          <div class="acc-body">Create the queue with <code>xQueueCreate(depth, sizeof(uint8_t))</code> in <code>main</code> before <code>vTaskStartScheduler()</code>. In the producer use <code>vTaskDelayUntil</code> for the fixed 100&nbsp;ms rate and <code>xQueueSend(q, &amp;val, 0)</code>. In the consumer use <code>xQueueReceive(q, &amp;val, portMAX_DELAY)</code> — <code>portMAX_DELAY</code> means "block forever until data arrives", which keeps the task at 0% CPU between events.</div>
+        </details>
+        <details class="ex-acc">
+          <summary>Show one solution</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">button_node.c <span class="lang">C / FreeRTOS</span></div>
+<pre><code class="language-c">QueueHandle_t xBtnQ;
+
+// Producer: sample the button at a fixed 100 ms rate.
+void vProducer(void *pv)
+{
+    const TickType_t period = pdMS_TO_TICKS(100);
+    TickType_t wake = xTaskGetTickCount();
+    for (;;) {
+        uint8_t val = read_button();        // 0 or 1
+        xQueueSend(xBtnQ, &amp;val, 0);          // non-blocking enqueue
+        vTaskDelayUntil(&amp;wake, period);      // exact 100 ms, no drift
+    }
+}
+
+// Consumer: fully asleep until a value arrives.
+void vConsumer(void *pv)
+{
+    uint8_t val;
+    for (;;) {
+        if (xQueueReceive(xBtnQ, &amp;val, portMAX_DELAY) == pdTRUE) {
+            process(val);                    // handle the event
+        }
+    }
+}
+
+int main(void)
+{
+    HAL_Init();  SystemClock_Config();  MX_GPIO_Init();
+    xBtnQ = xQueueCreate(8, sizeof(uint8_t));   // depth 8
+    xTaskCreate(vProducer, "prod", 128, NULL, 2, NULL);
+    xTaskCreate(vConsumer, "cons", 192, NULL, 2, NULL);
+    vTaskStartScheduler();                       // never returns
+    for (;;) { }
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">The lesson: the consumer's <code>portMAX_DELAY</code> is what makes this power-friendly — it sits Blocked at zero CPU, so once the producer is also delayed, the idle task runs and tickless idle can drop the chip into Stop. Swap the queue for a binary semaphore and you'd signal "a press happened" without carrying which button — and swap <code>vTaskDelayUntil</code> back to <code>vTaskDelay</code> and you'd reintroduce the timing drift from §3.</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> Chapter recap</div>
+        <p>You can now explain why the superloop fails for many independent timing-sensitive jobs, and replace it with FreeRTOS <strong>tasks</strong> — functions that loop forever, scheduled preemptively by priority off the SysTick tick, with the mandatory <strong>idle task</strong> as your sleep hook. You create tasks with <code>xTaskCreate</code>, hold a fixed rate with <code>vTaskDelayUntil</code> (never the drifting <code>vTaskDelay</code>), and size stacks from <code>uxTaskGetStackHighWaterMark</code>. You pick the right IPC primitive — <strong>queue</strong> for data, <strong>semaphore</strong> for ISR-to-task signaling, <strong>mutex</strong> for mutual exclusion with priority inheritance (the Pathfinder fix). You can <em>prove</em> schedulability with $U = \sum C_i/T_i$ against the RMS bound $n(2^{1/n}-1)\to\ln 2\approx 0.693$. And you slash average current with <strong>Run/Sleep/Stop/Standby</strong> modes, computing battery life as $Q/I_{\text{avg}}$ and using <strong>tickless idle</strong> to reach Stop between events — turning a two-day device into a multi-month one. That's the leap from hobby to product.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="Back to top">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>
+

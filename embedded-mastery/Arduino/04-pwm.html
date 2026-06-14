@@ -1,0 +1,468 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>PWM &amp; Analog Output: Dimming, Servos &amp; Motors — Embedded Mastery</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="track-arduino" data-track="arduino" data-chapter="04-pwm">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">Arduino · Ch 04</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Arduino Track · Chapter 04 · Intermediate</div>
+        <h1>PWM &amp; Analog Output: Dimming, Servos &amp; Motors</h1>
+        <p>A digital pin can only be fully on or fully off — yet you have dimmed an LED, set a motor's speed, and aimed a servo with one. The trick is <strong>time</strong>: switch fast enough and the world averages the blur into a smooth value. This is the single most useful "fake" in embedded hardware.</p>
+        <div class="meta">
+          <span>⏱ ~45 min</span><span>🧠 Duty cycle</span><span>⚡ Dimming &amp; motors</span><span>🔧 MOSFET · Servo · RC</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="the-trick"><span class="sec-no">1</span>The trick: blink so fast it looks analog</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>In Chapter 1 you blinked an LED at 1 Hz and saw it flash. Speed that blink up to hundreds of times per second and something strange happens: the flashing vanishes and the LED simply looks <em>dimmer</em>. You didn't change the voltage — it is still snapping between 0 V and 5 V — but your eye can't track the flicker, so it integrates the light over time and reports an <strong>average brightness</strong>.</p>
+
+      <p>That is <strong>Pulse-Width Modulation (PWM)</strong>. The pin is always digital: hard 0 or hard 5 V, never anything in between. We just choose <em>what fraction of each cycle it spends high</em>. Spend 25% of the time high and you get a dim glow; 75% and it's nearly full brightness. The fraction is the only knob.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence model</div>
+        <p>PWM <strong>fakes an analog voltage by switching a pin fully on and off very fast</strong>; the load — or your eye, or a motor's inertia — averages the square wave into an effective level you can dial from 0% to 100%.</p>
+      </div>
+
+      <p>Why bother faking it? Because a true analog output is expensive and lossy. To <em>actually</em> deliver 2.5 V at a useful current, a chip would have to burn the other half of the power as heat in a regulator. PWM throws no power away: the switch is either fully on (almost no voltage across it, little loss) or fully off (no current, no loss). It is the same reason your house dims lights and EVs run motors with switching, not resistors.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — a PWM pin is <em>not</em> a DAC</div>
+        <p>An Uno output pin still only ever sits at 0 V or 5 V. If you put a slow voltmeter on a PWM pin you'll read a blurry average; if you put an oscilloscope on it you'll see the raw square wave. There is no analog circuitry behind <code>analogWrite()</code> on the classic AVR — the "analog" is entirely in the timing. (Some boards, like the SAMD-based Zero, <em>do</em> have a real DAC; the Uno does not.)</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="duty-and-vavg"><span class="sec-no">2</span>The math: duty cycle and average voltage</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive it</small></div>
+      <p>One full PWM cycle has a fixed <strong>period</strong> <span>$T$</span>. Within it the pin is high for a time <span>$t_{\text{on}}$</span> and low for <span>$t_{\text{off}}$</span>, with <span>$T = t_{\text{on}} + t_{\text{off}}$</span>. The single number that defines the waveform's "level" is the <strong>duty cycle</strong> — the fraction of the period spent high:</p>
+
+      <div class="math-box">
+        $$ D = \frac{t_{\text{on}}}{T} = \frac{t_{\text{on}}}{t_{\text{on}} + t_{\text{off}}} \in [0, 1] $$
+      </div>
+
+      <p>The <strong>average voltage</strong> is just the time-average of a wave that equals <span>$V_{cc}$</span> for a fraction <span>$D$</span> of the period and <span>$0$</span> for the rest. The average of a two-level signal is the time-weighted mean of its levels:</p>
+
+      <div class="math-box">
+        $$ V_{\text{avg}} = \frac{1}{T}\!\int_0^{T}\! v(t)\,dt = \frac{V_{cc}\cdot t_{\text{on}} + 0\cdot t_{\text{off}}}{T} = D\,V_{cc} $$
+      </div>
+
+      <p>Clean and linear: average voltage is duty cycle times supply. At <span>$V_{cc}=5\,\text{V}$</span>, a duty of 40% averages <span>$0.40\times5 = 2.0\,\text{V}$</span>; a duty of 60% averages 3.0 V. That straight line <span>$V_{\text{avg}} = D\,V_{cc}$</span> is the heart of the whole chapter.</p>
+
+      <p>The Arduino API hides <span>$D$</span> behind an 8-bit integer. <code>analogWrite(pin, val)</code> takes <code>val</code> in <span>$[0, 255]$</span> and maps it to duty linearly:</p>
+
+      <div class="math-box">
+        $$ D = \frac{\texttt{val}}{255}, \qquad V_{\text{avg}} = \frac{\texttt{val}}{255}\,V_{cc} $$
+      </div>
+
+      <p>So <code>analogWrite(pin, 0)</code> is fully off (0 V), <code>255</code> is fully on (5 V), and <code>127</code> is <span>$127/255 \approx 49.8\%$</span> — essentially half. To invert the formula and find the value for a target voltage, solve for <code>val</code>:</p>
+
+      <div class="math-box">
+        $$ \texttt{val} = \operatorname{round}\!\left(\frac{V_{\text{target}}}{V_{cc}}\times 255\right) $$
+      </div>
+
+      <p>For 3.0 V on a 5 V board: <span>$\texttt{val} = \operatorname{round}(3.0/5.0\times255) = \operatorname{round}(153.0) = 153$</span>. Memorize that round-trip — it's the most common PWM arithmetic you'll do.</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Aside — RMS vs. average for a resistive load</div>
+        <p>A heater or incandescent bulb dissipates power as <span>$P = V_{\text{rms}}^2/R$</span>, and for a PWM wave the <em>RMS</em> voltage is <span>$V_{\text{rms}} = V_{cc}\sqrt{D}$</span>, not <span>$V_{cc}D$</span>. So power scales <em>linearly</em> with duty: <span>$P = D\,V_{cc}^2/R$</span>. That's convenient — 50% duty gives exactly half power into a resistor — but note the resulting RMS voltage (e.g. <span>$5\sqrt{0.5}\approx3.54\,\text{V}$</span> at 50%) differs from the average voltage (2.5 V). For an LED you care about average light; for a heater you care about average power.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="where-pwm-comes-from"><span class="sec-no">3</span>Where the square wave comes from: a hardware timer</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>not done in software</small></div>
+      <p>Here's the part beginners miss: <code>analogWrite()</code> does <strong>not</strong> sit in a loop toggling the pin. If it did, the CPU could never do anything else. Instead it configures a dedicated piece of silicon — a <strong>timer/counter peripheral</strong> — to generate the square wave autonomously, in hardware, forever, while your code runs on.</p>
+
+      <p>A timer is a counter that increments every clock tick, wrapping back to zero when it overflows. PWM works by comparing that running counter against a <strong>compare value</strong> you set: while <code>counter &lt; compare</code> the pin is driven high; once <code>counter ≥ compare</code> it flips low. The compare value <em>is</em> your duty cycle. <code>analogWrite(pin, 153)</code> literally writes 153 into a compare register (<code>OCRnx</code>) and the hardware does the rest.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The counter-vs-threshold model</div>
+        <p>A free-running counter ramps 0 → 255 → 0 → 255… Each cycle, the pin is HIGH while the counter is below your threshold and LOW above it. Raise the threshold → wider high pulse → higher duty → brighter. The CPU sets the threshold once; the timer redraws the waveform thousands of times a second with zero CPU involvement.</p>
+      </div>
+
+      <p>On the ATmega328P there are three timers driving six PWM-capable pins: <strong>Timer0</strong> (pins 5, 6), <strong>Timer1</strong> (pins 9, 10), and <strong>Timer2</strong> (pins 3, 11). The squiggle <code>~</code> printed beside those pin numbers on the board marks them. Other pins simply have no compare hardware wired to them, which is why <code>analogWrite()</code> only works on those six.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the default frequencies differ</div>
+        <p>Because the three timers are clocked with different prescalers in the Arduino core, the PWM frequencies aren't uniform. On the Uno, pins 3, 9, 10, 11 run at <strong>~490 Hz</strong>, while pins <strong>5 and 6 run at ~980 Hz</strong> (Timer0, which also backs <code>millis()</code> and <code>delay()</code>). Don't fight this by reprogramming Timer0 unless you're ready to break timekeeping — we open that hood deliberately in <strong>Chapter 5</strong>.</p>
+      </div>
+
+      <p>We will derive these frequencies from prescalers and counter widths in the next chapter. For now, hold the link: <strong>PWM is a timer comparing a counter to a threshold</strong>. That sentence is the bridge to Chapter 5.</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="dimming-and-gamma"><span class="sec-no">4</span>Code: dimming an LED (and why linear looks wrong)</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>The simplest possible PWM program: fade an LED up and down. Wire an LED (with its current-limiting resistor from Chapter 3) to a <code>~</code> pin — say pin 9 — and sweep the duty from 0 to 255 and back.</p>
+
+      <div class="codeblock">
+        <div class="code-head">fade.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const int LED = 9;  // must be a PWM (~) pin: 3,5,6,9,10,11 on the Uno
+
+void setup() {
+  pinMode(LED, OUTPUT);   // analogWrite still needs an OUTPUT pin
+}
+
+void loop() {
+  // Fade UP: duty 0 -&gt; 255 (0% -&gt; 100%)
+  for (int val = 0; val &lt;= 255; val++) {
+    analogWrite(LED, val);   // writes the timer compare register (OCR1A)
+    delay(8);                // ~2 s for a full sweep (256 * 8 ms)
+  }
+  // Fade DOWN: duty 255 -&gt; 0
+  for (int val = 255; val &gt;= 0; val--) {
+    analogWrite(LED, val);
+    delay(8);
+  }
+}
+</code></pre>
+      </div>
+
+      <p>Upload it and you'll notice something annoying: the LED rushes to "looks full bright" in the first quarter of the sweep, then barely changes for the rest. The fade is mathematically linear but <em>looks</em> badly lopsided. That isn't a bug — it's your eyes.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>the eye is logarithmic</small></div>
+      <p>Human brightness perception follows roughly a power law (the CIE lightness relationship). Perceived lightness scales like physical intensity raised to about <span>$1/2.2$</span>, which means to get a <em>perceptually</em> linear ramp we must pre-distort the duty with the inverse — a <strong>gamma</strong> of <span>$\gamma \approx 2.2$</span>:</p>
+
+      <div class="math-box">
+        $$ \texttt{out} = \left(\frac{\texttt{in}}{255}\right)^{\gamma}\!\times 255, \qquad \gamma \approx 2.2 $$
+      </div>
+
+      <p>Low inputs get squashed toward zero (so the dim end gets the fine resolution your eye craves), high inputs stay near full. Apply this correction and the fade becomes visually smooth and even:</p>
+
+      <div class="codeblock">
+        <div class="code-head">fade_gamma.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;math.h&gt;
+const int LED = 9;
+
+// Map a perceptual 0..255 request to the duty the eye actually needs.
+uint8_t gamma8(uint8_t in) {
+  float norm = in / 255.0f;                     // 0.0 .. 1.0
+  float corrected = powf(norm, 2.2f);           // squash the low end
+  return (uint8_t)(corrected * 255.0f + 0.5f);  // +0.5 rounds to nearest
+}
+
+void setup() { pinMode(LED, OUTPUT); }
+
+void loop() {
+  for (int b = 0; b &lt;= 255; b++) {
+    analogWrite(LED, gamma8(b));   // request perceptual b, emit corrected duty
+    delay(8);
+  }
+  for (int b = 255; b &gt;= 0; b--) {
+    analogWrite(LED, gamma8(b));
+    delay(8);
+  }
+}
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Precompute the table</div>
+        <p><code>powf()</code> is slow on an 8-bit AVR with no FPU. In production you'd compute the 256-entry curve once and store it in Flash as <code>const uint8_t gamma_lut[256] PROGMEM</code>, then index it — turning a floating-point exponentiation into a single array read. The Adafruit NeoPixel library ships exactly such a table for this reason.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="driving-motors"><span class="sec-no">5</span>Driving a motor: why the pin can't, and the MOSFET that can</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>this ships in products</small></div>
+      <p>Now the most important safety lesson in this chapter. You <strong>cannot</strong> connect a DC motor directly to an Arduino pin. An ATmega328P pin sources at most ~20 mA safely (40 mA absolute max, and the whole chip has a combined budget). A small toy motor pulls <em>hundreds</em> of milliamps running, and several <em>amps</em> at stall. Wire one to a pin and you don't get a slow motor — you get a dead microcontroller.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the pin is a signal, not a power source</div>
+        <p>Treat every output pin as a <strong>control wire</strong>, not a power wire. Its job is to <em>tell</em> a bigger switch what to do, while the motor's current flows from the supply through that switch — never through the chip. Anything past ~20 mA (motors, relays, solenoids, filament bulbs, long LED strips) needs an external switching device.</p>
+      </div>
+
+      <p>That switch is a <strong>MOSFET</strong> — a transistor used as an electronically controlled relay with no moving parts. A logic-level N-channel MOSFET (e.g. an <strong>IRLZ44N</strong>, or a <strong>2N7000</strong> for tiny loads) turns fully on when its gate is driven high by the pin, connecting the motor's negative terminal to ground. Feed the gate your <em>PWM</em> signal and the motor switches on and off hundreds of times per second; its rotational inertia averages the pulses into a steady speed — the same averaging trick as the LED, now mechanical.</p>
+
+      <div class="mermaid">
+flowchart LR
+    PIN["Arduino pin 9<br/>PWM out"] -->|gate| Q["N-ch MOSFET<br/>IRLZ44N"]
+    VPLUS(["+12 V supply"]) --> M["DC motor"]
+    M -->|drain| Q
+    Q -->|source| GND[("GND")]
+    M -. flyback .-> D["Diode 1N4007<br/>cathode to +12 V"]
+    D -.-> VPLUS
+    VPLUS --- GND
+      </div>
+
+      <p>Notice the diode across the motor — the <strong>flyback (freewheeling) diode</strong>. A motor is an inductor, and the defining law of an inductor is <span>$v_L = L\,\dfrac{di}{dt}$</span>. When the MOSFET switches off, current that was flowing is forced to stop almost instantly, so <span>$di/dt$</span> is enormous and negative — the motor generates a large <em>positive</em> voltage spike (hundreds of volts) trying to keep its current flowing. Without a path, that spike punches through the MOSFET and destroys it.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The flyback diode is mandatory, not optional</div>
+        <p>Wire the diode <em>reverse-biased</em> across the motor: cathode (the striped end) to the +supply, anode to the drain. In normal operation it's off and invisible. At switch-off it flips on and gives the collapsing inductor current a safe loop to die in, clamping the spike to ~0.7 V. Skip it and you'll burn out MOSFETs at every PWM edge — and PWM produces thousands of edges per second.</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — your laptop's cooling fan</div>
+        <p>That 4-pin PWM fan header on every motherboard is exactly this circuit, productized. Pin 4 carries a ~25 kHz PWM signal (chosen above human hearing so the switching doesn't whine); the fan's own driver IC reads the duty and sets speed, with the flyback handled internally. When your CPU heats up, firmware raises the duty — the literal <span>$D\,V_{cc}$</span> you just learned — and the fan spins faster. Same math, shipping in a billion machines.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="servos"><span class="sec-no">6</span>Servos: PWM where the <em>width</em>, not the duty, is the message</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>a different flavor of PWM</small></div>
+      <p>A hobby servo (an SG90, an MG996R) is a little geared motor with a position-control circuit inside. You don't tell it a speed; you tell it an <strong>angle</strong>, and it drives itself there and holds. The command is also a pulse train — but here the information is encoded in the <em>absolute pulse width</em>, and the period is fixed by convention.</p>
+
+      <p>The standard is a <strong>50 Hz</strong> frame: a pulse every <span>$T = 20\,\text{ms}$</span>. Within each frame the high-pulse width selects the angle:</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Pulse width</th><th>Angle</th><th>Duty within 20 ms</th></tr></thead>
+        <tbody>
+          <tr><td><code>1.0 ms</code></td><td>0°</td><td>5%</td></tr>
+          <tr><td><code>1.5 ms</code></td><td>90° (center)</td><td>7.5%</td></tr>
+          <tr><td><code>2.0 ms</code></td><td>180°</td><td>10%</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p>So the servo only ever sees a duty between 5% and 10% — the <em>duty isn't the message, the pulse width is</em>. A linear map from angle <span>$\theta$</span> (degrees) to pulse width <span>$w$</span> (microseconds) is:</p>
+
+      <div class="math-box">
+        $$ w(\theta) = 1000 + \frac{\theta}{180}\,(2000 - 1000) = 1000 + \frac{1000\,\theta}{180}\ \ [\mu s] $$
+      </div>
+
+      <p>You could bit-bang this by hand, but generating a precise 1–2 ms pulse every 20 ms while doing other work is exactly what a timer is for. The <strong>Servo</strong> library commandeers Timer1 to do it cleanly:</p>
+
+      <div class="codeblock">
+        <div class="code-head">sweep.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;Servo.h&gt;
+
+Servo arm;            // a Servo object manages one output pin via Timer1
+
+void setup() {
+  arm.attach(9);      // signal wire on pin 9 (3-wire: power, ground, signal)
+  // arm.attach(9, 1000, 2000);  // optional: set your servo's true min/max us
+}
+
+void loop() {
+  for (int deg = 0; deg &lt;= 180; deg++) {
+    arm.write(deg);   // library converts deg -&gt; pulse width and runs the timer
+    delay(15);        // give the servo time to physically move
+  }
+  for (int deg = 180; deg &gt;= 0; deg--) {
+    arm.write(deg);
+    delay(15);
+  }
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — power the servo from the rail, not the pin</div>
+        <p>The servo's <em>signal</em> wire is a control wire (fine for a pin), but its motor draws hundreds of mA from the <em>power</em> wires. Feed those from a proper 5 V supply and tie its ground to the Arduino's ground (a common ground is mandatory, or the pulse has no reference). Powering a servo off the Uno's 5 V pin will brown out the board and reset it mid-sweep. Also note: the Servo library uses Timer1, so <code>analogWrite()</code> on pins 9 and 10 stops working while a servo is attached.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="rc-filter"><span class="sec-no">7</span>Making it truly analog: the RC low-pass filter</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>recovering a real DC level</small></div>
+      <p>Sometimes you need an actual smooth voltage, not a square wave — to bias a transistor, feed an op-amp, or drive a circuit that can't tolerate switching. You can convert PWM into a real analog DC level by physically averaging it with a <strong>resistor–capacitor low-pass filter</strong>: the resistor and capacitor form a bucket that fills and drains slowly, smoothing the pulses into their mean.</p>
+
+      <p>A first-order RC low-pass passes DC freely and attenuates everything above its <strong>cutoff frequency</strong>, where the output has dropped to <span>$1/\sqrt{2}$</span> (−3 dB) of the input:</p>
+
+      <div class="math-box">
+        $$ f_c = \frac{1}{2\pi R C} $$
+      </div>
+
+      <p>The design rule is simple: put the cutoff <em>well below</em> the PWM frequency so the switching ripple is crushed, but high enough that your signal can still change reasonably fast. For 490 Hz PWM, aim a decade lower, around 50 Hz. With <span>$R = 10\,\text{k}\Omega$</span>:</p>
+
+      <div class="math-box">
+        $$ C = \frac{1}{2\pi R f_c} = \frac{1}{2\pi (10^4)(50)} \approx 3.2\times10^{-7}\,\text{F} = 0.32\,\mu\text{F} $$
+      </div>
+
+      <p>A standard 0.33 µF cap is perfect. The result on your meter: a steady <span>$D\,V_{cc}$</span> with only a few millivolts of leftover ripple. You've built a crude 8-bit DAC from one resistor and one capacitor.</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> The ripple-vs-speed tradeoff</div>
+        <p>Lower <span>$f_c$</span> (bigger R or C) = smoother output but sluggish response — the voltage takes many milliseconds to settle after you change the duty (one time constant is <span>$\tau = RC$</span>). Higher <span>$f_c$</span> = snappier but with more visible ripple. There's no free lunch: a passive RC trades ripple against response time. If you need both, that's when you reach for a real DAC chip (e.g. an MCP4725 over I²C — coming in a later chapter).</p>
+      </div>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-pwm-wrap">
+        <div class="sim-title">🔬 Live: PWM waveform &amp; V<sub>avg</sub> explorer</div>
+        <canvas id="sim-pwm"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">Drag <em>duty</em> and <em>V<sub>cc</sub></em>: the teal square wave reshapes and the dashed orange line tracks <span>$V_{\text{avg}} = D\,V_{cc}$</span> in real time. Period is fixed at the Uno's ~490 Hz (T ≈ 2.04 ms).</p>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>⑤ Your turn</h2>
+      <div class="layer"><span class="step">⑤</span> Practice <small>you write &amp; decide</small></div>
+      <p>Three checks. Tap an answer, type a number, or reveal a coding challenge. Your progress is saved on this device and shown on the home page.</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="ard04-pwm-concept">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You raise the duty cycle of a PWM signal driving an LED from 25% to 75%. What physically changes at the pin?</div>
+        <ul class="ex-options">
+          <li data-correct="false">The pin's high level rises from ~1.25 V to ~3.75 V</li>
+          <li data-correct="true">The pin still snaps between 0 V and 5 V, but spends a larger fraction of each period high</li>
+          <li data-correct="false">The PWM frequency increases threefold</li>
+          <li data-correct="false">A DAC inside the chip outputs a smooth 3.75 V</li>
+        </ul>
+        <div class="ex-explain">PWM never changes the <em>levels</em> — they're always 0 V and <span>$V_{cc}$</span>. Duty changes the <em>width</em> of the high pulse, so the <strong>average</strong> rises to <span>$0.75\times5 = 3.75\,\text{V}$</span> even though the instantaneous voltage is still pure digital. The eye, not the pin, does the averaging.</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="ard04-vavg" data-answer="2" data-tol="0.05">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">An Uno (<span>$V_{cc}=5\,\text{V}$</span>) outputs PWM at a <strong>40% duty cycle</strong>. What is the average voltage, in volts? (Use $V_{\text{avg}} = D\,V_{cc}$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="V"><span class="ex-unit">V</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$V_{\text{avg}} = D\,V_{cc} = 0.40 \times 5\,\text{V} = 2.0\,\text{V}$. As a sanity check, the <code>analogWrite</code> value for 40% is $\operatorname{round}(0.40\times255)=102$, and indeed $102/255\times5 \approx 2.0\,\text{V}$. To instead command 3.0 V you'd use $\operatorname{round}(3/5\times255)=153$.</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="ard04-breathe">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — a breathing LED</div>
+        <div class="ex-q">Make an LED <strong>"breathe"</strong>: brightness should rise and fall smoothly like slow breaths, on a roughly 4-second cycle. Use a sine wave for the smooth motion, and apply gamma correction so the dim end looks as gradual as the bright end. Pin 9, no <code>delay()</code>-free constraints — keep it simple with <code>millis()</code>-style timing or a plain loop.</div>
+        <details class="ex-acc">
+          <summary>Hint</summary>
+          <div class="acc-body">A sine mapped to 0..1 gives smooth oscillation: <code>(sin(phase) + 1) / 2</code>. Multiply by 255 to get a perceptual brightness request, then push it through your <code>gamma8()</code> from §4 before <code>analogWrite</code>. Advance <code>phase</code> a little each loop; a full breath is <span>$2\pi$</span> radians of phase.</div>
+        </details>
+        <details class="ex-acc">
+          <summary>Show one solution</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">breathe.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">#include &lt;math.h&gt;
+const int LED = 9;
+
+uint8_t gamma8(uint8_t in) {                 // perceptual -&gt; duty (from §4)
+  float n = in / 255.0f;
+  return (uint8_t)(powf(n, 2.2f) * 255.0f + 0.5f);
+}
+
+void setup() { pinMode(LED, OUTPUT); }
+
+void loop() {
+  // phase sweeps 0 -&gt; 2*pi; full breath ~4 s at this step/delay
+  for (float phase = 0; phase &lt; 2 * PI; phase += 0.05f) {
+    float s = (sinf(phase) + 1.0f) / 2.0f;   // 0.0 .. 1.0, smooth
+    uint8_t want = (uint8_t)(s * 255.0f);    // perceptual brightness
+    analogWrite(LED, gamma8(want));          // gamma-corrected duty
+    delay(16);                               // ~125 steps * 16 ms ~ 2 s up+down
+  }
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">The two lessons stack: the <strong>sine</strong> gives smooth physical motion, and <strong>gamma</strong> makes that motion <em>look</em> smooth to a nonlinear eye. Drop the <code>gamma8()</code> call and you'll see the breath spend too long looking "bright" and snap through the dim end — the same lopsidedness from §4, now obvious in motion.</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> Chapter recap</div>
+        <p>You can now explain PWM as fast on/off switching averaged by the load, derive <span>$V_{\text{avg}} = D\,V_{cc}$</span> and the <code>analogWrite</code> mapping <span>$D = \texttt{val}/255$</span>, and recall the Uno's ~490 Hz / ~980 Hz pin split. You know PWM is generated by a timer comparing a counter to a threshold (the seed of Chapter 5), why dimming needs gamma correction, why a motor demands a MOSFET plus a mandatory flyback diode, how a 50 Hz / 1–2 ms frame aims a servo, and how an RC filter with <span>$f_c = 1/(2\pi RC)$</span> recovers a true analog voltage. Next chapter we crack open the timers themselves and stop relying on blocking <code>delay()</code> for good.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="Back to top">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+
+<!-- chapter-specific simulator -->
+<script>
+EM.sim("sim-pwm", {
+  height: 250,
+  params: [
+    { key: "duty", label: "duty D", min: 0,   max: 100, step: 1,   value: 40, unit: "%" },
+    { key: "vcc",  label: "Vcc",    min: 1,   max: 5,   step: 0.1, value: 5,  unit: "V" }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h, pad = 42 * dpr;
+    var hi = pad, lo = H - pad;                          // y for HIGH(Vcc) / LOW(0V)
+    var span = lo - hi;                                  // pixels for full 5 V scale
+    var D = v.duty / 100;
+    var vavg = D * v.vcc;
+
+    // axis guides at 0 V and Vcc-of-scale (5 V top)
+    ctx.lineWidth = 1 * dpr; ctx.strokeStyle = "#262d3a";
+    ctx.fillStyle = "#6e7681"; ctx.font = (12 * dpr) + "px monospace";
+    ctx.beginPath();
+    ctx.moveTo(pad, hi); ctx.lineTo(W - 10 * dpr, hi);
+    ctx.moveTo(pad, lo); ctx.lineTo(W - 10 * dpr, lo);
+    ctx.stroke();
+    ctx.fillText("5V", 6 * dpr, hi + 4 * dpr);
+    ctx.fillText("0V", 6 * dpr, lo + 4 * dpr);
+
+    // map a voltage (0..5) to a y coordinate
+    function yOf(volts) { return lo - (volts / 5) * span; }
+
+    // --- dashed Vavg line (orange) ---
+    var yAvg = yOf(vavg);
+    ctx.setLineDash([7 * dpr, 5 * dpr]);
+    ctx.strokeStyle = "#ff9f1c"; ctx.lineWidth = 2 * dpr;
+    ctx.beginPath(); ctx.moveTo(pad, yAvg); ctx.lineTo(W - 10 * dpr, yAvg); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#ff9f1c";
+    ctx.fillText("Vavg", W - 56 * dpr, yAvg - 6 * dpr);
+
+    // --- the PWM square wave (teal), high level = Vcc ---
+    var yHigh = yOf(v.vcc), yLow = yOf(0);
+    var periods = 4;                                     // draw 4 periods
+    var usable = W - pad - 14 * dpr;
+    var pPx = usable / periods;                          // pixels per period
+    ctx.strokeStyle = "#2ec4b6"; ctx.lineWidth = 2.5 * dpr;
+    ctx.beginPath();
+    var x = pad;
+    ctx.moveTo(x, D > 0 ? yHigh : yLow);
+    for (var i = 0; i < periods; i++) {
+      var onPx = D * pPx, offPx = pPx - onPx;
+      // high segment
+      if (onPx > 0) { ctx.lineTo(x + onPx, yHigh); }
+      x += onPx;
+      // falling edge + low segment
+      ctx.lineTo(x, yLow);
+      if (offPx > 0) { ctx.lineTo(x + offPx, yLow); }
+      x += offPx;
+      // rising edge for next period (unless last)
+      if (i < periods - 1) ctx.lineTo(x, yHigh);
+    }
+    ctx.stroke();
+
+    // ~490 Hz Uno PWM -> T = 1/490 s ~ 2.04 ms
+    var T = 1000 / 490;
+    return "Period <b>T</b> ≈ " + (Math.round(T * 100) / 100) +
+           " ms (f ≈ 490 Hz fixed) &nbsp;·&nbsp; Duty <b>D</b> = " + v.duty +
+           "% &nbsp;·&nbsp; <b>Vavg = D·Vcc</b> = " + (Math.round(vavg * 100) / 100) + " V";
+  }
+});
+</script>
+</body>
+</html>

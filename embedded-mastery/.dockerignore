@@ -1,0 +1,9 @@
+# keep the build context (and image) lean
+.git
+.DS_Store
+**/.DS_Store
+_AUTHORING_GUIDE.md
+README.md
+docker-compose.yml
+Dockerfile
+.dockerignore

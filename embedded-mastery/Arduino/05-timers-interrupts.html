@@ -1,0 +1,503 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Timers &amp; Interrupts: Real-Time Without delay() — Embedded Mastery</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="track-arduino" data-track="arduino" data-chapter="05-timers-interrupts">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">Arduino · Ch 05</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Arduino Track · Chapter 05 · Intermediate→Advanced</div>
+        <h1>Timers &amp; Interrupts: Real-Time Without <code>delay()</code></h1>
+        <p>In Chapter 1 we sinned: every <code>delay()</code> freezes the entire CPU, blind and deaf to the world, for the whole wait. Real firmware never blocks. Here we learn the three escapes — the <code>millis()</code> idiom, hardware timers, and interrupts — and the unsigned-arithmetic trick that makes them survive the 49-day rollover.</p>
+        <div class="meta">
+          <span>⏱ ~50 min</span><span>🧠 Non-blocking</span><span>⏲ AVR timers</span><span>⚡ ISRs</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="why-delay-fails"><span class="sec-no">1</span>Why <code>delay()</code> is a trap</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Picture your firmware as a single worker with no assistant. <code>delay(500)</code> tells that worker: "stand perfectly still for half a second." During those 500 ms the CPU is not idle in a useful sense — it is spinning in a tight counting loop, executing millions of do-nothing instructions, <em>unable to do anything else</em>. It cannot read a button. It cannot service a sensor. It cannot blink a second LED at a different rate. The whole machine is hostage to one wait.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence model</div>
+        <p><code>delay()</code> is <strong>blocking</strong>: it stops time for your <em>entire</em> program. Professional firmware is <strong>non-blocking</strong> — it never stands still; it constantly checks "is it time yet?" and gets on with everything else in between.</p>
+      </div>
+
+      <p>The symptom is unmistakable once you know it. You write Blink, then try to add a button that toggles the LED's speed — and the button feels dead, responding only if you happen to press it during the brief instant <code>loop()</code> isn't inside a <code>delay()</code>. The fix is not a faster CPU. It is a fundamentally different control structure: stop <em>waiting</em>, start <em>polling the clock</em>.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — "just sprinkle in more delays"</div>
+        <p>Beginners try to interleave tasks by guessing delay values (<code>delay(7)</code> here, <code>delay(13)</code> there). It never composes: every blocking wait adds latency to every other task, and the timing drifts the moment you add one more thing. Blocking code does not scale past one job.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="millis-idiom"><span class="sec-no">2</span>The <code>millis()</code> idiom: cooperative non-blocking</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>check the clock, don't watch it</small></div>
+      <p>Instead of <em>sleeping</em> until the next event, we <em>remember</em> when the last event happened and, each pass through <code>loop()</code>, ask the running clock whether enough time has elapsed. <code>millis()</code> returns the number of milliseconds since boot as an <code>unsigned long</code> (a 32-bit <code>uint32_t</code>), ticking up forever in the background. We never wait on it — we just glance at it.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <div class="codeblock">
+        <div class="code-head">blink_nonblocking.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t LED = LED_BUILTIN;
+const uint32_t interval = 500;      // ms between toggles
+uint32_t last = 0;                  // when we last toggled
+bool ledOn = false;
+
+void setup() {
+  pinMode(LED, OUTPUT);
+}
+
+void loop() {
+  uint32_t now = millis();          // glance at the clock — never block
+  if (now - last &gt;= interval) {      // has 500 ms elapsed?
+    last = now;                      // remember THIS moment for next time
+    ledOn = !ledOn;                  // flip state
+    digitalWrite(LED, ledOn);
+  }
+  // ...everything else in loop() keeps running every pass:
+  // read buttons, poll sensors, blink a second LED, etc.
+}
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The pattern, memorized</div>
+        <p>Store <code>last = now</code> the instant you act — not <code>last += interval</code> conditionally, and never <code>last = millis()</code> a second time (that re-reads the clock and drifts). One read of <code>now</code> per pass, one comparison, one update. This three-line skeleton replaces every <code>delay()</code> you will ever want.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>why the rollover doesn't bite</small></div>
+      <p>Here is the part that trips up nearly everyone. <code>millis()</code> is a 32-bit unsigned counter. It counts up to its maximum and then <strong>wraps back to zero</strong>:</p>
+
+      <div class="math-box">
+        $$ t_{\text{rollover}} = \frac{2^{32}\ \text{ms}}{1000\cdot 60\cdot 60\cdot 24} \approx 49.71\ \text{days} $$
+      </div>
+
+      <p>The naïve worry: "when <code>now</code> wraps to a tiny number but <code>last</code> is still huge, won't <code>now - last</code> be a giant negative value and break my timer?" In <em>signed</em> math, yes — disaster. But <code>now</code> and <code>last</code> are both <code>uint32_t</code>, and unsigned subtraction is defined to wrap <strong>modulo</strong> $2^{32}$. The hardware computes:</p>
+
+      <div class="math-box">
+        $$ (\,\text{now} - \text{last}\,) \bmod 2^{32} \;=\; \text{true elapsed time} $$
+      </div>
+
+      <p>Concretely, suppose <span>$\text{last} = 2^{32}-100 = 4{,}294{,}967{,}196$</span> (100 ms before the wrap) and 250 ms later <code>now</code> has wrapped to <span>$150$</span>. The signed view gives <span>$150 - 4{,}294{,}967{,}196 = -4{,}294{,}967{,}046$</span> — nonsense. The unsigned view gives:</p>
+
+      <div class="math-box">
+        $$ (150 - 4{,}294{,}967{,}196)\bmod 2^{32} = 150 + 100 = 250\ \text{ms} \;\checkmark $$
+      </div>
+
+      <p>Exactly the true elapsed time. The wrap of <code>now</code> and the wrap built into the subtraction cancel perfectly. This is <em>only</em> true if you keep both operands unsigned and compare the <strong>difference</strong> against the interval. Never compare <code>now &gt;= last + interval</code> — that addition can itself overflow and reintroduce the bug.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the wrong comparison</div>
+        <p><code>if (millis() &gt;= target)</code> where <code>target = last + interval</code> is the classic broken form: once <code>target</code> overflows near the 49-day mark it becomes small, and the condition fires instantly forever. Always write the difference form: <code>if (now - last &gt;= interval)</code>. It is rollover-proof by construction.</p>
+      </div>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-roll-wrap">
+        <div class="sim-title">🔬 Live: unsigned rollover, why the subtraction survives</div>
+        <canvas id="sim-roll"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">Drag <em>now</em> across the wrap line. Watch the signed difference go wildly negative while the unsigned difference stays equal to the true elapsed time.</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="scheduler"><span class="sec-no">3</span>From one timer to a cooperative scheduler</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>many tasks, one loop</small></div>
+      <p>Once each task owns its own <code>last</code> and <code>interval</code>, they coexist trivially: <code>loop()</code> spins fast, and each task fires independently when its clock says so. This is a <strong>cooperative scheduler</strong> — no operating system, just a handful of <code>if (now - last &gt;= interval)</code> blocks sharing one fast loop.</p>
+
+      <div class="mermaid">
+flowchart TB
+    P([Power / Reset]) --> S["setup()"]
+    S --> N["now = millis()"]
+    N --> T1{"now - lastA<br/>&ge; intervalA?"}
+    T1 -- yes --> A["run task A<br/>lastA = now"]
+    T1 -- no --> T2
+    A --> T2{"now - lastB<br/>&ge; intervalB?"}
+    T2 -- yes --> B["run task B<br/>lastB = now"]
+    T2 -- no --> N
+    B --> N
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Keep <code>loop()</code> hungry</div>
+        <p>A cooperative scheduler only works if <code>loop()</code> runs <em>often</em> — ideally thousands of times per second. That means <strong>no blocking anywhere</strong>: no <code>delay()</code>, no busy-wait, no slow <code>Serial.print</code> of huge strings. The faster the loop, the tighter your scheduling resolution. One stray <code>delay(1000)</code> stalls every task at once.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="avr-timers"><span class="sec-no">4</span>Hardware timers: precision without the CPU</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>a counter that runs itself</small></div>
+      <p>The <code>millis()</code> idiom is great, but its resolution is limited by how fast <code>loop()</code> turns, and a fat loop can make it jittery. For <em>hard</em> timing — sampling a sensor at exactly 8 kHz, generating a tone, driving a stepper — we hand the job to dedicated <strong>timer/counter</strong> peripherals built into the AVR. They count clock ticks in hardware, completely independent of what the CPU is doing, and raise an interrupt at a precise moment.</p>
+
+      <p>The ATmega328P has three of them. Each is just a register, <code>TCNTn</code>, that increments on every tick and rolls over:</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Timer</th><th>Width</th><th>Counter</th><th>Max count</th><th>Arduino uses it for</th></tr></thead>
+        <tbody>
+          <tr><td><code>Timer0</code></td><td>8-bit</td><td><code>TCNT0</code></td><td>255</td><td><code>millis()</code>, <code>delay()</code>, pin 5/6 PWM</td></tr>
+          <tr><td><code>Timer1</code></td><td>16-bit</td><td><code>TCNT1</code></td><td>65535</td><td>pin 9/10 PWM, <code>Servo</code></td></tr>
+          <tr><td><code>Timer2</code></td><td>8-bit</td><td><code>TCNT2</code></td><td>255</td><td>pin 3/11 PWM, <code>tone()</code></td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — Timer0 is spoken for</div>
+        <p>Reconfiguring <code>Timer0</code> breaks <code>millis()</code>, <code>micros()</code>, and <code>delay()</code> across your whole sketch. For custom periodic interrupts, reach for <strong>Timer1</strong> (16-bit, the most headroom) and leave Timer0 alone.</p>
+      </div>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the prescaler — a clock divider</small></div>
+      <p>At 16 MHz, an 8-bit timer overflows every <span>$256 / 16{\times}10^6 \approx 16\ \mu\text{s}$</span> — far too fast for human-scale events. The <strong>prescaler</strong> divides the system clock <em>before</em> it reaches the counter: with a prescaler of 256, the timer only ticks once every 256 system cycles. The AVR offers a fixed menu of divisors — <code>1, 8, 64, 256, 1024</code> — selected by the <code>CSn2:0</code> clock-select bits in the <code>TCCRnB</code> register.</p>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>CTC mode — clear timer on compare match</small></div>
+      <p>The trick for a <em>precise period</em> is <strong>CTC mode</strong> (Clear Timer on Compare Match). You load a target into the compare register <code>OCRnA</code>. The timer counts <span>$0,1,2,\dots$</span> up to <code>OCRnA</code>, fires an interrupt, then <em>auto-resets to zero</em> and starts again. No software reset, no drift — a perfect metronome in silicon.</p>
+
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> Counting
+    Counting --> Counting : tick (TCNT1++)
+    Counting --> Match : TCNT1 == OCR1A
+    Match --> ISR : fire COMPA interrupt
+    ISR --> Reset : TCNT1 = 0 (auto)
+    Reset --> Counting : resume
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="timer-math"><span class="sec-no">5</span>Timer math: picking <code>OCRnA</code> for any frequency</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive it</small></div>
+      <p>In CTC mode the timer counts from 0 up to <code>OCRnA</code> and resets — that is <span>$(\text{OCRnA}+1)$</span> ticks per cycle (the <span>$+1$</span> is because it spends one tick <em>at</em> 0). Each tick lasts the prescaled clock period. So the interrupt frequency is:</p>
+
+      <div class="math-box">
+        $$ f_{\text{int}} = \frac{f_{\text{clk}}}{N \,\bigl(1 + \text{OCRnA}\bigr)} $$
+      </div>
+
+      <p>where <span>$f_{\text{clk}} = 16\ \text{MHz}$</span> and <span>$N$</span> is the prescaler (one of 1, 8, 64, 256, 1024). Invert it to solve for the register value you must load:</p>
+
+      <div class="math-box">
+        $$ \text{OCRnA} = \frac{f_{\text{clk}}}{N\, f_{\text{int}}} - 1 $$
+      </div>
+
+      <p><strong>Worked example.</strong> We want a clean <span>$1\ \text{Hz}$</span> interrupt — one tick per second — on Timer1, with prescaler <span>$N = 256$</span>:</p>
+
+      <div class="math-box">
+        $$ \text{OCR1A} = \frac{16\times10^6}{256 \times 1} - 1 = 62500 - 1 = 62499 $$
+      </div>
+
+      <p>Sanity-check the result: <span>$62499 \le 65535$</span>, so it fits in the 16-bit <code>OCR1A</code> register. (On 8-bit Timer0 or Timer2 it would not — <span>$62499 \gg 255$</span> — which is precisely why we chose the 16-bit Timer1.) Plug it back into the forward formula and you recover exactly <span>$16{\times}10^6 / (256 \times 62500) = 1\ \text{Hz}$</span>. Choosing the prescaler is the art: pick the smallest <span>$N$</span> whose resulting <code>OCRnA</code> still fits the register, because smaller <span>$N$</span> gives finer timing resolution.</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Resolution check</div>
+        <p>With <span>$N = 256$</span> at 16 MHz, each tick is <span>$256/16{\times}10^6 = 16\ \mu\text{s}$</span>. So <code>OCR1A</code> is quantized in 16 µs steps — you can hit 1 Hz, 2 Hz, 4 Hz exactly, but an oddball frequency rounds to the nearest 16 µs. Need finer? Drop to <span>$N = 64$</span> (4 µs steps) and re-solve — as long as the new <code>OCR1A</code> still fits 65535.</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>configure Timer1 by hand</small></div>
+      <div class="codeblock">
+        <div class="code-head">timer1_ctc.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t LED = LED_BUILTIN;
+
+void setup() {
+  pinMode(LED, OUTPUT);
+
+  noInterrupts();           // disable interrupts while we configure
+  TCCR1A = 0;               // clear control reg A (no PWM, normal port op)
+  TCCR1B = 0;               // clear control reg B
+  TCNT1  = 0;               // reset the counter to 0
+
+  OCR1A = 62499;            // compare target: 16e6/(256*1) - 1  → 1 Hz
+  TCCR1B |= (1 &lt;&lt; WGM12);   // WGM12 = 1 selects CTC mode (top = OCR1A)
+  TCCR1B |= (1 &lt;&lt; CS12);    // CS12 = 1 selects prescaler = 256
+  TIMSK1 |= (1 &lt;&lt; OCIE1A);  // enable Timer1 Compare-A Match interrupt
+  interrupts();             // re-enable interrupts globally
+}
+
+// This runs AUTOMATICALLY at exactly 1 Hz — no polling, no delay.
+ISR(TIMER1_COMPA_vect) {
+  digitalWrite(LED, !digitalRead(LED));   // toggle the LED
+}
+
+void loop() {
+  // Completely free. The 1 Hz blink happens in the background.
+  // Put your real work here; it never blocks the timer.
+}
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Why <code>(1 &lt;&lt; BITNAME)</code></div>
+        <p>Constants like <code>WGM12</code>, <code>CS12</code>, <code>OCIE1A</code> are just <em>bit positions</em> (numbers 0–7) defined in the AVR headers. <code>(1 &lt;&lt; CS12)</code> builds a mask with that one bit set; <code>|=</code> ORs it into the register, flipping that bit on without disturbing the others. This is the universal idiom for poking a single hardware bit — you saw it in Chapter 2 and you will use it forever.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="interrupts"><span class="sec-no">6</span>Hardware interrupts: zero-latency reactions</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>a hardware tap on the shoulder</small></div>
+      <p>A timer interrupt fires on a <em>clock</em> event. An <strong>external interrupt</strong> fires on a <em>pin</em> event — a rising or falling edge — and it does so within a few clock cycles, no matter what your code is doing. The CPU drops everything, jumps to your <strong>Interrupt Service Routine (ISR)</strong>, runs it, then resumes exactly where it left off. This is how you catch a fast event — an encoder edge, a sensor pulse, a button — with essentially zero latency, instead of hoping <code>loop()</code> happens to poll at the right microsecond.</p>
+
+      <div class="mermaid">
+sequenceDiagram
+    participant W as External wire (edge)
+    participant H as AVR hardware
+    participant M as loop() / main code
+    participant I as ISR
+    M->>M: running normally
+    W->>H: rising edge on INT0 pin
+    H->>M: finish current instruction
+    H->>I: vector to ISR (push context)
+    I->>I: do the bare minimum
+    I->>M: return (pop context)
+    M->>M: resume exactly where paused
+</div>
+
+      <p>On the Uno, only pins <strong>2 and 3</strong> are true external-interrupt lines (<code>INT0</code>, <code>INT1</code>). You attach an ISR with the Arduino API:</p>
+
+      <div class="codeblock">
+        <div class="code-head">encoder_edge.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t ENC_A = 2;          // encoder channel A → INT0
+volatile int32_t pulses = 0;      // shared with ISR → MUST be volatile
+
+void setup() {
+  pinMode(ENC_A, INPUT_PULLUP);
+  // Call countPulse() on every RISING edge of pin 2:
+  attachInterrupt(digitalPinToInterrupt(ENC_A), countPulse, RISING);
+  Serial.begin(115200);
+}
+
+// ISR: keep it TINY. No delay(), no Serial, no malloc.
+void countPulse() {
+  pulses++;                       // just record the event and leave
+}
+
+void loop() {
+  // Read the shared variable safely: snapshot it with interrupts off.
+  noInterrupts();
+  int32_t snapshot = pulses;
+  interrupts();
+  Serial.println(snapshot);       // slow work happens HERE, not in the ISR
+}
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The three ISR commandments</div>
+        <p><strong>1. Keep it tiny.</strong> An ISR steals the CPU from everything else — set a flag, bump a counter, and get out. <br>
+        <strong>2. No <code>delay()</code>, <code>Serial</code>, or anything blocking.</strong> <code>millis()</code> won't even advance inside an ISR (its timer interrupt is masked), and <code>Serial</code> relies on interrupts that are now disabled — deadlock. <br>
+        <strong>3. Every variable shared with the ISR must be <code>volatile</code>.</strong></p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>why <code>volatile</code> is non-negotiable</small></div>
+      <p><code>volatile</code> tells the compiler: "this variable can change behind your back — re-read it from memory every single time, and never cache it in a register or optimize the access away." Without it, the optimizer assumes <code>loop()</code> is the only writer. It may hoist <code>pulses</code> into a CPU register once and loop forever on the stale copy, never seeing the ISR's updates. Your code compiles, runs, and silently lies.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the torn read</div>
+        <p>On an 8-bit AVR, a 32-bit <code>int32_t</code> is read in <em>four</em> separate byte operations. If the ISR fires <em>between</em> those bytes, you read half the old value and half the new — a "torn" read. That is why the snapshot above brackets the read with <code>noInterrupts()/interrupts()</code>: it makes the multi-byte read <strong>atomic</strong>. For a single <code>uint8_t</code> flag this isn't needed; for anything wider than the CPU word, it is mandatory.</p>
+      </div>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>pin-change vs external interrupts</small></div>
+      <p>Two pins is rarely enough. <strong>Pin-change interrupts (PCINT)</strong> are the alternative: <em>almost every</em> pin can raise one, but they are coarser — a single shared ISR fires for a whole <em>port</em> on <em>any</em> edge (rising <em>or</em> falling), and your handler must figure out which pin moved and in which direction. Use external interrupts (pins 2/3) when you can — they are precise, per-pin, and edge-selectable. Fall back to pin-change interrupts when you need to watch more pins than INT0/INT1 can cover.</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th></th><th>External (INT0/INT1)</th><th>Pin-change (PCINT)</th></tr></thead>
+        <tbody>
+          <tr><td>Pins (Uno)</td><td>only 2 &amp; 3</td><td>nearly all 20</td></tr>
+          <tr><td>Trigger</td><td>LOW / CHANGE / RISING / FALLING</td><td>any CHANGE only</td></tr>
+          <tr><td>ISR granularity</td><td>one ISR per pin</td><td>one ISR per 8-pin port</td></tr>
+          <tr><td>Arduino API</td><td><code>attachInterrupt()</code></td><td>register-level (or a library)</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="real-case"><span class="sec-no">7</span>Real case: deterministic sampling &amp; the encoder</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>this ships in products</small></div>
+      <p>Two patterns from this chapter are everywhere in real hardware, and they map exactly onto the two interrupt sources you just met.</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — precise periodic sampling</div>
+        <p>A digital audio or vibration sensor must be read at a <em>rock-steady</em> rate, say 8 kHz, or the downstream FFT smears. Reading it from <code>loop()</code> with <code>millis()</code> jitters — sometimes the loop is busy. The production answer is a <strong>Timer1 CTC interrupt</strong> set to 8 kHz: in the ISR you read one ADC sample into a ring buffer and return. The sampling instant is now defined by a crystal, not by software luck. Set <span>$\text{OCR1A} = 16{\times}10^6/(8 \times 8000) - 1 = 249$</span> with prescaler 8 — exactly the math from §5.</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — zero-latency encoder edges</div>
+        <p>A motor's quadrature encoder emits pulses faster than any polling loop can reliably catch at speed — miss one edge and your position estimate drifts forever. Wiring channel A to an <strong>external interrupt</strong> means every single edge increments the count the instant it arrives, regardless of what <code>loop()</code> is doing. This is how robot wheels, CNC axes, and 3-D printers know exactly where they are. The ISR does one thing — <code>pulses++</code> — and the heavy control math runs later in <code>loop()</code>, reading the volatile snapshot.</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Division of labour</div>
+        <p>The recurring architecture: <strong>interrupts capture, <code>loop()</code> processes.</strong> ISRs do the irreducible minimum at the exact moment an event happens; the slow, complex, blocking-tolerant work happens back in the non-blocking main loop. Master that split and you can build firmware that is both real-time and responsive — the thing <code>delay()</code> could never give you.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>⑤ Your turn</h2>
+      <div class="layer"><span class="step">⑤</span> Practice <small>you write &amp; decide</small></div>
+      <p>Three checks. Tap an answer, type a number, or reveal a coding challenge. Your progress is saved on this device and shown on the home page.</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="ard05-volatile-isr">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">An ISR increments a global <code>int32_t pulses;</code> and <code>loop()</code> reads it. Two of these are <em>wrong</em>. Which single line of advice is <strong>correct</strong>?</div>
+        <ul class="ex-options">
+          <li data-correct="false">Call <code>Serial.println(pulses)</code> inside the ISR so you see every pulse.</li>
+          <li data-correct="false">Leave <code>pulses</code> as a plain <code>int32_t</code> — the compiler always re-reads globals.</li>
+          <li data-correct="true">Declare <code>pulses</code> <code>volatile</code>, and snapshot it with interrupts disabled before using it in <code>loop()</code>.</li>
+          <li data-correct="false">Add a <code>delay(1)</code> in the ISR to debounce the edge.</li>
+        </ul>
+        <div class="ex-explain">An ISR must stay tiny — <strong>no <code>Serial</code></strong> (it needs interrupts that are masked) and <strong>no <code>delay()</code></strong> (<code>millis()</code> is frozen, so it hangs). A shared variable must be <code>volatile</code> or the optimizer may cache a stale copy. And because a 32-bit value is read in four byte-ops on an 8-bit AVR, you bracket the read with <code>noInterrupts()/interrupts()</code> to avoid a torn read.</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="ard05-ctc-ocr" data-answer="62499" data-tol="2">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">You configure <strong>Timer1</strong> in CTC mode at <span>$f_{\text{clk}} = 16\ \text{MHz}$</span> with prescaler <span>$N = 256$</span> and want a <strong>1 Hz</strong> interrupt. What value goes in <code>OCR1A</code>? (Use $\text{OCR1A} = \frac{f_{\text{clk}}}{N\,f_{\text{int}}} - 1$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="OCR1A"><span class="ex-unit">counts</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$\text{OCR1A} = \dfrac{16\times10^6}{256 \times 1} - 1 = 62500 - 1 = 62499$. It fits the 16-bit register (max 65535) — which is exactly why this needs Timer1 and not 8-bit Timer0/Timer2 (max 255). Plug it back: $16{\times}10^6/(256\times62500) = 1\ \text{Hz}$. ✓</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="ard05-two-leds">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — two LEDs, two rates, no <code>delay()</code></div>
+        <div class="ex-q">Blink LED A on pin 8 at <strong>2 Hz</strong> (toggle every 250 ms) and LED B on pin 9 at <strong>5 Hz</strong> (toggle every 100 ms) <em>simultaneously</em>, using only the <code>millis()</code> idiom — <strong>no <code>delay()</code> anywhere</strong>. The two blinks must run completely independently.</div>
+        <details class="ex-acc">
+          <summary>Hint</summary>
+          <div class="acc-body">Give each LED its own <code>last</code> timestamp and its own <code>interval</code>. Read <code>now = millis()</code> <em>once</em> per pass, then run two independent <code>if (now - lastX &gt;= intervalX)</code> blocks. The toggle is <code>state = !state; digitalWrite(pin, state);</code>.</div>
+        </details>
+        <details class="ex-acc">
+          <summary>Show one solution</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">two_leds.ino <span class="lang">C++ / Arduino</span></div>
+<pre><code class="language-cpp">const uint8_t LED_A = 8, LED_B = 9;
+const uint32_t intervalA = 250;   // 2 Hz  → toggle every 250 ms
+const uint32_t intervalB = 100;   // 5 Hz  → toggle every 100 ms
+uint32_t lastA = 0, lastB = 0;
+bool stateA = false, stateB = false;
+
+void setup() {
+  pinMode(LED_A, OUTPUT);
+  pinMode(LED_B, OUTPUT);
+}
+
+void loop() {
+  uint32_t now = millis();        // ONE clock read per pass
+
+  if (now - lastA &gt;= intervalA) {  // LED A: independent timer
+    lastA = now;
+    stateA = !stateA;
+    digitalWrite(LED_A, stateA);
+  }
+
+  if (now - lastB &gt;= intervalB) {  // LED B: independent timer
+    lastB = now;
+    stateB = !stateB;
+    digitalWrite(LED_B, stateB);
+  }
+  // loop() never blocks → both LEDs keep their own rhythm,
+  // and there's still room here to read a button or sensor.
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">The lesson: each task owns its <code>last</code> + <code>interval</code>, and <code>loop()</code> stays non-blocking. This is the cooperative scheduler from §3 in miniature — add a third LED, a button, a sensor, and they all coexist because nothing ever stands still. Try it with <code>delay()</code> and watch the two rates collide.</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> Chapter recap</div>
+        <p>You escaped <code>delay()</code> three ways. You can write the rollover-proof <code>now - last &gt;= interval</code> idiom and explain <em>why</em> unsigned subtraction survives the 49.71-day wrap. You can configure an AVR timer in CTC mode — choosing prescaler and solving <span>$\text{OCRnA} = f_{\text{clk}}/(N f_{\text{int}}) - 1$</span> (62499 for 1 Hz on Timer1) — and you know Timer0 is off-limits. You can attach an external interrupt, keep its ISR tiny, mark shared state <code>volatile</code>, and snapshot wide values atomically. The architecture to remember: <strong>interrupts capture, <code>loop()</code> processes</strong>. Next we put these timers to work generating analog-feeling output with PWM.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="Back to top">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+
+<!-- chapter-specific simulator -->
+<script>
+EM.sim("sim-roll", {
+  height: 240,
+  params: [
+    { key: "now", label: "now (ms past wrap)", min: 0,  max: 400, step: 10, value: 150, unit: "ms" },
+    { key: "gap", label: "true elapsed",       min: 50, max: 400, step: 10, value: 250, unit: "ms" }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h, pad = 44 * dpr;
+    var MOD = 4294967296;                       // 2^32
+    // 'last' is placed 'gap' ms before the wrap line; 'now' is past it.
+    var last = (MOD - (v.gap - v.now));         // just before rollover
+    if (v.now >= v.gap) last = (v.now - v.gap); // (edge) no-wrap case
+    var nowVal = v.now;                         // already wrapped to small
+
+    var signed   = nowVal - last;               // looks hugely negative
+    var unsigned = ((nowVal - last) % MOD + MOD) % MOD; // true elapsed
+
+    // ---- draw a number line with the wrap point ----
+    var y = H / 2;
+    var x0 = pad, x1 = W - 20 * dpr;
+    ctx.strokeStyle = "#262d3a"; ctx.lineWidth = 1.5 * dpr;
+    ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
+
+    // wrap marker (2^32 → 0)
+    var xw = (x0 + x1) / 2;
+    ctx.strokeStyle = "#e05263"; ctx.setLineDash([4 * dpr, 4 * dpr]);
+    ctx.beginPath(); ctx.moveTo(xw, pad * 0.5); ctx.lineTo(xw, H - pad * 0.5); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#e05263"; ctx.font = (12 * dpr) + "px monospace";
+    ctx.fillText("2^32 → 0  (wrap)", xw + 6 * dpr, pad * 0.6 + 10 * dpr);
+
+    // 'last' dot (left of wrap), 'now' dot (right of wrap)
+    var span = 30 * dpr;
+    var xLast = xw - (v.gap - v.now) * (span / 100);
+    var xNow  = xw + v.now * (span / 100);
+    ctx.fillStyle = "#f0a202";
+    ctx.beginPath(); ctx.arc(xLast, y, 6 * dpr, 0, 7); ctx.fill();
+    ctx.fillText("last", xLast - 12 * dpr, y - 14 * dpr);
+    ctx.fillStyle = "#2ec4b6";
+    ctx.beginPath(); ctx.arc(xNow, y, 6 * dpr, 0, 7); ctx.fill();
+    ctx.fillText("now", xNow - 8 * dpr, y - 14 * dpr);
+
+    return "Signed <b>now - last</b> = <span style='color:#e05263'>" +
+           signed.toLocaleString() + "</span> (broken) &nbsp;·&nbsp; " +
+           "Unsigned mod 2³² = <span style='color:#2ec4b6'>" + unsigned +
+           " ms</span> = true elapsed ✓";
+  }
+});
+</script>
+</body>
+</html>

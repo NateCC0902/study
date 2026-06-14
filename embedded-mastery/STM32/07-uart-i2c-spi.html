@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Serial Buses: USART, I²C, SPI &amp; Baud Math — Embedded Mastery</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="track-stm32" data-track="stm32" data-chapter="07-uart-i2c-spi">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">STM32 · Ch 07</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">STM32 Track · Chapter 07 · Advanced</div>
+        <h1>Serial Buses: USART, I²C, SPI &amp; Baud Math</h1>
+        <p>On the Arduino you had <em>one</em> hardware UART, one I²C, one SPI — and they blocked the CPU. The STM32 hands you a fleet of bus controllers, each able to fire interrupts or pump bytes through <strong>DMA</strong> while the core does real work. We rebuild the three classic buses from their registers up, derive the baud and prescaler math exactly, and wire a console, an EEPROM, and an IMU onto one board.</p>
+        <div class="meta">
+          <span>⏱ ~50 min</span><span>🧠 Bus protocols</span><span>⚡ DMA &amp; interrupts</span><span>🔢 Baud math</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="three-buses-recap"><span class="sec-no">1</span>Three buses, one board — a fast recap</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>You met all three buses on the Arduino in <a href="../Arduino/06-serial-i2c-spi.html">Arduino Chapter 06</a>. The protocols are identical on STM32 — same wires, same framing, same idea — so we recap fast and then go where the 8-bit AVR could not follow: multiple instances, interrupt-driven transfers, and DMA.</p>
+
+      <p>Every serial bus solves the same problem: move bytes between chips using as few wires as possible. They differ in <strong>how many wires</strong>, <strong>who drives the clock</strong>, and <strong>how a receiver knows where a byte begins</strong>.</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Bus</th><th>Wires</th><th>Clock</th><th>Topology</th><th>Typical role</th></tr></thead>
+        <tbody>
+          <tr><td><strong>USART/UART</strong></td><td>TX, RX (+GND)</td><td>None — agreed <em>baud</em></td><td>Point-to-point</td><td>Console, GPS, radio modem</td></tr>
+          <tr><td><strong>I²C</strong></td><td>SDA, SCL</td><td>Shared, controller-driven</td><td>Multi-drop, addressed</td><td>EEPROM, RTC, slow sensors</td></tr>
+          <tr><td><strong>SPI</strong></td><td>SCK, MOSI, MISO, CS</td><td>Controller-driven</td><td>Star (one CS per device)</td><td>Flash, displays, fast IMUs</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-line distinction</div>
+        <p><strong>UART</strong> is <em>asynchronous</em> — no clock wire, so both ends must already agree on the bit rate. <strong>I²C and SPI</strong> are <em>synchronous</em> — a clock wire travels with the data, so timing is self-describing. Async trades a wire for the burden of getting the baud rate exactly right; that trade is why §2 exists.</p>
+      </div>
+
+      <p>The acronym jump matters too: the AVR had a <strong>UART</strong>. Most STM32 peripherals are <strong>USART</strong>s — the extra "S" is <em>Synchronous</em>, meaning they can also emit a clock and run in SPI-like or smartcard modes. You almost always use them in plain asynchronous UART mode, but the registers carry the U<em>S</em>ART name.</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="usart-baud-math"><span class="sec-no">2</span>USART baud rate: the math that actually ships</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>sampling in the dark</small></div>
+      <p>With no clock wire, the receiver must guess where each bit sits. The trick: run an internal clock <strong>16× faster</strong> than the expected bit rate (<em>oversampling by 16</em>), wait for the falling edge of the start bit, then sample each data bit near its <em>centre</em> — around the 8th of 16 ticks. Get the divisor slightly wrong and the sample point drifts; drift far enough across a frame and you read garbage.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive USARTDIV</small></div>
+      <p>The peripheral clock <span>$f_{CK}$</span> (the bus clock feeding the USART — <code>PCLK1</code> or <code>PCLK2</code>) is divided by 16 and by a fractional divisor <span>$\text{USARTDIV}$</span> to produce the baud rate. With oversampling by 16:</p>
+
+      <div class="math-box">
+        $$ \text{baud} = \frac{f_{CK}}{16 \cdot \text{USARTDIV}} \quad\Longrightarrow\quad \text{USARTDIV} = \frac{f_{CK}}{16 \cdot \text{baud}} $$
+      </div>
+
+      <p><span>$\text{USARTDIV}$</span> is a <em>fixed-point</em> number: an integer <strong>mantissa</strong> plus a 4-bit <strong>fraction</strong> in sixteenths, packed into the baud-rate register <code>BRR</code> as <code>[mantissa : fraction]</code>. Let's program a real part. Take an STM32F4 with the USART on <code>PCLK2 = 84&nbsp;MHz</code>, targeting <strong>115200 baud</strong>:</p>
+
+      <div class="math-box">
+        $$ \text{USARTDIV} = \frac{84\times10^{6}}{16 \cdot 115200} = \frac{84\times10^{6}}{1\,843\,200} \approx 45.5729 $$
+      </div>
+
+      <p>Split it: the mantissa is <span>$45$</span>; the fraction is <span>$0.5729 \times 16 \approx 9.17 \to 9$</span> (rounded to the nearest sixteenth). So we program</p>
+
+      <div class="math-box">
+        $$ \text{BRR} = (45 \ll 4) \,|\, 9 = 0x2D9, \qquad \text{USARTDIV}_{\text{prog}} = 45 + \tfrac{9}{16} = 45.5625 $$
+      </div>
+
+      <p>Now check what baud that <em>actually</em> produces, and the resulting error:</p>
+
+      <div class="math-box">
+        $$ \text{baud}_{\text{actual}} = \frac{84\times10^{6}}{16 \cdot 45.5625} = 115226\ \text{baud}, \qquad \varepsilon = \frac{115226 - 115200}{115200} \approx +0.02\% $$
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The 2% rule</div>
+        <p>Both ends accumulate error across a 10-bit frame (start + 8 data + stop). The combined transmitter+receiver error budget is roughly <strong>±2–3%</strong> before the sample point drifts off the bit. Our +0.02% is luxuriously safe. This is why <strong>integer-friendly clocks</strong> matter: at an awkward <span>$f_{CK}$</span> some baud rates simply cannot be hit accurately — a recurring reason to pick crystal and PLL values deliberately back in <a href="../STM32/02-clocks.html">Chapter 02</a>.</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>HAL hides <code>BRR</code> behind <code>Init.BaudRate</code>, computing USARTDIV for you from the live clock tree. But knowing the math lets you sanity-check it and debug a console that comes up as mojibake.</p>
+
+      <div class="codeblock">
+        <div class="code-head">usart_init.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">// USART2 on STM32F4, clocked from PCLK1; here APB2/USART1 example on PCLK2 = 84 MHz.
+UART_HandleTypeDef huart1;
+
+void uart1_init(void) {
+  __HAL_RCC_USART1_CLK_ENABLE();          // gate the USART clock on
+  huart1.Instance        = USART1;        // PCLK2 = 84 MHz on this part
+  huart1.Init.BaudRate   = 115200;        // HAL solves USARTDIV -&gt; BRR = 0x2D9
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits   = UART_STOPBITS_1;
+  huart1.Init.Parity     = UART_PARITY_NONE;     // 8N1 — the universal default
+  huart1.Init.Mode       = UART_MODE_TX_RX;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16; // baud = f_CK / (16 * USARTDIV)
+  HAL_UART_Init(&amp;huart1);                 // writes BRR, CR1, CR2, CR3
+}
+
+// Blocking send — the CPU spins until every byte has left the shift register.
+void uart1_puts(const char *s) {
+  HAL_UART_Transmit(&amp;huart1, (uint8_t*)s, strlen(s), HAL_MAX_DELAY);
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — wrong PCLK, wrong baud</div>
+        <p>If you change the clock tree (a new PLL config, a different APB prescaler) but the USART still <em>thinks</em> it runs at the old <span>$f_{CK}$</span>, every baud rate shifts and the console fills with garbage. HAL reads the clock at <code>HAL_UART_Init</code> time, so re-init after any clock change. <code>HAL_RCC_GetPCLK2Freq()</code> tells you the real number it used.</p>
+      </div>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-baud-wrap">
+        <div class="sim-title">🔬 Live: USARTDIV &amp; baud-error explorer</div>
+        <canvas id="sim-baud"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">Drag <em>f<sub>CK</sub></em> and the target baud: watch the exact USARTDIV, the rounded mantissa/fraction actually programmed into BRR, and the resulting baud error against the ±2% budget.</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="uart-interrupt-dma"><span class="sec-no">3</span>Beyond blocking: UART by interrupt and by DMA</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>stop babysitting bytes</small></div>
+      <p><code>HAL_UART_Transmit(..., HAL_MAX_DELAY)</code> is honest but wasteful — at 115200 baud each byte takes about <span>$\frac{10\ \text{bits}}{115200} \approx 87\,\mu s$</span>, and the CPU spins the whole time. Sending a 1&nbsp;KB log line blocks for ~89&nbsp;ms. On a real-time system that is a catastrophe. The STM32 gives you two escapes.</p>
+
+      <p><strong>Interrupt mode</strong> — the USART raises an interrupt each time its transmit register empties; an ISR feeds the next byte. The CPU only visits once per byte. <strong>DMA mode</strong> — a dedicated <em>Direct Memory Access</em> engine streams the whole buffer to the USART data register with <strong>zero</strong> CPU involvement; the core is interrupted exactly once, at completion.</p>
+
+      <div class="mermaid">
+flowchart LR
+    BUF["TX buffer<br/>in SRAM"] -->|DMA stream| DMA["DMA controller"]
+    DMA -->|byte by byte| DR["USART-&gt;DR"]
+    DR -->|shift out| TX([TX pin])
+    DMA -.->|one IRQ at end| CPU["CPU<br/>(free meanwhile)"]
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>non-blocking transmit</small></div>
+      <div class="codeblock">
+        <div class="code-head">uart_dma.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">// Assume CubeMX wired DMA2_Stream7 (USART1_TX) and the DMA IRQ handlers.
+uint8_t log_buf[256];
+
+void log_line_dma(const char *msg) {
+  int n = snprintf((char*)log_buf, sizeof log_buf, "%lu: %s\r\n",
+                   HAL_GetTick(), msg);
+  // Returns IMMEDIATELY; DMA pushes the bytes while loop() keeps running.
+  HAL_UART_Transmit_DMA(&amp;huart1, log_buf, n);
+}
+
+// HAL calls this from the DMA transfer-complete ISR when the buffer is drained.
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
+  if (huart->Instance == USART1) {
+    tx_busy = 0;                 // safe to queue the next line now
+  }
+}
+
+// Receive: arm a DMA into a ring buffer once, let it fill in the background.
+uint8_t rx_buf[64];
+void rx_start(void) {
+  HAL_UART_Receive_DMA(&amp;huart1, rx_buf, sizeof rx_buf);  // non-blocking RX
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — touching a buffer mid-DMA</div>
+        <p>The DMA engine reads <code>log_buf</code> directly from SRAM. If you overwrite it before <code>TxCpltCallback</code> fires, you corrupt the in-flight transfer — you'll see torn or interleaved output. Gate it with a <code>tx_busy</code> flag (above) or a real queue. Same rule for RX: don't parse <code>rx_buf</code> faster than DMA fills it.</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Pick the right mode</div>
+        <p><strong>Blocking</strong>: one-off setup prints, where simplicity wins. <strong>Interrupt</strong>: short, bursty traffic and you're out of DMA streams. <strong>DMA</strong>: high-throughput logging, audio, or anything where the CPU must stay free. A 1&nbsp;KB log line that blocked for 89&nbsp;ms costs the CPU effectively <em>0&nbsp;ms</em> over DMA.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="i2c-stm32"><span class="sec-no">4</span>I²C on STM32: addressing, timing, and register-mapped devices</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>a two-wire party line</small></div>
+      <p>I²C puts every device on the same two open-drain wires — <strong>SDA</strong> (data) and <strong>SCL</strong> (clock) — each pulled high by a resistor. The controller starts a transaction by sending a 7-bit <strong>address</strong> plus a read/write bit; only the matching device answers. That's how an EEPROM, an RTC, and three sensors coexist on two pins.</p>
+
+      <div class="mermaid">
+flowchart LR
+    MCU["STM32<br/>I²C controller"] -->|SDA / SCL| BUS{{Shared bus}}
+    BUS --> A["EEPROM<br/>0x50"]
+    BUS --> B["RTC<br/>0x68"]
+    BUS --> C["Sensor<br/>0x76"]
+</div>
+
+      <div class="layer"><span class="step">②</span> Math <small>address space &amp; clock tiers</small></div>
+      <p>A 7-bit address gives <span>$2^{7} = 128$</span> slots, but reserved ranges trim that to <strong>112</strong> usable device addresses on one bus. The shifted byte that actually goes on the wire is the address in the top 7 bits with the R/W̄ bit at the bottom:</p>
+
+      <div class="math-box">
+        $$ \text{byte} = (\text{addr}_{7} \ll 1)\,|\,\overline{\text{R/W}}, \qquad 0x50 \to 0xA0\ \text{(write)},\ 0xA1\ \text{(read)} $$
+      </div>
+
+      <p>I²C runs in fixed clock tiers: <strong>100&nbsp;kHz</strong> (Standard), <strong>400&nbsp;kHz</strong> (Fast), and <strong>1&nbsp;MHz</strong> (Fast-mode Plus). On modern STM32 (F0/F3/F7/L4/G4…) you don't set a simple divisor — you load a computed <code>TIMINGR</code> register that encodes the SCL high/low periods and the data setup/hold times in cycles of the I²C kernel clock. CubeMX (or the ST timing tool) generates this constant for your clock; treat it as derived, not magic.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>the killer convenience: Mem_Read/Write</small></div>
+      <p>Most I²C chips are <em>register-mapped</em>: to read a value you first write the register address, send a repeated-start, then read. HAL bundles that whole dance into <code>HAL_I2C_Mem_Read/Write</code> — you give it the device address and the internal register, and it handles the repeated start.</p>
+
+      <div class="codeblock">
+        <div class="code-head">eeprom_i2c.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">#define EE_ADDR  (0x50 &lt;&lt; 1)   // 7-bit 0x50, HAL wants it left-shifted
+#define EE_MEMSZ I2C_MEMADD_SIZE_16BIT  // 24LC256 uses a 16-bit word address
+
+// Write one page (&lt;=64 B) to a 24LC256 EEPROM at internal address `at`.
+HAL_StatusTypeDef ee_write(uint16_t at, uint8_t *data, uint16_t len) {
+  return HAL_I2C_Mem_Write(&amp;hi2c1, EE_ADDR, at, EE_MEMSZ,
+                           data, len, HAL_MAX_DELAY);
+}
+
+// Read `len` bytes back. Mem_Read does write-addr + repeated-start + read.
+HAL_StatusTypeDef ee_read(uint16_t at, uint8_t *data, uint16_t len) {
+  return HAL_I2C_Mem_Read(&amp;hi2c1, EE_ADDR, at, EE_MEMSZ,
+                          data, len, HAL_MAX_DELAY);
+}
+
+// EEPROMs need a few ms to commit a page — poll until it ACKs again.
+void ee_wait_ready(void) {
+  while (HAL_I2C_IsDeviceReady(&amp;hi2c1, EE_ADDR, 3, 10) != HAL_OK) { /* spin */ }
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the shift trap &amp; missing pull-ups</div>
+        <p>HAL's I²C API expects the address <strong>already left-shifted</strong> (the R/W̄ bit is set internally). Pass a raw <code>0x50</code> and you'll address the wrong device or get <code>HAL_ERROR</code>. Second classic: I²C lines are open-drain — with no external pull-ups (typically 4.7&nbsp;kΩ) the bus never reaches a logic high and every transfer times out. The bus looks dead, not broken.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="spi-stm32"><span class="sec-no">5</span>SPI on STM32: prescaler, modes, and full duplex</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>four wires, raw speed</small></div>
+      <p>SPI trades I²C's wire-thrift for speed. Four signals — <strong>SCK</strong> (clock), <strong>MOSI</strong> (controller→peripheral), <strong>MISO</strong> (peripheral→controller), <strong>CS</strong> (chip-select, one per device) — and no addressing overhead. Data shifts out on MOSI <em>and</em> in on MISO on the same clock edges: <strong>full duplex</strong>, every clock carries a bit each way.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>the baud prescaler</small></div>
+      <p>SPI has no fractional divisor — just a 3-bit prescaler <code>BR</code> in <code>CR1</code> that divides the bus clock by a power of two:</p>
+
+      <div class="math-box">
+        $$ f_{SPI} = \frac{f_{PCLK}}{2^{\,(\text{BR}+1)}}, \qquad \text{BR} \in \{0,1,\dots,7\} $$
+      </div>
+
+      <p>So <code>BR</code> selects a /2, /4, /8, … /256 divider. On an STM32F4 with the SPI on <code>PCLK2 = 84&nbsp;MHz</code>, picking <code>BR = 2</code> gives</p>
+
+      <div class="math-box">
+        $$ f_{SPI} = \frac{84\times10^{6}}{2^{(2+1)}} = \frac{84\times10^{6}}{8} = 10.5\ \text{MHz} $$
+      </div>
+
+      <p>Want it faster? <code>BR = 1</code> → /4 → 21&nbsp;MHz; <code>BR = 0</code> → /2 → 42&nbsp;MHz. The ceiling is whatever the <em>slowest device on the wire</em> can tolerate — check its datasheet's max SCK.</p>
+
+      <p>The second half of SPI is <strong>mode</strong>: two bits, <strong>CPOL</strong> (clock idle polarity) and <strong>CPHA</strong> (sample on first or second edge), pick which of four timing conventions you use. Both ends must agree exactly or you read shifted, garbled bits.</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Mode</th><th>CPOL</th><th>CPHA</th><th>SCK idle</th><th>Data sampled on</th></tr></thead>
+        <tbody>
+          <tr><td><strong>0</strong></td><td>0</td><td>0</td><td>Low</td><td>Rising (1st) edge</td></tr>
+          <tr><td><strong>1</strong></td><td>0</td><td>1</td><td>Low</td><td>Falling (2nd) edge</td></tr>
+          <tr><td><strong>2</strong></td><td>1</td><td>0</td><td>High</td><td>Falling (1st) edge</td></tr>
+          <tr><td><strong>3</strong></td><td>1</td><td>1</td><td>High</td><td>Rising (2nd) edge</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>full-duplex transfer</small></div>
+      <div class="codeblock">
+        <div class="code-head">spi_imu.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">// SPI1 on PCLK2 = 84 MHz. Prescaler /8 -&gt; 10.5 MHz; Mode 3 for an ICM-20948.
+SPI_HandleTypeDef hspi1;
+
+void spi1_init(void) {
+  __HAL_RCC_SPI1_CLK_ENABLE();
+  hspi1.Instance               = SPI1;
+  hspi1.Init.Mode              = SPI_MODE_MASTER;
+  hspi1.Init.Direction         = SPI_DIRECTION_2LINES;     // full duplex
+  hspi1.Init.DataSize          = SPI_DATASIZE_8BIT;
+  hspi1.Init.CLKPolarity       = SPI_POLARITY_HIGH;        // CPOL = 1
+  hspi1.Init.CLKPhase          = SPI_PHASE_2EDGE;          // CPHA = 1  -&gt; Mode 3
+  hspi1.Init.NSS               = SPI_NSS_SOFT;             // drive CS in software
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;  // BR=2 -&gt; /8 -&gt; 10.5 MHz
+  hspi1.Init.FirstBit          = SPI_FIRSTBIT_MSB;
+  HAL_SPI_Init(&amp;hspi1);
+}
+
+// Read an IMU register: send (reg | 0x80) to request a read, clock a dummy
+// byte to shift the answer back in. CS is active-low, driven by hand.
+uint8_t imu_read(uint8_t reg) {
+  uint8_t tx[2] = { (uint8_t)(reg | 0x80), 0x00 };
+  uint8_t rx[2] = { 0 };
+  HAL_GPIO_WritePin(CS_PORT, CS_PIN, GPIO_PIN_RESET);     // CS low: select
+  HAL_SPI_TransmitReceive(&amp;hspi1, tx, rx, 2, HAL_MAX_DELAY); // full duplex
+  HAL_GPIO_WritePin(CS_PORT, CS_PIN, GPIO_PIN_SET);       // CS high: deselect
+  return rx[1];                                            // byte 0 was the cmd echo
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the wrong mode reads plausible garbage</div>
+        <p>If CPOL/CPHA don't match the device, you don't get an error — you get <em>numbers</em>, just shifted by one clock edge, so a WHO_AM_I that should read <code>0xEA</code> comes back as <code>0xD5</code> or similar. Always verify the chip's identity register first; a correct WHO_AM_I proves your mode, prescaler, and wiring are all right before you trust any data.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="bus-comparison"><span class="sec-no">6</span>Choosing a bus: the engineering trade-off</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>how products decide</small></div>
+      <p>There is no "best" bus — each wins a different corner of the design space. Internalize this table and bus selection becomes a reflex.</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Property</th><th>USART/UART</th><th>I²C</th><th>SPI</th></tr></thead>
+        <tbody>
+          <tr><td>Typical speed</td><td>Up to ~10 Mbit/s (usually ≤1)</td><td>100k / 400k / 1M Hz</td><td>Tens of MHz (10.5–42 MHz here)</td></tr>
+          <tr><td>Signal wires</td><td>2 (TX, RX)</td><td>2 (SDA, SCL)</td><td>3 + 1 CS per device</td></tr>
+          <tr><td>Devices per bus</td><td>2 (point-to-point)</td><td>~112 (7-bit addr)</td><td>Limited by CS pins</td></tr>
+          <tr><td>Duplex</td><td>Full (separate TX/RX)</td><td>Half (shared SDA)</td><td>Full (MOSI + MISO)</td></tr>
+          <tr><td>Clock source</td><td>None (async, baud)</td><td>Controller, shared</td><td>Controller, dedicated</td></tr>
+          <tr><td>DMA-friendly</td><td>Yes</td><td>Yes</td><td>Yes (best for bulk)</td></tr>
+          <tr><td>Practical distance</td><td>Long (esp. via RS-232/485)</td><td>Short (on-board, &lt;~1 m)</td><td>Very short (on-board)</td></tr>
+          <tr><td>Pin cost / addressing</td><td>Cheap, no addressing</td><td>Cheap, built-in addressing</td><td>Pricey (CS sprawl), no addr</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Decision heuristic</div>
+        <p>Talking to a <strong>human/PC/modem over distance</strong>? UART. Wiring up <strong>many slow chips on two pins</strong>? I²C. Need <strong>raw throughput</strong> from a flash, display, or IMU? SPI. And whenever the transfer is large or periodic, reach for <strong>DMA</strong> regardless of bus — that's the STM32's superpower over the AVR.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="real-case-board"><span class="sec-no">7</span>Real case: one board, three buses, all at once</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>this ships in products</small></div>
+      <p>Picture a flight controller or a robot's sensor board. The STM32 isn't choosing <em>one</em> bus — it's running all three simultaneously, each matched to its job:</p>
+
+      <ul>
+        <li><strong>IMU on SPI</strong> at 10.5&nbsp;MHz (BR=2, /8). Attitude data must arrive fast and often — the SPI's full-duplex throughput keeps a 1&nbsp;kHz control loop fed.</li>
+        <li><strong>EEPROM on I²C</strong> at 400&nbsp;kHz. Calibration constants and config are tiny and read rarely; two wires shared with an RTC and a barometer is the frugal choice.</li>
+        <li><strong>Debug console on USART</strong> at 115200 baud, <strong>logged via DMA</strong>. Telemetry streams out continuously without ever stealing a cycle from the control loop.</li>
+      </ul>
+
+      <div class="mermaid">
+flowchart TB
+    MCU["STM32F4<br/>(3 bus controllers + DMA)"]
+    MCU -->|SPI1 @ 10.5 MHz| IMU["IMU<br/>ICM-20948"]
+    MCU -->|I²C1 @ 400 kHz| EE["EEPROM 0x50"]
+    MCU -->|I²C1 @ 400 kHz| BARO["Baro 0x76"]
+    MCU -->|USART1 @ 115200<br/>via DMA| PC([Debug console / PC])
+    IMU -.->|1 kHz attitude| MCU
+</div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — why the console runs on DMA</div>
+        <p>On a flight controller the control loop is sacred: jitter is the enemy. Blocking <code>printf</code> over UART would stall that loop for milliseconds while bytes drain. Routing the console through <strong>UART&nbsp;TX DMA</strong> means the CPU writes a buffer pointer and walks away — the DMA engine clocks out kilobytes of telemetry while the 1&nbsp;kHz loop ticks undisturbed. This single design choice is the difference between a stable autopilot and one that twitches every time you log a line.</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Bus arbitration in software</div>
+        <p>Each peripheral instance is independent, but they can fight over DMA streams and interrupt priorities. Give the time-critical bus (here, the IMU SPI and its DMA) a <strong>higher NVIC priority</strong> than the console UART. The buses run in parallel hardware; your job is only to rank whose interrupt wins when two fire at once.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>⑤ Your turn</h2>
+      <div class="layer"><span class="step">⑤</span> Practice <small>you write &amp; decide</small></div>
+      <p>Three checks. Tap an answer, type a number, or reveal a coding challenge. Your progress is saved on this device and shown on the home page.</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="stm07-buses">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">A USART running in standard async mode uses <em>oversampling by 16</em>. What is the receiver doing with those 16 internal clock ticks per bit, and which of the three buses is inherently <strong>full duplex</strong>?</div>
+        <ul class="ex-options">
+          <li data-correct="false">It sends each bit 16 times for redundancy; <strong>I²C</strong> is full duplex.</li>
+          <li data-correct="true">It samples near the <em>centre</em> of each bit (≈ tick 8 of 16) to tolerate baud error; <strong>SPI</strong> is full duplex.</li>
+          <li data-correct="false">It clocks the data 16× faster onto the wire; <strong>UART</strong> is full duplex but I²C is not.</li>
+          <li data-correct="false">Oversampling sets the parity bit; all three buses are equally full duplex.</li>
+        </ul>
+        <div class="ex-explain">Oversampling-by-16 lets the receiver lock onto the start-bit edge and then sample each bit near its <strong>midpoint</strong> (around the 8th of 16 ticks), giving slack against the ±2% baud mismatch. <strong>SPI</strong> is full duplex — MOSI and MISO carry a bit each way on every clock. I²C is half duplex (one shared SDA line), and while UART has separate TX/RX wires, the question targets the synchronous buses: SPI is the full-duplex one among I²C/SPI.</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="stm07-usartdiv" data-answer="45.57" data-tol="0.3">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">A USART is clocked from <strong>$f_{CK} = 84\,\text{MHz}$</strong> and you want <strong>115200 baud</strong> with oversampling by 16. Compute the exact <strong>USARTDIV</strong> (the fractional divisor before rounding). Recall $\text{USARTDIV} = \dfrac{f_{CK}}{16\cdot\text{baud}}$.</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">USARTDIV</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$\text{USARTDIV} = \dfrac{84\times10^{6}}{16 \cdot 115200} = \dfrac{84\times10^{6}}{1\,843\,200} \approx 45.57$. You program mantissa $45$ and fraction $\lfloor 0.5729\times16 \rceil = 9$, giving $\text{BRR}=0x2D9$ and an actual baud of $115226$ — about $+0.02\%$ error, well inside the ±2% budget. (Sanity check the SPI side too: with $f_{PCLK}=84\,\text{MHz}$ and $\text{BR}=2$, $f_{SPI}=84/2^{3}=10.5\,\text{MHz}$.)</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="stm07-uart-dma">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — non-blocking telemetry</div>
+        <div class="ex-q">Write a function <code>send_telemetry()</code> that formats a line like <code>"t=12345 roll=1.20\r\n"</code> into a buffer and ships it over <strong>USART1 via DMA</strong>, returning immediately. It must refuse to start a new transfer while a previous DMA send is still in flight (no buffer corruption). Use HAL.</div>
+        <details class="ex-acc">
+          <summary>Hint</summary>
+          <div class="acc-body">Keep a <code>volatile uint8_t tx_busy</code> flag. Set it before calling <code>HAL_UART_Transmit_DMA</code>; clear it in <code>HAL_UART_TxCpltCallback</code>. If <code>tx_busy</code> is already set when <code>send_telemetry()</code> is called, just drop the line (or return a "busy" status) instead of overwriting the buffer the DMA is still reading.</div>
+        </details>
+        <details class="ex-acc">
+          <summary>Show one solution</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">telemetry.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">static uint8_t tx_buf[64];
+static volatile uint8_t tx_busy = 0;
+
+// Returns 1 if the line was queued, 0 if a DMA send is still in flight.
+int send_telemetry(uint32_t t_ms, float roll) {
+  if (tx_busy) return 0;                 // previous DMA still reading tx_buf
+  int n = snprintf((char*)tx_buf, sizeof tx_buf,
+                   "t=%lu roll=%.2f\r\n", (unsigned long)t_ms, roll);
+  if (n &lt;= 0) return 0;
+  tx_busy = 1;                           // claim the buffer BEFORE arming DMA
+  if (HAL_UART_Transmit_DMA(&amp;huart1, tx_buf, (uint16_t)n) != HAL_OK) {
+    tx_busy = 0;                         // arming failed -&gt; release the buffer
+    return 0;
+  }
+  return 1;                              // DMA streams it; CPU is free now
+}
+
+// HAL fires this from the DMA transfer-complete ISR.
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
+  if (huart->Instance == USART1) tx_busy = 0;  // buffer free to reuse
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">The <code>tx_busy</code> flag is the whole lesson: DMA reads <code>tx_buf</code> from SRAM asynchronously, so you must <em>own</em> the buffer for the full transfer. Claiming it before arming and releasing it only in the completion callback makes the handoff race-free. A production system would replace the "drop the line" policy with a ring buffer so nothing is lost.</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> Chapter recap</div>
+        <p>You can now derive USARTDIV from $f_{CK}$ and a target baud, program <code>BRR</code>, and reason about the ±2% error budget; move UART traffic off the CPU with interrupts or DMA; talk to register-mapped I²C devices with <code>HAL_I2C_Mem_Read/Write</code> and respect the address-shift and pull-up rules; size SPI with $f_{SPI}=f_{PCLK}/2^{(\text{BR}+1)}$ and match CPOL/CPHA; and choose between the three buses on speed, wires, addressing, and distance. Next we put these buses to work driving real sensors and actuators under a deadline.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="Back to top">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+
+<!-- chapter-specific simulator -->
+<script>
+EM.sim("sim-baud", {
+  height: 250,
+  params: [
+    { key: "fck",  label: "f_CK (MHz)", min: 8,  max: 100, step: 1,    value: 84,     unit: "MHz" },
+    { key: "baud", label: "target baud", min: 9600, max: 921600, step: 9600, value: 115200, unit: "bps" }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h, pad = 22 * dpr;
+    var fck = v.fck * 1e6, baud = v.baud;
+    var div = fck / (16 * baud);            // exact USARTDIV
+    var mant = Math.floor(div);
+    var frac = Math.round((div - mant) * 16); // nearest sixteenth
+    var carry = 0;
+    if (frac === 16) { frac = 0; carry = 1; } // fraction overflow rolls into mantissa
+    var divProg = (mant + carry) + frac / 16;
+    var baudAct = fck / (16 * divProg);
+    var err = (baudAct - baud) / baud * 100;
+    var brr = (((mant + carry) << 4) | frac) >>> 0;
+
+    // error bar against the +/-2% budget
+    var midY = H * 0.62, barW = W - 2 * pad, x0 = pad;
+    ctx.strokeStyle = "#262d3a"; ctx.lineWidth = 1 * dpr;
+    ctx.beginPath(); ctx.moveTo(x0, midY); ctx.lineTo(x0 + barW, midY); ctx.stroke();
+    // budget band +/-2%
+    var clamp = function (e) { return Math.max(-2.6, Math.min(2.6, e)); };
+    var toX = function (e) { return x0 + barW * (clamp(e) + 2.6) / 5.2; };
+    ctx.fillStyle = "rgba(46,196,182,0.12)";
+    ctx.fillRect(toX(-2), midY - 14 * dpr, toX(2) - toX(-2), 28 * dpr);
+    ctx.strokeStyle = "#6e7681"; ctx.lineWidth = 1 * dpr;
+    [-2, 0, 2].forEach(function (e) {
+      ctx.beginPath(); ctx.moveTo(toX(e), midY - 16 * dpr); ctx.lineTo(toX(e), midY + 16 * dpr); ctx.stroke();
+    });
+    // the error marker
+    var ex = toX(err), inBudget = Math.abs(err) <= 2;
+    ctx.fillStyle = inBudget ? "#2ec4b6" : "#e5534b";
+    ctx.beginPath(); ctx.arc(ex, midY, 6 * dpr, 0, 7); ctx.fill();
+    ctx.fillStyle = "#6e7681"; ctx.font = (11 * dpr) + "px monospace";
+    ctx.fillText("-2%", toX(-2) - 12 * dpr, midY + 32 * dpr);
+    ctx.fillText("+2%", toX(2) - 12 * dpr, midY + 32 * dpr);
+
+    return "USARTDIV = <b>" + (Math.round(div * 1e4) / 1e4) +
+           "</b> &rarr; mant <b>" + (mant + carry) + "</b>, frac <b>" + frac +
+           "/16</b> &nbsp;·&nbsp; BRR = <b>0x" + brr.toString(16).toUpperCase() +
+           "</b><br>actual baud = <b>" + Math.round(baudAct) +
+           "</b> &nbsp;·&nbsp; error = <b style='color:" + (inBudget ? "#2ec4b6" : "#e5534b") +
+           "'>" + (Math.round(err * 1000) / 1000) + "%</b> " +
+           (inBudget ? "(within budget)" : "(OUT of budget!)");
+  }
+});
+</script>
+</body>
+</html>

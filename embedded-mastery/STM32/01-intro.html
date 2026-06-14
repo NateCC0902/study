@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>From AVR to ARM: Cortex-M, Memory Map &amp; Toolchains — Embedded Mastery</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="track-stm32" data-track="stm32" data-chapter="01-intro">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">STM32 · Ch 01</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">STM32 Track · Chapter 01 · Beginner (assumes Arduino track)</div>
+        <h1>From AVR to ARM: Cortex-M, Memory Map &amp; Toolchains</h1>
+        <p>You know how an 8-bit AVR blinks an LED. Now we step up to a 32-bit ARM Cortex-M core running an order of magnitude faster, with peripherals that do work <em>while the CPU sleeps</em>. Same physics, far bigger machine. We rebuild your mental model around a <strong>32-bit memory map</strong> and the toolchains that program it — then blink an LED two ways to see exactly what the comfort of a library costs you.</p>
+        <div class="meta">
+          <span>⏱ ~45 min</span><span>🧠 Mental model</span><span>🗺️ Memory map</span><span>🔧 Toolchains</span><span>⚡ Register-level blink</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="why-step-up"><span class="sec-no">1</span>Why leave the comfort of 8-bit AVR?</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>The ATmega328P served you well: 8-bit, 16 MHz, 2 KB of SRAM, a fistful of peripherals. It is a wonderful teacher precisely because it is small enough to hold entirely in your head. But the moment a project wants USB, an LCD, audio, motor control, or a TCP/IP stack, the 328P runs out of clock cycles and RAM long before it runs out of pins. You need a bigger machine — and the industry's answer is the <strong>ARM Cortex-M</strong> family, packaged by ST Microelectronics as <strong>STM32</strong>.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence model</div>
+        <p>An STM32 is the same idea as your Arduino's MCU — one chip with CPU, memory, and peripherals — but built on a <strong>32-bit ARM core</strong> running 4–10× faster, with 10–100× more memory and peripherals smart enough to move data <em>without</em> the CPU.</p>
+      </div>
+
+      <p>Concretely, compare the Uno to two STM32 boards you can buy for a few dollars: the <strong>STM32F103C8T6</strong> ("Blue Pill", a Cortex-M3) and the <strong>STM32F411CEU6</strong> ("Black Pill", a Cortex-M4 with floating-point unit). The numbers tell the story.</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Resource</th><th>ATmega328P (Uno)</th><th>STM32F103 (Blue Pill)</th><th>STM32F411 (Black Pill)</th></tr></thead>
+        <tbody>
+          <tr><td>Core</td><td>8-bit AVR</td><td>32-bit Cortex-M3</td><td>32-bit Cortex-M4 + FPU</td></tr>
+          <tr><td>Max clock</td><td><code>16 MHz</code></td><td><code>72 MHz</code></td><td><code>100 MHz</code></td></tr>
+          <tr><td>Flash</td><td><code>32 KB</code></td><td><code>64 KB</code></td><td><code>512 KB</code></td></tr>
+          <tr><td>SRAM</td><td><code>2 KB</code></td><td><code>20 KB</code></td><td><code>128 KB</code></td></tr>
+          <tr><td>DMA channels</td><td>none</td><td>7</td><td>16 (2 controllers)</td></tr>
+          <tr><td>Hardware FP</td><td>no</td><td>no</td><td>yes (single-precision)</td></tr>
+          <tr><td>Price (1 unit)</td><td>~$2 (chip)</td><td>~$2 (board)</td><td>~$4 (board)</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The real upgrade is DMA</div>
+        <p>More megahertz is nice, but the game-changer is <strong>DMA (Direct Memory Access)</strong>: a dedicated engine that copies bytes between a peripheral and memory <em>autonomously</em>. On an AVR, reading 1000 ADC samples means the CPU babysits every single one. On STM32, you arm a DMA channel and the CPU is free to do other work — or sleep to save power — while the samples stream into a buffer behind its back. That is how a 100 MHz chip out-performs its clock rate.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="cortex-m-families"><span class="sec-no">2</span>The Cortex-M family &amp; the STM32 line-up</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>one core architecture, many sizes</small></div>
+      <p>"Cortex-M" is not one chip — it is a <strong>licensable CPU core design</strong> from ARM. ST buys the core, then wraps its own memory and peripherals around it to make an STM32. Knowing which Cortex-M sits inside tells you the chip's instruction set, whether it has a floating-point unit, and roughly how much it costs.</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Core</th><th>Highlights</th><th>FPU?</th><th>Typical role</th></tr></thead>
+        <tbody>
+          <tr><td><code>Cortex-M0 / M0+</code></td><td>Smallest, cheapest, lowest power</td><td>no</td><td>Tiny low-cost MCUs (STM32F0, L0)</td></tr>
+          <tr><td><code>Cortex-M3</code></td><td>Full Thumb-2, the classic workhorse</td><td>no</td><td>STM32F1 (Blue Pill), F2</td></tr>
+          <tr><td><code>Cortex-M4</code></td><td>M3 + DSP instructions + optional FPU</td><td>single-precision</td><td>STM32F4, L4 — control &amp; signal work</td></tr>
+          <tr><td><code>Cortex-M7</code></td><td>Superscalar, caches, very fast</td><td>single + double</td><td>STM32F7, H7 — heavy compute</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p>ST groups its chips into <strong>lines</strong>, each line built on a chosen core and tuned for a purpose. The naming is logical once you see the pattern:</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>STM32 line</th><th>Core</th><th>Designed for</th></tr></thead>
+        <tbody>
+          <tr><td><code>STM32F0</code></td><td>M0</td><td>Entry-level, cost-sensitive</td></tr>
+          <tr><td><code>STM32F1</code></td><td>M3</td><td>Mainstream general purpose (F103 = Blue Pill)</td></tr>
+          <tr><td><code>STM32F4</code></td><td>M4 + FPU</td><td>High performance, DSP, control (F401/F411)</td></tr>
+          <tr><td><code>STM32F7 / H7</code></td><td>M7</td><td>Maximum performance, graphics, audio</td></tr>
+          <tr><td><code>STM32L0/L4/L5</code></td><td>M0+/M4/M33</td><td>Ultra-low-power, battery devices</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Reading a part number</div>
+        <p>In <code>STM32F411CEU6</code>: <code>F4</code> = line, <code>11</code> = sub-family, <code>C</code> = 48 pins, <code>E</code> = 512 KB Flash, <code>U</code> = QFN package, <code>6</code> = −40…85 °C temperature grade. You can decode any STM32 part number at a glance once you know the fields — and the datasheet's first page lists them all.</p>
+      </div>
+
+      <p>For this whole track we will keep two chips as running examples: the <strong>STM32F103</strong> (cheap, M3, the canonical first STM32) and the <strong>STM32F4</strong> family (M4 + FPU, fast, our workhorse). Everything you learn transfers across the line — the register names and memory map are remarkably consistent.</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="memory-map"><span class="sec-no">3</span>The 32-bit memory map</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>one flat 4 GB address space</small></div>
+      <p>This is the single most important idea in the jump from AVR to ARM. The AVR used a <strong>Harvard</strong> architecture: program and data lived in <em>separate</em> address spaces, which is why <code>PROGMEM</code> tricks existed. Cortex-M flips to a <strong>single, flat, 32-bit address space</strong> shared by everything — Flash, RAM, peripherals, and the core's own control registers all sit at different addresses in <em>one</em> map.</p>
+
+      <p>A 32-bit pointer can name <span>$2^{32}$</span> distinct byte addresses, which is exactly 4 GiB of address space, even though the chip only populates a few hundred kilobytes of it:</p>
+
+      <div class="math-box">
+      $$ 2^{32} \text{ bytes} = 4{,}294{,}967{,}296 \text{ bytes} = 4\,\text{GiB} = \texttt{0x0000\,0000} \;\text{…}\; \texttt{0xFFFF\,FFFF} $$
+      </div>
+
+      <p>ARM defines a standard layout for that 4 GiB so every Cortex-M chip feels familiar. The four regions you must memorize:</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Region</th><th>Base address</th><th>What lives here</th></tr></thead>
+        <tbody>
+          <tr><td>Flash (code)</td><td><code>0x0800 0000</code></td><td>Your program, the vector table, constants</td></tr>
+          <tr><td>SRAM (data)</td><td><code>0x2000 0000</code></td><td>Variables, stack, heap — volatile</td></tr>
+          <tr><td>Peripherals</td><td><code>0x4000 0000</code></td><td>GPIO, timers, UART, ADC… register blocks</td></tr>
+          <tr><td>Core (private)</td><td><code>0xE000 0000</code></td><td>NVIC, SysTick, SCB — the Cortex-M itself</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Everything is an address</div>
+        <p>On Cortex-M there is no special "I/O instruction" like the AVR's <code>OUT</code>. A peripheral register is <em>just memory</em> at some address up in the <code>0x4000 0000</code> region. To turn an LED on you literally write a 32-bit value to a numeric address. The whole machine is reachable through one pointer type.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>base + offset = register address</small></div>
+      <p>Each peripheral occupies a contiguous block starting at a <strong>base address</strong>. Within that block, each register sits at a fixed <strong>offset</strong> defined by the reference manual. The address of any register is simply:</p>
+
+      <div class="math-box">
+      $$ \text{addr}_{\text{reg}} = \text{base}_{\text{periph}} + \text{offset}_{\text{reg}} $$
+      </div>
+
+      <p>Work a concrete one. On the STM32F4, <strong>GPIO port A</strong> hangs off the AHB1 bus with base address <code>0x4002 0000</code>. The <strong>output data register</strong> (<code>ODR</code>) — the one whose bits map directly to pin levels — sits at offset <code>0x14</code> inside the port. So:</p>
+
+      <div class="math-box">
+      $$ \texttt{GPIOA->ODR} = \underbrace{\texttt{0x4002\,0000}}_{\text{base}} + \underbrace{\texttt{0x14}}_{\text{offset}} = \texttt{0x4002\,0014} $$
+      </div>
+
+      <p>In hex that addition is painless: the low nibble <code>0x0 + 0x14 = 0x14</code>, everything above is unchanged. The CMSIS struct <code>GPIOA->ODR</code> that you will write in code resolves, at compile time, to exactly this constant. The compiler is doing base-plus-offset arithmetic so you do not have to remember <code>0x40020014</code> — but now you know where it comes from.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — Flash is at 0x0800 0000, not 0x0</div>
+        <p>The very bottom of the map (<code>0x0000 0000</code>) is an <em>alias</em> region whose contents depend on the boot pins — it usually mirrors Flash so the CPU can fetch its first instruction there. But the <strong>real, fixed</strong> address of your code Flash is <code>0x0800 0000</code>. Always link and reason about Flash at <code>0x0800 0000</code>; treat the <code>0x0</code> alias as a boot-time convenience only.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="registers-are-memory"><span class="sec-no">4</span>Registers are memory: <code>volatile</code> &amp; CMSIS</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>If a register is just memory at a known address, you can reach it with a plain pointer. Here is GPIOA's <code>ODR</code> the raw way, then the way you will actually write it:</p>
+
+      <div class="codeblock">
+        <div class="code-head">raw_register.c <span class="lang">C (bare metal)</span></div>
+<pre><code class="language-c">#include &lt;stdint.h&gt;
+
+// The address we derived: GPIOA base 0x40020000 + ODR offset 0x14.
+// 'volatile' is MANDATORY: it tells the compiler this memory can change
+// on its own (hardware!), so it must NOT cache the value in a CPU register
+// or optimize the access away.
+#define GPIOA_ODR  (*(volatile uint32_t *)0x40020014u)
+
+void set_pin5_high(void) {
+    GPIOA_ODR |= (1u &lt;&lt; 5);   // set bit 5 → drive PA5 high
+}
+</code></pre>
+      </div>
+
+      <p>Writing magic numbers everywhere is error-prone, so ARM and ST ship <strong>CMSIS</strong> (Cortex Microcontroller Software Interface Standard): a set of header files that describe every peripheral as a C <code>struct</code> whose members line up <em>exactly</em> with the register offsets. You include one device header and the addresses are done for you:</p>
+
+      <div class="codeblock">
+        <div class="code-head">cmsis_register.c <span class="lang">C (CMSIS)</span></div>
+<pre><code class="language-c">#include "stm32f4xx.h"   // ST's CMSIS device header
+
+// GPIO_TypeDef is a struct laid out to match the hardware:
+//   typedef struct {
+//     volatile uint32_t MODER;   // offset 0x00
+//     volatile uint32_t OTYPER;  // offset 0x04
+//     volatile uint32_t OSPEEDR; // offset 0x08
+//     volatile uint32_t PUPDR;   // offset 0x0C
+//     volatile uint32_t IDR;     // offset 0x10
+//     volatile uint32_t ODR;     // offset 0x14  ← here
+//     volatile uint32_t BSRR;    // offset 0x18
+//     ...
+//   } GPIO_TypeDef;
+// And: #define GPIOA ((GPIO_TypeDef *) 0x40020000UL)
+
+void set_pin5_high(void) {
+    GPIOA-&gt;ODR |= (1u &lt;&lt; 5);   // identical to the raw version, but readable
+}
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Why <code>volatile</code> is non-negotiable</div>
+        <p>A normal variable lives in RAM and only your code changes it, so the compiler may keep it in a CPU register and skip redundant reads. A <em>hardware</em> register can change between two of your instructions (a button was pressed; a byte arrived) and writing it has <em>side effects</em> (a pin moves). <code>volatile</code> forces the compiler to emit a real load/store for <strong>every</strong> access, in program order. Forget it and your loop polling <code>USART-&gt;SR</code> can hang forever because the compiler "knows" the value never changes. CMSIS marks every register <code>volatile</code> for you — but you must understand why.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="toolchains"><span class="sec-no">5</span>Toolchains &amp; the HAL / LL / CMSIS choice</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>three levels of abstraction</small></div>
+      <p>On Arduino there was one way to write code: the Arduino core. STM32 gives you a <em>spectrum</em>, from "click a GUI and it generates code" down to "poke registers yourself". The standard tooling is <strong>STM32CubeIDE</strong> (a free Eclipse-based IDE) with <strong>STM32CubeMX</strong>, a graphical configurator that lets you click pins and clocks and then emits a project. The interesting choice is which <em>abstraction layer</em> your code sits on:</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Layer</th><th>What it is</th><th>Ease</th><th>Control</th><th>Code size</th><th>Speed</th></tr></thead>
+        <tbody>
+          <tr><td><strong>HAL</strong> (Hardware Abstraction Layer)</td><td>Portable, high-level functions (<code>HAL_GPIO_TogglePin</code>)</td><td>Highest</td><td>Lowest</td><td>Largest</td><td>Slowest</td></tr>
+          <tr><td><strong>LL</strong> (Low-Layer)</td><td>Thin inline wrappers, ~1:1 with registers</td><td>Medium</td><td>High</td><td>Small</td><td>Fast</td></tr>
+          <tr><td><strong>CMSIS / bare register</strong></td><td>You write <code>GPIOA-&gt;BSRR = …</code> directly</td><td>Lowest</td><td>Highest</td><td>Smallest</td><td>Fastest</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> What each layer trades</div>
+        <p><strong>HAL</strong> buys you portability and speed of development — the same call works across the whole STM32 line, with built-in error handling and timeouts — at the cost of larger, slower code and a stack of function calls between you and the silicon. <strong>LL</strong> keeps you readable but compiles down to nearly the same instructions as hand-written register access. <strong>Bare CMSIS</strong> gives ultimate control and the tightest code, but you own every datasheet detail and there is no safety net. Most products start in HAL and drop to LL/registers only on the hot paths that need it.</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — HAL bloat in a bootloader</div>
+        <p>A bootloader that must fit in the first 16 KB of Flash often <em>cannot</em> afford HAL: pulling in <code>HAL_GPIO</code>, <code>HAL_RCC</code>, and the SysTick machinery can blow the budget before you have done anything useful. Teams routinely write bootloaders in pure CMSIS register code for exactly this reason, then switch to HAL in the main application where the Flash budget is generous. Choosing the layer per-component, not per-project, is a mark of an experienced firmware engineer.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="boot-process"><span class="sec-no">6</span>How an STM32 boots</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>before main() runs</small></div>
+      <p>On the Uno a bootloader copied your program in and jumped to it. On STM32 there is no Arduino bootloader by default — the chip boots <em>directly</em> from Flash using a small, ARM-defined ritual. Understanding it demystifies every "my global is zero but I set it to 5" bug you will ever hit.</p>
+
+      <p>At <code>0x0800 0000</code>, the very first words of Flash are not code — they are the <strong>vector table</strong>. The first 32-bit word is the <strong>initial stack pointer</strong>; the second word is the <strong>reset vector</strong>, the address of the first instruction to run. The CPU loads these two values on power-up before executing anything:</p>
+
+      <div class="codeblock">
+        <div class="code-head">vector_table (conceptual) <span class="lang">C (CMSIS)</span></div>
+<pre><code class="language-c">// First entries of the vector table, placed at 0x08000000 by the linker.
+// The CPU reads word[0] into SP, then jumps to word[1] (Reset_Handler).
+__attribute__((section(".isr_vector")))
+const uint32_t vector_table[] = {
+    (uint32_t)&amp;_estack,          // [0] 0x08000000: initial Main Stack Pointer
+    (uint32_t)Reset_Handler,     // [1] 0x08000004: reset vector → first code
+    (uint32_t)NMI_Handler,       // [2] 0x08000008: non-maskable interrupt
+    (uint32_t)HardFault_Handler, // [3] 0x0800000C: hard fault
+    // ... SysTick, then one entry per peripheral IRQ ...
+};
+</code></pre>
+      </div>
+
+      <p>The reset vector points at <code>Reset_Handler</code>, a startup routine (usually <code>startup_stm32f4xx.s</code>) that prepares the C runtime <em>before</em> your <code>main()</code> can safely run. It does four jobs in order:</p>
+
+      <div class="mermaid">
+flowchart TB
+    P([Power / Reset]) --&gt; SP["Load SP ← word[0]<br/>at 0x08000000"]
+    SP --&gt; RV["Jump to Reset_Handler<br/>(word[1] @ 0x08000004)"]
+    RV --&gt; DATA["Copy .data<br/>Flash → SRAM<br/>(initialized globals)"]
+    DATA --&gt; BSS["Zero .bss<br/>in SRAM<br/>(uninit globals)"]
+    BSS --&gt; SI["Call SystemInit()<br/>set up clocks / FPU"]
+    SI --&gt; MAIN["Call main()"]
+    MAIN --&gt; LOOP(["your while(1) loop"])
+  </div>
+
+  <div class="callout key">
+    <div class="c-title"><span class="ico">🔑</span> Why globals start at the right value</div>
+    <p>An initialized global like <code>int speed = 5;</code> stores its <em>value</em> (5) in Flash but lives at runtime in SRAM. The startup code's <strong>.data copy</strong> moves those bytes Flash→SRAM. An uninitialized global like <code>int count;</code> must read as 0 per the C standard — that is the <strong>.bss zeroing</strong> step. If you ever skip or break startup (common when hand-rolling a bare-metal project), globals contain garbage and you will chase a ghost. This is the firmware version of "it works on my machine".</p>
+  </div>
+
+  <div class="callout warn">
+    <div class="c-title"><span class="ico">⚠️</span> Pitfall — SystemInit runs before main</div>
+    <p><code>SystemInit()</code> typically configures the PLL so the chip actually runs at 72/84/100 MHz instead of its slow internal default. If your timing is mysteriously 8× too slow, your clock tree was never set up — check that <code>SystemInit()</code> ran and that <code>SystemCoreClock</code> matches reality.</p>
+  </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="blink-two-ways"><span class="sec-no">7</span>Blink two ways: HAL vs. raw registers</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>the same blink, two abstraction levels</small></div>
+      <p>Time to make the contrast concrete. Both programs blink the user LED on an STM32F4 Nucleo/Black Pill (PA5). First the <strong>HAL</strong> version — short, portable, what CubeMX generates:</p>
+
+      <div class="codeblock">
+        <div class="code-head">blink_hal.c <span class="lang">C (HAL)</span></div>
+<pre><code class="language-c">#include "stm32f4xx_hal.h"
+
+int main(void) {
+    HAL_Init();                       // sets up SysTick, flash latency, etc.
+    __HAL_RCC_GPIOA_CLK_ENABLE();     // turn on the clock to GPIO port A
+
+    GPIO_InitTypeDef io = {0};
+    io.Pin   = GPIO_PIN_5;            // PA5
+    io.Mode  = GPIO_MODE_OUTPUT_PP;   // push-pull output
+    io.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOA, &amp;io);
+
+    while (1) {
+        HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_5); // flip the pin
+        HAL_Delay(500);                        // 500 ms, driven by SysTick
+    }
+}
+</code></pre>
+      </div>
+
+      <p>Now the same blink in <strong>raw register</strong> code. No library beyond the CMSIS struct definitions — every line maps to a datasheet field. Read the comments; this is the whole point of the chapter:</p>
+
+      <div class="codeblock">
+        <div class="code-head">blink_registers.c <span class="lang">C (CMSIS / bare metal)</span></div>
+<pre><code class="language-c">#include "stm32f4xx.h"   // just the register-struct definitions
+
+int main(void) {
+    // 1) Peripherals are clock-gated OFF at reset to save power.
+    //    Enable the clock to GPIOA via RCC->AHB1ENR bit 0 (GPIOAEN).
+    RCC-&gt;AHB1ENR |= (1u &lt;&lt; 0);                 // RCC_AHB1ENR_GPIOAEN
+
+    // 2) MODER has 2 bits per pin. Set PA5 to '01' = general-purpose output.
+    //    Clear the 2-bit field first, then write 01.
+    GPIOA-&gt;MODER &amp;= ~(3u &lt;&lt; (5 * 2));          // clear bits 11:10
+    GPIOA-&gt;MODER |=  (1u &lt;&lt; (5 * 2));          // set 01 → output
+
+    while (1) {
+        // 3) BSRR is the atomic set/reset register. Writing a 1 to a LOW
+        //    bit SETS the pin; writing 1 to a HIGH bit (bit + 16) RESETS it.
+        //    No read-modify-write, so no interrupt can corrupt it.
+        GPIOA-&gt;BSRR = (1u &lt;&lt; 5);               // PA5 = HIGH
+        for (volatile uint32_t d = 0; d &lt; 800000; d++) { }   // crude delay
+
+        GPIOA-&gt;BSRR = (1u &lt;&lt; (5 + 16));        // PA5 = LOW (reset half)
+        for (volatile uint32_t d = 0; d &lt; 800000; d++) { }
+    }
+}
+</code></pre>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> What the contrast teaches</div>
+        <p>The HAL version reads like prose and works on any STM32; the register version reads like the datasheet and is a few instructions long. Three details only the raw version exposes: peripherals are <strong>clock-gated off</strong> until you enable them in <code>RCC</code> (a top cause of "my GPIO does nothing" — the AVR never made you do this); <code>MODER</code> uses <strong>two bits per pin</strong>, so you mask then set; and <code>BSRR</code> lets you <strong>atomically</strong> set or reset a pin without a read-modify-write that an interrupt could corrupt. HAL does all three for you — now you know what it is hiding.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — forgetting the RCC clock enable</div>
+        <p>The single most common beginner bug on STM32: you configure <code>MODER</code> and write <code>BSRR</code> perfectly, and nothing happens — because you never set the <code>GPIOAEN</code> bit in <code>RCC-&gt;AHB1ENR</code>. A clock-gated peripheral ignores all writes silently. Enable the clock <em>first</em>, always.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="why-industry"><span class="sec-no">8</span>Real case: why industry standardized on STM32</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>this ships in millions of products</small></div>
+      <p>Walk through the teardown of almost any modern gadget — a drone flight controller, a 3-D printer board, an e-bike controller, an industrial sensor — and you will keep finding STM32 chips. That dominance is not an accident; it is four forces stacking up.</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Force</th><th>Why it locks in adoption</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Peripherals</strong></td><td>A huge, consistent catalog: timers, ADC/DAC, USB, CAN, SPI/I²C/UART, DMA — pick a part with exactly what you need and the code ports across the line.</td></tr>
+          <tr><td><strong>Performance</strong></td><td>Cortex-M scales from cents-cheap M0 to 480 MHz M7 dual-core H7, all binary-compatible at the source level. Start small, scale up without a rewrite.</td></tr>
+          <tr><td><strong>Ecosystem</strong></td><td>Free CubeIDE/CubeMX, CMSIS, mountains of community code, and the same ARM toolchain (<code>arm-none-eabi-gcc</code>) the whole industry uses. Hiring and tooling are solved problems.</td></tr>
+          <tr><td><strong>Price &amp; supply</strong></td><td>Multiple sources, broad availability, and dollar-class boards make prototyping and production both cheap.</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — the flight controller in your drone</div>
+        <p>Open-source flight stacks like Betaflight and ArduPilot target STM32 F4/F7/H7 almost exclusively. The reason is concrete: a quadcopter needs to read a gyro over SPI, drive four motor ESCs with hardware timers, talk to a radio receiver over UART, and run a tight PID loop — <em>simultaneously</em>, at hundreds of hertz. The M4's FPU makes the PID math fast, DMA streams the sensor data, and the timer peripherals generate motor signals with zero CPU jitter. That exact combination of peripherals, performance, and free tooling is why an entire hobby-and-industry sits on STM32. You are learning the platform that flies the drone.</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>⑤ Your turn</h2>
+      <div class="layer"><span class="step">⑤</span> Practice <small>you write &amp; decide</small></div>
+      <p>Three checks. Tap an answer, type a number, or reveal a coding challenge. Your progress is saved on this device and shown on the home page.</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="stm01-memory-region">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You access <code>GPIOA-&gt;ODR</code> on an STM32F4 to read pin states. In which region of the 32-bit memory map does that register address live, and what does choosing <strong>HAL</strong> over raw registers mainly trade away?</div>
+        <ul class="ex-options">
+          <li data-correct="false">SRAM region (<code>0x2000 0000</code>); HAL trades away portability.</li>
+          <li data-correct="true">Peripheral region (<code>0x4000 0000</code>); HAL trades away code size and speed.</li>
+          <li data-correct="false">Flash region (<code>0x0800 0000</code>); HAL trades away nothing at all.</li>
+          <li data-correct="false">Core/private region (<code>0xE000 0000</code>); HAL trades away portability.</li>
+        </ul>
+        <div class="ex-explain">GPIO register blocks sit in the <strong>peripheral region</strong> at <code>0x4000 0000</code> (GPIOA's base is <code>0x40020000</code>). HAL buys ease and portability; what it costs is <strong>code size and speed</strong> — extra function-call layers and larger binaries versus a one-line register write. Flash holds code, SRAM holds variables, and <code>0xE000 0000</code> is the core's own NVIC/SysTick.</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="stm01-reg-address" data-answer="0x40020014" data-tol="0">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">On the STM32F4, GPIO port A has base address <code>0x40020000</code> and the output data register <code>ODR</code> sits at offset <code>0x14</code>. Using $\text{addr}_{\text{reg}} = \text{base} + \text{offset}$, what is the absolute address of <code>GPIOA-&gt;ODR</code>? Enter it in hex (e.g. <code>0x40020014</code>) or as a decimal integer.</div>
+        <input class="ex-input" type="text" inputmode="text" placeholder="0x........"><span class="ex-unit">addr</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$\texttt{0x40020000} + \texttt{0x14} = \texttt{0x40020014}$ (decimal $1073872916$). In hex only the low byte changes: $\texttt{0x00} + \texttt{0x14} = \texttt{0x14}$, everything above untouched. This is the exact constant the CMSIS struct <code>GPIOA-&gt;ODR</code> compiles down to.</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="stm01-register-blink">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — register-level blink on a Blue Pill</div>
+        <div class="ex-q">The STM32F103 "Blue Pill" has its on-board LED on <strong>PC13</strong> (and it is <em>active-low</em> — driving the pin LOW lights it). The F1 family uses different GPIO registers than the F4: a <strong>CRH</strong> (configuration register high) for pins 8–15, an <strong>APB2ENR</strong> clock-enable for GPIOC, and a <strong>BSRR</strong>/<strong>BRR</strong> pair. Write a bare-register blink for PC13. Think: which clock bus, which config field, how to toggle.</div>
+        <details class="ex-acc">
+          <summary>Hint</summary>
+          <div class="acc-body">On F1, GPIOC is on the <strong>APB2</strong> bus: set the <code>IOPCEN</code> bit (bit 4) in <code>RCC-&gt;APB2ENR</code>. PC13 is configured by <code>GPIOC-&gt;CRH</code>: each pin uses a 4-bit field, and PC13's field starts at bit <code>(13 − 8) × 4 = 20</code>. Write <code>0b0010</code> there for "output, 2 MHz, push-pull". Use <code>BSRR</code> to set the pin (LED off, since active-low) and the upper half of <code>BSRR</code> — i.e. <code>BRR</code> or bit+16 — to reset it (LED on).</div>
+        </details>
+        <details class="ex-acc">
+          <summary>Show one solution</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">blink_pc13.c <span class="lang">C (CMSIS / bare metal)</span></div>
+<pre><code class="language-c">#include "stm32f1xx.h"
+
+int main(void) {
+    // 1) GPIOC is on APB2. Enable its clock (IOPCEN = bit 4).
+    RCC-&gt;APB2ENR |= (1u &lt;&lt; 4);                 // RCC_APB2ENR_IOPCEN
+
+    // 2) PC13 lives in CRH (pins 8..15). Its 4-bit field starts at
+    //    bit (13-8)*4 = 20. Clear it, then write 0010 =
+    //    MODE=10 (output 2 MHz), CNF=00 (push-pull).
+    GPIOC-&gt;CRH &amp;= ~(0xFu &lt;&lt; 20);               // clear PC13's 4-bit field
+    GPIOC-&gt;CRH |=  (0x2u &lt;&lt; 20);               // 0010: output, push-pull
+
+    while (1) {
+        // PC13 is ACTIVE-LOW: reset = LED on, set = LED off.
+        GPIOC-&gt;BSRR = (1u &lt;&lt; (13 + 16));       // reset PC13 → LED ON
+        for (volatile uint32_t d = 0; d &lt; 300000; d++) { }
+
+        GPIOC-&gt;BSRR = (1u &lt;&lt; 13);              // set PC13   → LED OFF
+        for (volatile uint32_t d = 0; d &lt; 300000; d++) { }
+    }
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">Two lessons land here. First, the <strong>register map differs by family</strong>: F1 uses <code>CRH</code>/<code>CRL</code> with 4-bit fields and APB2 clocks, while F4 uses <code>MODER</code> with 2-bit fields and AHB1 — yet the workflow (enable clock → configure mode → toggle via <code>BSRR</code>) is identical. Second, <strong>active-low</strong> hardware inverts your logic: resetting the pin lights the LED. This is why HAL exists — but also why reading the reference manual is a skill you now have.</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> Chapter recap</div>
+        <p>You stepped from 8-bit AVR to 32-bit ARM Cortex-M. You can now place the four memory regions — Flash <code>0x0800 0000</code>, SRAM <code>0x2000 0000</code>, peripherals <code>0x4000 0000</code>, core <code>0xE000 0000</code> — and compute any register address as <strong>base + offset</strong> (we derived <code>GPIOA-&gt;ODR = 0x40020014</code>). You know why hardware registers must be <code>volatile</code>, how CMSIS structs map onto them, and the HAL / LL / CMSIS trade between ease, control, size, and speed. You can trace the boot ritual — stack pointer, reset vector, <code>.data</code> copy, <code>.bss</code> zero, <code>SystemInit</code>, then <code>main</code> — and you blinked an LED both with HAL and with raw <code>RCC</code>/<code>MODER</code>/<code>BSRR</code> writes. Next we go deeper on the clock tree and GPIO so every one of those register fields becomes second nature.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="Back to top">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

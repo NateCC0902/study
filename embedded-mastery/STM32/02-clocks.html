@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>The Clock Tree: HSI/HSE/PLL, RCC &amp; SysTick — Embedded Mastery</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="track-stm32" data-track="stm32" data-chapter="02-clocks">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">STM32 · Ch 02</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">STM32 Track · Chapter 02 · Beginner→Intermediate</div>
+        <h1>The Clock Tree: HSI/HSE/PLL, RCC &amp; SysTick</h1>
+        <p>This is the single most common thing beginners get wrong on STM32. The chip boots <em>slow</em>, every peripheral is born <em>asleep</em>, and nothing you write works until you understand where the megahertz come from. We'll build the clock tree from one oscillator up — then derive 168&nbsp;MHz with real numbers and a real bug story.</p>
+        <div class="meta">
+          <span>⏱ ~45 min</span><span>🧠 Clock tree</span><span>⚡ RCC registers</span><span>🔧 PLL math</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="why-clocks"><span class="sec-no">1</span>Why a chip needs a clock at all</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>An MCU is a giant grid of synchronous logic. Almost every flip-flop inside it updates on the edge of a <strong>clock</strong> — a square wave that beats the rhythm for the whole chip. No clock, no instructions executed, no UART bytes shifted, no timer counting. The clock <em>is</em> the heartbeat, and on STM32 there isn't just one: there's a whole <strong>tree</strong> of derived clocks, each feeding a different region of silicon.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence model</div>
+        <p>On STM32, <strong>every peripheral runs on a clock that is derived, step by step, from a single chosen source</strong> — and that peripheral does nothing, reads as zero, and consumes no power until you explicitly switch its clock on.</p>
+      </div>
+
+      <p>Here's the part that ambushes everyone coming from Arduino: an Arduino Uno wakes up at its full 16&nbsp;MHz and every pin is ready. An STM32 does <em>not</em>. After reset an STM32F4 runs at a leisurely <strong>16&nbsp;MHz</strong> off its internal oscillator, the PLL is off, the GPIO ports are <em>unclocked</em>, and if you poke a peripheral register it stares back at you with zeros. The chip hands you a slow, mostly-dark machine and trusts you to bring it up. That bring-up is what this chapter is about.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Two jobs you must do at boot</div>
+        <p><strong>(1) Choose &amp; raise the system clock</strong> — pick a source, run it through the PLL, switch the CPU onto it. <strong>(2) Enable each peripheral's clock</strong> via the RCC before you touch it. Skip job 2 and the peripheral is electrically present but functionally dead.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="clock-sources"><span class="sec-no">2</span>The four oscillators: HSI, HSE, LSI, LSE</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>where the raw beats come from</small></div>
+      <p>Before anything is multiplied or divided, the megahertz have to be <em>generated</em>. STM32 gives you four raw clock sources, split along two axes: <strong>internal vs. external</strong> (precision/cost) and <strong>high-speed vs. low-speed</strong> (run the CPU vs. keep time while asleep).</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Source</th><th>Means</th><th>Typical freq</th><th>Accuracy</th><th>Used for</th></tr></thead>
+        <tbody>
+          <tr><td><code>HSI</code></td><td>High-Speed Internal</td><td>16 MHz (F4); 8 MHz (F1)</td><td>±1–2% (RC, drifts with temp)</td><td>Boot default, quick start, fallback</td></tr>
+          <tr><td><code>HSE</code></td><td>High-Speed External</td><td>4–26 MHz crystal (often 8)</td><td>±20–50 ppm (crystal)</td><td>PLL input when timing must be exact</td></tr>
+          <tr><td><code>LSI</code></td><td>Low-Speed Internal</td><td>~32 kHz RC</td><td>Coarse (±5–10%)</td><td>Independent watchdog (IWDG), low-power RTC</td></tr>
+          <tr><td><code>LSE</code></td><td>Low-Speed External</td><td>32.768 kHz crystal</td><td>±20 ppm</td><td>Accurate RTC / calendar time-of-day</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Internal = convenient, External = precise</div>
+        <p><strong>HSI</strong> is an on-chip RC oscillator — free, instant, zero external parts, but it's an analog R·C network so its frequency wanders with temperature and voltage. <strong>HSE</strong> is a quartz crystal you solder on; quartz is mechanically resonant and astonishingly stable. The number <strong>32.768&nbsp;kHz</strong> for LSE isn't arbitrary — it's $2^{15}$, so a 15-bit counter overflows exactly once per second. Perfect for a clock that ticks seconds.</p>
+      </div>
+
+      <div class="layer"><span class="step">④</span> Real case <small>why USB forces a crystal</small></div>
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — USB will not tolerate HSI</div>
+        <p>Full-speed USB requires its 48&nbsp;MHz clock to be within about <strong>±0.25%</strong>. HSI's ±1–2% RC drift blows straight through that budget, so the host drops the device or it enumerates intermittently. This is why nearly every STM32 board with a USB port has an 8&nbsp;MHz (or 25&nbsp;MHz) crystal sitting next to the chip: you <em>need</em> HSE to clock USB reliably. The RC oscillator is fine for blinking an LED; it is not fine for a protocol with a tight frequency tolerance.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="pll-math"><span class="sec-no">3</span>The PLL: turning 8&nbsp;MHz into 168&nbsp;MHz</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>a frequency multiplier</small></div>
+      <p>Your crystal runs at 8&nbsp;MHz. Your CPU wants to run at 168&nbsp;MHz. The bridge between them is the <strong>PLL</strong> (Phase-Locked Loop): a feedback circuit containing a <em>voltage-controlled oscillator</em> (VCO) that the chip tunes until its divided-down output exactly matches the reference. The net effect is a clean, programmable <strong>frequency multiplier</strong> — feed in 8&nbsp;MHz, get out almost any frequency you like.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive the F4 formula</small></div>
+      <p>On the STM32F4 the PLL has three integer knobs in series: a pre-divider <span>$M$</span>, a multiplier <span>$N$</span>, and a post-divider <span>$P$</span> for the system clock. The signal flows in that order:</p>
+
+      <div class="math-box">
+        $$ f_{\text{VCO,in}} = \frac{f_{\text{in}}}{M}, \qquad f_{\text{VCO}} = f_{\text{VCO,in}} \cdot N, \qquad f_{\text{SYSCLK}} = \frac{f_{\text{VCO}}}{P} $$
+      </div>
+
+      <p>Stage one, <span>$M$</span>, drops the input into the VCO's required input window of <strong>1–2&nbsp;MHz</strong> (the datasheet recommends landing on exactly 2&nbsp;MHz, but 1&nbsp;MHz is legal and used by ST's own examples). Stage two, <span>$N$</span>, multiplies up to the VCO output, which must stay inside <strong>100–432&nbsp;MHz</strong>. Stage three, <span>$P \in \{2,4,6,8\}$</span>, divides back down to the 168&nbsp;MHz the core can sustain. Let's plug in the canonical F4 values <span>$f_{\text{in}}=8\,\text{MHz (HSE)},\,M=8,\,N=336,\,P=2$</span>:</p>
+
+      <div class="math-box">
+        $$ f_{\text{VCO,in}} = \frac{8\,\text{MHz}}{8} = 1\,\text{MHz}, \quad f_{\text{VCO}} = 1\,\text{MHz}\times 336 = 336\,\text{MHz}, \quad f_{\text{SYSCLK}} = \frac{336\,\text{MHz}}{2} = 168\,\text{MHz} $$
+      </div>
+
+      <p>Both rails check out: VCO input 1&nbsp;MHz is in [1,&nbsp;2] and VCO output 336&nbsp;MHz is in [100,&nbsp;432]. There's a fourth knob, <span>$Q$</span>, that taps the same 336&nbsp;MHz VCO to make the USB / SDIO / RNG clock. We need 48&nbsp;MHz, so:</p>
+
+      <div class="math-box">
+        $$ f_{\text{USB}} = \frac{f_{\text{VCO}}}{Q} = \frac{336\,\text{MHz}}{7} = 48\,\text{MHz} \;\checkmark $$
+      </div>
+
+      <p>That single shared VCO is exactly <em>why</em> ST chose <span>$N=336$</span> rather than, say, 168 with <span>$P=1$</span>: 336 is divisible by 7, so the same loop yields both a clean 168&nbsp;MHz core <em>and</em> a spec-perfect 48&nbsp;MHz USB. The clock tree is a constraint-satisfaction puzzle, and these are the magic numbers that solve it.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The F1 version is simpler — one multiplier</div>
+        <p>An older STM32F1 (Blue Pill, "Bluepill" = STM32F103) has no <span>$M/N/P$</span> split. It feeds <span>$\text{HSE}=8\,\text{MHz}$</span> straight into a single multiplier <span>$\times 9$</span>: $\;f_{\text{SYSCLK}} = 8\,\text{MHz}\times 9 = 72\,\text{MHz}$, the F1's maximum. Same idea (multiply the crystal up), fewer dials.</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    HSE["HSE 8 MHz<br/>(crystal)"] --> MUX{Source<br/>select}
+    HSI["HSI 16 MHz<br/>(internal RC)"] --> MUX
+    MUX --> DM["÷M = 8<br/>→ 1 MHz"]
+    DM --> XN["×N = 336<br/>→ 336 MHz VCO"]
+    XN --> DP["÷P = 2<br/>→ 168 MHz"]
+    XN --> DQ["÷Q = 7<br/>→ 48 MHz USB"]
+    DP --> SYS["SYSCLK<br/>168 MHz"]
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="bus-prescalers"><span class="sec-no">4</span>Bus prescalers: HCLK, PCLK1, PCLK2 &amp; the timer ×2 rule</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>not everything can run at 168 MHz</small></div>
+      <p>The core can take 168&nbsp;MHz, but the peripheral buses cannot all keep up — and there's no point burning power clocking a slow UART at full tilt. So after SYSCLK, the clock fans out through a cascade of <strong>prescalers</strong> (programmable divide-by-power-of-two) that produce the bus clocks:</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Clock</th><th>Bus</th><th>Source</th><th>F4 max</th><th>Feeds</th></tr></thead>
+        <tbody>
+          <tr><td><code>HCLK</code></td><td>AHB</td><td>SYSCLK ÷ AHB_PSC</td><td>168 MHz</td><td>Core, DMA, memory, GPIO</td></tr>
+          <tr><td><code>PCLK1</code></td><td>APB1 (low-speed)</td><td>HCLK ÷ APB1_PSC</td><td>42 MHz</td><td>USART2/3, I²C, SPI2/3, TIM2–7</td></tr>
+          <tr><td><code>PCLK2</code></td><td>APB2 (high-speed)</td><td>HCLK ÷ APB2_PSC</td><td>84 MHz</td><td>USART1/6, SPI1, ADC, TIM1/8/9–11</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p>For the 168&nbsp;MHz config you set AHB&nbsp;÷1 (HCLK&nbsp;=&nbsp;168), APB1&nbsp;÷4 (PCLK1&nbsp;=&nbsp;42), APB2&nbsp;÷2 (PCLK2&nbsp;=&nbsp;84) — the maximum legal value on each bus.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>the rule that trips everyone</small></div>
+      <p>Now the subtle one. Timers hang off APB1/APB2, but ST's silicon plays a trick: <strong>if an APB prescaler is greater than 1, the timer clock on that bus is doubled.</strong> Formally, the clock feeding a timer's counter is</p>
+
+      <div class="math-box">
+        $$ f_{\text{TIMx}} = \begin{cases} f_{\text{PCLK}} & \text{if } \text{APB\_PSC} = 1 \\[4pt] 2 \cdot f_{\text{PCLK}} & \text{if } \text{APB\_PSC} > 1 \end{cases} $$
+      </div>
+
+      <p>So with APB1&nbsp;÷4: <span>$f_{\text{PCLK1}} = 42\,\text{MHz}$</span>, but a TIM2–7 counter actually clocks at <span>$2\times 42 = 84\,\text{MHz}$</span>. With APB2&nbsp;÷2: PCLK2&nbsp;=&nbsp;84&nbsp;MHz, but TIM1/8 see <span>$2\times 84 = 168\,\text{MHz}$</span>. Forget this factor of two and every PWM frequency and every <code>delay_us</code> you compute from <span>$f_{\text{PCLK}}$</span> comes out exactly half-right — the classic "my servo runs at double speed" bug. We'll lean on this formula hard in the timer chapter.</p>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="flash-wait-states"><span class="sec-no">5</span>Flash wait states: why fast cores must wait</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the memory can't keep up</small></div>
+      <p>There's a physical catch to running at 168&nbsp;MHz. The CPU fetches every instruction from on-chip <strong>Flash</strong>, and Flash is <em>slow</em> — its sense amplifiers need on the order of 25–30&nbsp;ns to return a word. At 168&nbsp;MHz a clock cycle is only <span>$1/168\,\text{MHz} \approx 5.95\,\text{ns}$</span>, far shorter than Flash can answer. If the core demanded data every cycle, it would read garbage.</p>
+
+      <p>The fix is <strong>wait states</strong>: the Flash controller stalls the CPU for a few cycles per fetch so the memory has time to respond. More speed ⇒ shorter cycles ⇒ <em>more</em> wait states. On the F4 (at 3.3&nbsp;V) the threshold is one wait state per ~30&nbsp;MHz band, and 168&nbsp;MHz lands at <strong>5 wait states</strong> (<code>FLASH_ACR_LATENCY_5WS</code>).</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — order of operations bricks the boot</div>
+        <p>You must raise the Flash latency <strong>before</strong> you switch SYSCLK up to 168&nbsp;MHz. Switch the clock first while latency is still 0, and the very next instruction fetch reads corrupt Flash — the core executes nonsense and hangs (or HardFaults) before your <code>main()</code> ever runs. Set latency high, <em>then</em> speed up. When you slow back down, drop latency <em>after</em>.</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> The ART accelerator hides the cost</div>
+        <p>5 wait states sounds brutal — a fetch every 6th cycle? In practice ST's <em>ART Accelerator</em> (a prefetch + instruction cache in front of Flash) keeps the pipeline fed, so linear code still runs at near zero-wait-state throughput. The wait states are real; the cache just usually pays them off your behalf. Enable <code>FLASH_ACR_PRFTEN | ICEN | DCEN</code> and forget about it.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="rcc-enable"><span class="sec-no">6</span>RCC: the bug everyone hits once</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>peripherals are gated off by default</small></div>
+      <p>Here is <em>the</em> rite-of-passage STM32 bug. You write perfect GPIO code to blink an LED on port&nbsp;D. You flash it. Nothing. No errors, no warnings, the debugger shows your code running — and the pin does nothing. Reads of <code>GPIOD-&gt;MODER</code> come back as <strong>zero</strong> no matter what you write.</p>
+
+      <p>The reason: to save power, the <strong>RCC</strong> (Reset and Clock Control) unit keeps every peripheral's clock <em>gated off</em> at reset. An unclocked peripheral is frozen — its registers won't even latch the values you write. Before you configure <em>any</em> peripheral, you must set its enable bit in the matching RCC register.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The rule, burned in</div>
+        <p>The enable register is named after the bus the peripheral lives on: <code>RCC-&gt;AHB1ENR</code> for GPIO &amp; DMA, <code>RCC-&gt;APB1ENR</code> for TIM2–7 / USART2 / I²C, <code>RCC-&gt;APB2ENR</code> for USART1 / SPI1 / ADC. Set the bit, <em>then</em> touch the peripheral. Never the other way round.</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <div class="codeblock">
+        <div class="code-head">gpio_clock.c <span class="lang">C / STM32 (CMSIS)</span></div>
+<pre><code class="language-c">#include "stm32f4xx.h"   // CMSIS device header: defines RCC, GPIOD, bit masks
+
+void led_init(void) {
+    // STEP 1 — turn ON the clock to GPIO port D. WITHOUT this line,
+    // every write below is silently dropped and MODER reads back 0.
+    RCC-&gt;AHB1ENR |= RCC_AHB1ENR_GPIODEN;   // bit 3 of AHB1ENR
+
+    // A read-back here forces the enable to take effect before we
+    // touch the peripheral (guards against a 1-cycle clock-domain gap).
+    (void)RCC-&gt;AHB1ENR;
+
+    // STEP 2 — now the peripheral is alive, configure PD12 as output.
+    // MODER is 2 bits/pin: 01 = general-purpose output. Pin 12 → bits 25:24.
+    GPIOD-&gt;MODER &amp;= ~(0x3u &lt;&lt; (12 * 2));    // clear the 2-bit field first
+    GPIOD-&gt;MODER |=  (0x1u &lt;&lt; (12 * 2));    // 01 = output mode
+
+    // STEP 3 — drive it. BSRR is the atomic set/reset register:
+    // writing bit 12 sets PD12 high with no read-modify-write race.
+    GPIOD-&gt;BSRR = (1u &lt;&lt; 12);               // PD12 = HIGH → LED on
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the symptom is total silence</div>
+        <p>Forgetting the <code>RCC-&gt;AHB1ENR</code> line produces <strong>no error of any kind</strong>. The compiler is happy, the linker is happy, the debugger single-steps cleanly through your GPIO writes — and the peripheral registers simply refuse to change. If a peripheral register reads back exactly what it had at reset no matter what you store to it, your <em>first</em> suspect is always a missing RCC clock-enable bit.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="systick"><span class="sec-no">7</span>SysTick: a 1&nbsp;ms heartbeat from SYSCLK</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the timer that's always there</small></div>
+      <p>Every Cortex-M core ships with a tiny 24-bit down-counter called <strong>SysTick</strong>, baked into the CPU itself (so it's identical across all STM32). You load a <em>reload value</em>; SysTick counts down from it to zero at the clock rate, fires an interrupt at zero, reloads, and repeats. It's the canonical way to make a periodic "tick" — the 1&nbsp;ms beat behind <code>HAL_Delay()</code> and most RTOS schedulers.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>computing the reload value</small></div>
+      <p>SysTick (by default) counts at the full processor clock <span>$f_{\text{SYSCLK}}$</span>. To get an interrupt every <span>$T$</span> seconds you need it to count <span>$f_{\text{SYSCLK}}\cdot T$</span> ticks. Because the counter spends one extra cycle passing through zero before reloading, the value you write is one less than the tick count:</p>
+
+      <div class="math-box">
+        $$ \text{RELOAD} = f_{\text{SYSCLK}} \cdot T - 1 $$
+      </div>
+
+      <p>For a <strong>1&nbsp;ms</strong> tick, <span>$T = 10^{-3}\,\text{s}$</span>, so $\text{RELOAD} = f_{\text{SYSCLK}}/1000 - 1$. On the F1 at 72&nbsp;MHz and the F4 at 168&nbsp;MHz:</p>
+
+      <div class="math-box">
+        $$ \text{RELOAD}_{72} = \frac{72\times10^{6}}{1000} - 1 = 71{,}999, \qquad \text{RELOAD}_{168} = \frac{168\times10^{6}}{1000} - 1 = 167{,}999 $$
+      </div>
+
+      <p>Both fit in SysTick's 24-bit register (max <span>$2^{24}-1 = 16{,}777{,}215$</span>), so a 1&nbsp;ms tick is comfortable at any STM32 speed. The CMSIS one-liner <code>SysTick_Config(SystemCoreClock / 1000)</code> does this exact subtraction for you and also enables the interrupt.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>by register and by helper</small></div>
+      <div class="codeblock">
+        <div class="code-head">systick.c <span class="lang">C / STM32 (CMSIS)</span></div>
+<pre><code class="language-c">#include "stm32f4xx.h"
+
+volatile uint32_t g_ticks = 0;   // 1 ms counter, written by the ISR
+
+// The CMSIS one-liner: load reload, clear count, pick clock source,
+// enable counter + interrupt. SystemCoreClock holds your real SYSCLK.
+void systick_init_1ms(void) {
+    SysTick_Config(SystemCoreClock / 1000u);   // e.g. 168000000/1000 = 168000
+}                                              //   → RELOAD = 168000 - 1 = 167999
+
+// The handler the NVIC calls every time SysTick hits zero (every 1 ms).
+void SysTick_Handler(void) {
+    g_ticks++;
+}
+
+// A non-blocking millisecond delay built on the tick.
+void delay_ms(uint32_t ms) {
+    uint32_t start = g_ticks;
+    while ((g_ticks - start) &lt; ms) {
+        __WFI();   // sleep until the next interrupt — saves power vs. busy-wait
+    }
+}
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — the tick that runs the whole product</div>
+        <p>That <code>g_ticks</code> counter is the spine of real firmware. FreeRTOS uses SysTick as its scheduler tick to time-slice tasks; bare-metal code uses it to schedule "do this every 10&nbsp;ms" jobs without blocking; comms stacks use it for timeouts and retransmits. One 24-bit counter, derived all the way down from your 8&nbsp;MHz crystal through the PLL, becomes the sense of <em>time</em> for the entire device. Get the clock tree wrong and every timeout in the product is wrong by the same factor.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="bringup"><span class="sec-no">8</span>Putting it together: the bring-up sequence</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>this is literally SystemInit()</small></div>
+      <p>Every piece now slots into one ordered ritual that runs before <code>main()</code>. The order is not optional — each step depends on the last, and getting it wrong (especially Flash latency) hangs the chip.</p>
+
+      <div class="mermaid">
+flowchart TB
+    A([Reset: HSI 16 MHz, PLL off]) --> B["Enable HSE<br/>wait for HSERDY"]
+    B --> C["Set Flash latency = 5 WS<br/>+ enable ART cache"]
+    C --> D["Set AHB÷1, APB1÷4, APB2÷2<br/>(bus prescalers)"]
+    D --> E["Configure PLL:<br/>M=8 N=336 P=2 Q=7, src=HSE"]
+    E --> F["Enable PLL<br/>wait for PLLRDY"]
+    F --> G["Switch SYSCLK → PLL<br/>wait SWS=PLL"]
+    G --> H["SysTick_Config(SYSCLK/1000)<br/>1 ms tick"]
+    H --> I([main runs at 168 MHz])
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Why each "wait for ready" matters</div>
+        <p>Oscillators and the PLL take real time to <em>stabilize</em> (HSE startup is milliseconds; PLL lock is microseconds). The <code>HSERDY</code> / <code>PLLRDY</code> flags are the hardware telling you "I'm stable now." Switch onto a source before its ready flag is set and you clock the core off a wobbling, half-locked signal — intermittent, maddening, heisenbug-grade failures. Always poll the ready bit.</p>
+      </div>
+
+      <p>In real projects you almost never hand-write this — STM32CubeMX generates <code>SystemClock_Config()</code> from a graphical clock-tree diagram, and CMSIS ships a <code>SystemInit()</code>. But now you can <em>read</em> that generated code, spot when the numbers are wrong, and fix the day your USB won't enumerate because someone left the source on HSI.</p>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>⑤ Your turn</h2>
+      <div class="layer"><span class="step">⑤</span> Practice <small>you write &amp; decide</small></div>
+      <p>Three checks. Tap an answer, type a number, or reveal a coding challenge. Your progress is saved on this device and shown on the home page.</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="stm02-rcc-symptom">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You write code to configure <code>GPIOD-&gt;MODER</code>, but every read of that register returns <strong>0</strong> and the LED never lights. The compiler and debugger show no errors. What is the most likely cause?</div>
+        <ul class="ex-options">
+          <li data-correct="false">The crystal (HSE) failed to start, so SYSCLK is 0</li>
+          <li data-correct="true">You forgot <code>RCC-&gt;AHB1ENR |= RCC_AHB1ENR_GPIODEN</code> — port D is unclocked, so its registers won't latch</li>
+          <li data-correct="false">PD12 needs an external pull-up resistor to read back as written</li>
+          <li data-correct="false">Flash wait states are too low for the current clock speed</li>
+        </ul>
+        <div class="ex-explain">This is <em>the</em> classic STM32 bug. At reset the RCC gates every peripheral clock off to save power; an unclocked peripheral is frozen and its registers ignore writes (reading back the reset value, usually 0). Enable the clock in the matching RCC <code>xENR</code> register <strong>before</strong> touching the peripheral. A dead HSE would hang the whole chip, not just port D; pull-ups don't affect output writes; wrong wait states corrupt code fetches, not GPIO reads.</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="stm02-systick-reload" data-answer="71999" data-tol="2">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">An STM32F1 runs SYSCLK at <strong>72&nbsp;MHz</strong>. SysTick counts at the full processor clock. What <strong>RELOAD</strong> value gives an interrupt exactly every <strong>1&nbsp;ms</strong>? (Recall $\text{RELOAD} = f_{\text{SYSCLK}}\cdot T - 1$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="reload value"><span class="ex-unit">ticks</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$\text{RELOAD} = \dfrac{72\times10^{6}}{1000} - 1 = 72{,}000 - 1 = 71{,}999$. The minus one accounts for the counter passing through zero. At 168&nbsp;MHz the same 1&nbsp;ms tick needs $168{,}000 - 1 = 167{,}999$. Both fit easily inside SysTick's 24-bit ($\le 16{,}777{,}215$) reload register.</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="stm02-clock-bringup">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — bring SYSCLK to 168&nbsp;MHz</div>
+        <div class="ex-q">Write the register-level sequence that switches an STM32F4 from its reset HSI to <strong>168&nbsp;MHz off the 8&nbsp;MHz HSE</strong> via the PLL (<code>M=8, N=336, P=2, Q=7</code>), then starts a 1&nbsp;ms SysTick. Get the <em>order</em> right: which step must come before the clock switch, and why? Set AHB÷1, APB1÷4, APB2÷2.</div>
+        <details class="ex-acc">
+          <summary>Hint</summary>
+          <div class="acc-body">Order is everything: <strong>(1)</strong> enable HSE and poll <code>RCC_CR_HSERDY</code>. <strong>(2)</strong> raise Flash latency to 5 WS <em>before</em> going fast, or the first 168&nbsp;MHz fetch reads garbage. <strong>(3)</strong> set the bus prescalers in <code>RCC-&gt;CFGR</code>. <strong>(4)</strong> program <code>RCC-&gt;PLLCFGR</code> with M/N/P/Q and HSE as source. <strong>(5)</strong> enable PLL, poll <code>PLLRDY</code>. <strong>(6)</strong> select PLL as SYSCLK and poll <code>SWS</code>. <strong>(7)</strong> <code>SysTick_Config(168000000/1000)</code>. Note <code>P=2</code> encodes as <code>0b00</code> in the PLLCFGR P field.</div>
+        </details>
+        <details class="ex-acc">
+          <summary>Show one solution</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">clock_168.c <span class="lang">C / STM32F4 (CMSIS)</span></div>
+<pre><code class="language-c">#include "stm32f4xx.h"
+
+void clock_config_168mhz(void) {
+    // (1) Start HSE (8 MHz crystal) and wait until it is stable.
+    RCC-&gt;CR |= RCC_CR_HSEON;
+    while (!(RCC-&gt;CR &amp; RCC_CR_HSERDY)) { }
+
+    // (2) Flash: 5 wait states + prefetch &amp; caches, BEFORE speeding up.
+    FLASH-&gt;ACR = FLASH_ACR_LATENCY_5WS | FLASH_ACR_PRFTEN
+               | FLASH_ACR_ICEN        | FLASH_ACR_DCEN;
+
+    // (3) Bus prescalers: AHB /1 (HCLK=168), APB1 /4 (42), APB2 /2 (84).
+    RCC-&gt;CFGR = RCC_CFGR_HPRE_DIV1 | RCC_CFGR_PPRE1_DIV4
+              | RCC_CFGR_PPRE2_DIV2;
+
+    // (4) PLL: M=8, N=336, P=2 (field=0), Q=7, source = HSE.
+    RCC-&gt;PLLCFGR = (8u   &lt;&lt; RCC_PLLCFGR_PLLM_Pos)   // /M = 8  → 1 MHz
+                 | (336u &lt;&lt; RCC_PLLCFGR_PLLN_Pos)   // xN = 336 → 336 MHz VCO
+                 | (0u   &lt;&lt; RCC_PLLCFGR_PLLP_Pos)   // /P: 00 = ÷2 → 168 MHz
+                 | (7u   &lt;&lt; RCC_PLLCFGR_PLLQ_Pos)   // /Q = 7  → 48 MHz USB
+                 | RCC_PLLCFGR_PLLSRC_HSE;          // PLL input = HSE
+
+    // (5) Turn the PLL on and wait for lock.
+    RCC-&gt;CR |= RCC_CR_PLLON;
+    while (!(RCC-&gt;CR &amp; RCC_CR_PLLRDY)) { }
+
+    // (6) Switch SYSCLK to the PLL and confirm the switch happened.
+    RCC-&gt;CFGR |= RCC_CFGR_SW_PLL;
+    while ((RCC-&gt;CFGR &amp; RCC_CFGR_SWS) != RCC_CFGR_SWS_PLL) { }
+
+    SystemCoreClock = 168000000u;   // tell CMSIS the new rate
+
+    // (7) 1 ms SysTick: RELOAD = 168000000/1000 - 1 = 167999.
+    SysTick_Config(SystemCoreClock / 1000u);
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">The load-bearing detail is step&nbsp;2 before step&nbsp;6: raise Flash latency while still slow, <em>then</em> speed up. Reverse them and the first instruction fetched at 168&nbsp;MHz comes back corrupt and the core HardFaults before <code>main()</code>. This is essentially what CubeMX's <code>SystemClock_Config()</code> generates — you can now read and audit it.</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> Chapter recap</div>
+        <p>You can now explain why an STM32 boots slow on HSI, choose HSE when timing must be exact (and why USB <em>demands</em> it), and derive a system clock end-to-end: <span>$8\to{\div}M\to{\times}N\to{\div}P = 168\,\text{MHz}$</span>, with <span>$\div Q$</span> giving 48&nbsp;MHz USB. You know HCLK/PCLK1/PCLK2 and the timer ×2 rule, why fast cores need Flash wait states (and to set them <em>first</em>), the RCC clock-enable bug that silences peripherals, and how to turn SYSCLK into a 1&nbsp;ms SysTick beat ($\text{RELOAD}=f/1000-1$). Next we'll spend that clock budget: GPIO at the register level, fast and atomic.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="Back to top">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

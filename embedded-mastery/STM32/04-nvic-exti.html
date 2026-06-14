@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Interrupts Done Right: NVIC, EXTI &amp; Priorities — Embedded Mastery</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="track-stm32" data-track="stm32" data-chapter="04-nvic-exti">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Embedded&nbsp;Mastery</a>
+  <span class="spacer"></span>
+  <span class="track-pill">STM32 · Ch 04</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">STM32 Track · Chapter 04 · Intermediate→Advanced</div>
+        <h1>Interrupts Done Right: NVIC, EXTI &amp; Priorities</h1>
+        <p>Polling burns the CPU asking "anything yet?" a million times a second. An <strong>interrupt</strong> lets the hardware tap the CPU on the shoulder only when something actually happened. Get this wrong and your firmware hangs, re-fires forever, or starves a critical task. Get it right and you build systems that sleep at microamps and wake in microseconds.</p>
+        <div class="meta">
+          <span>⏱ ~45 min</span><span>🧠 NVIC &amp; vector table</span><span>⚡ EXTI on a GPIO</span><span>🔢 Priority math</span>
+        </div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="polling-vs-interrupts"><span class="sec-no">1</span>Polling vs. interrupts: who asks the question?</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Imagine you're expecting a package. <strong>Polling</strong> is walking to the front door every ten seconds to check if it arrived — exhausting, wasteful, and you still might miss it between checks. An <strong>interrupt</strong> is a doorbell: you do whatever you like, and the instant the package lands the bell yanks your attention to the door. When it's handled, you go right back to what you were doing.</p>
+
+      <p>In code, polling a button looks like this — a tight loop reading the pin, spending nearly all its cycles on "nope, not yet":</p>
+
+      <div class="codeblock">
+        <div class="code-head">polling.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">while (1) {
+  // CPU spins here forever, reading the pin millions of times/second.
+  // 99.999% of those reads return "still not pressed."
+  if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET) {
+    do_something();
+  }
+}
+</code></pre>
+      </div>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence model</div>
+        <p>An interrupt is <strong>hardware that pauses your main code, runs a tiny handler, and resumes exactly where it left off</strong> — all without your <code>main()</code> loop knowing it happened.</p>
+      </div>
+
+      <p>On a Cortex-M, the chip that orchestrates all of this is the <strong>NVIC</strong> — the <strong>N</strong>ested <strong>V</strong>ectored <strong>I</strong>nterrupt <strong>C</strong>ontroller. It is a dedicated block inside the CPU core (not a peripheral you bolt on) whose entire job is to watch dozens of interrupt sources, decide which is most urgent, and hand control to the right handler. "Nested" because a more urgent interrupt can interrupt a less urgent one already running. "Vectored" because each source jumps directly to its own handler address with no software dispatch.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Why this matters</div>
+        <p>Interrupts are the difference between a CPU that's <strong>busy</strong> and one that's <strong>useful</strong>. Polling pins your core at 100% load and forbids real sleep. Interrupts let the core idle (or power down) and respond with bounded, predictable latency. Every responsive, low-power embedded product is built on them.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="vector-table"><span class="sec-no">2</span>The vector table &amp; exception model</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>a phone book of handlers</small></div>
+      <p>When an interrupt fires, the CPU needs to know <em>where to jump</em>. The answer lives in the <strong>vector table</strong>: an array of function pointers parked at the very start of Flash (address <code>0x0800_0000</code> on an STM32F4). Each slot holds the address of the handler for one exception or interrupt. The NVIC simply indexes into this table by the interrupt number and loads the program counter — no <code>switch</code> statement, no overhead.</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Offset</th><th>Vector</th><th>What it is</th></tr></thead>
+        <tbody>
+          <tr><td><code>0x00</code></td><td>Initial <code>SP</code></td><td>Top-of-stack value loaded on reset</td></tr>
+          <tr><td><code>0x04</code></td><td>Reset</td><td>First instruction after power-up</td></tr>
+          <tr><td><code>0x08</code></td><td>NMI</td><td>Non-maskable interrupt</td></tr>
+          <tr><td><code>0x0C</code></td><td>HardFault</td><td>The "something went badly wrong" catch-all</td></tr>
+          <tr><td><code>…</code></td><td>SysTick</td><td>The 1 kHz RTOS / <code>HAL_Delay</code> tick</td></tr>
+          <tr><td><code>0x40+</code></td><td>IRQ0…IRQn</td><td>Peripheral interrupts: EXTI, timers, UART, DMA…</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p>Exceptions with a <em>negative</em> exception number (Reset, NMI, HardFault, SysTick) are core "system exceptions." Everything with a non-negative IRQ number — <code>EXTI0_IRQn</code>, <code>TIM2_IRQn</code>, <code>USART2_IRQn</code> — is an external interrupt managed by the NVIC. The handler names you see in <code>startup_stm32f4xx.s</code> (e.g. <code>EXTI0_IRQHandler</code>) are <em>weak</em> symbols: define a function with the exact same name in your C file and the linker wires your version into the table automatically.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the name must be exact</div>
+        <p>If you spell the handler <code>EXTI0_IRQ_Handler</code> (with an extra underscore) instead of <code>EXTI0_IRQHandler</code>, the linker won't complain — it just keeps the default weak handler, which is usually an infinite <code>while(1)</code> loop. Your interrupt fires, jumps into that trap, and your firmware silently freezes. Copy the name straight from the startup file.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="exti-lines"><span class="sec-no">3</span>EXTI: turning a pin edge into an interrupt</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the wiring from pin to NVIC</small></div>
+      <p>A GPIO pin can't talk to the NVIC directly. Between them sits the <strong>EXTI</strong> — the <strong>EXT</strong>ernal <strong>I</strong>nterrupt/event controller. EXTI has a set of independent <em>lines</em>; line 0 through line 15 are the GPIO lines (higher lines serve internal sources like the RTC alarm and USB wakeup). To make a falling edge on a button generate an interrupt, you must configure four things in order:</p>
+
+      <ol>
+        <li><strong>SYSCFG</strong> — route a port to the line. <code>SYSCFG-&gt;EXTICR[]</code> picks <em>which port</em> (A, B, C…) drives a given EXTI line number.</li>
+        <li><strong>Edge select</strong> — set the rising-trigger register <code>EXTI-&gt;RTSR</code> and/or the falling-trigger register <code>EXTI-&gt;FTSR</code> for that line.</li>
+        <li><strong>Unmask</strong> — set the line's bit in the interrupt-mask register <code>EXTI-&gt;IMR</code> so the edge actually propagates as an interrupt (leave it masked and the edge is detected but ignored).</li>
+        <li><strong>Enable in NVIC</strong> — call <code>NVIC_EnableIRQ()</code> for the IRQ that owns that line.</li>
+      </ol>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the line-sharing gotcha</div>
+        <p>EXTI line <em>N</em> is shared by every pin numbered <em>N</em> across all ports. <code>PA0</code>, <code>PB0</code>, <code>PC0</code>… all map to <strong>EXTI0</strong>. <code>SYSCFG-&gt;EXTICR</code> lets only <em>one</em> port own line 0 at a time — you cannot have an interrupt on both <code>PA0</code> and <code>PB0</code> simultaneously. Worse, lines 5–9 share a single IRQ (<code>EXTI9_5_IRQn</code>) and lines 10–15 share another (<code>EXTI15_10_IRQn</code>), so one handler must inspect the pending register to learn <em>which</em> pin fired.</p>
+      </div>
+
+      <p>Here is the register-level setup for a button on <code>PA0</code>, falling-edge triggered. This is what HAL does under the hood:</p>
+
+      <div class="codeblock">
+        <div class="code-head">exti_setup.c <span class="lang">C / STM32F4 CMSIS</span></div>
+<pre><code class="language-c">// Assumes GPIOA &amp; SYSCFG clocks already enabled, PA0 set to input.
+// 1) Route EXTI line 0 to port A (bits [3:0] of EXTICR[0] = 0b0000 = port A)
+SYSCFG-&gt;EXTICR[0] &amp;= ~SYSCFG_EXTICR1_EXTI0;     // clear -&gt; selects port A
+
+// 2) Trigger on the FALLING edge only (button pulls the pin to GND)
+EXTI-&gt;FTSR |=  (1U &lt;&lt; 0);   // falling-edge enable for line 0
+EXTI-&gt;RTSR &amp;= ~(1U &lt;&lt; 0);   // make sure rising is OFF
+
+// 3) Unmask line 0 so the edge becomes a real interrupt request
+EXTI-&gt;IMR  |=  (1U &lt;&lt; 0);
+
+// 4) Enable EXTI0 in the NVIC and give it a priority (see §4)
+NVIC_SetPriority(EXTI0_IRQn, 5);
+NVIC_EnableIRQ(EXTI0_IRQn);
+</code></pre>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    PIN["PA0 pin<br/>(button)"] --> SYS["SYSCFG<br/>EXTICR → port select"]
+    SYS --> EDGE["EXTI edge detect<br/>RTSR / FTSR"]
+    EDGE --> MASK{"IMR<br/>unmasked?"}
+    MASK -- no --> DROP["edge ignored"]
+    MASK -- yes --> NVIC["NVIC<br/>prioritise + dispatch"]
+    NVIC --> ISR["EXTI0_IRQHandler()"]
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="priority-math"><span class="sec-no">4</span>Priorities: preemption, sub-priority &amp; the bit math</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive the level count</small></div>
+      <p>Not all interrupts are equal. A motor over-current fault must be allowed to interrupt a lazy UART byte. The NVIC encodes each interrupt's urgency as an 8-bit priority field per source — but a given chip only <em>implements</em> the top few bits. The STM32F4 implements <strong>4 bits</strong>:</p>
+
+      <div class="math-box">
+        $$ \text{levels} = 2^{N_{\text{prio}}} = 2^{4} = 16 $$
+      </div>
+
+      <p>So you get priority values <code>0</code> through <code>15</code>. The crucial, counter-intuitive rule:</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Lower number = higher priority</div>
+        <p>Priority <code>0</code> is the <strong>most</strong> urgent; priority <code>15</code> is the <strong>least</strong>. This trips up everyone once. Think of it as "first place" — rank 0 wins. Reset, NMI, and HardFault sit at fixed negative priorities, so they outrank <em>any</em> interrupt you can configure.</p>
+      </div>
+
+      <p>Those 4 bits are split into two fields by the <strong>priority grouping</strong> setting: a <strong>preemption (group) priority</strong> and a <strong>sub-priority</strong>. The split is set once at boot with <code>NVIC_SetPriorityGrouping(g)</code>. The grouping number <span>$g$</span> determines how many of the low bits become sub-priority. With 4 implemented bits, the count of each field is:</p>
+
+      <div class="math-box">
+        $$ N_{\text{sub}} = \max\!\bigl(0,\; (g+1) - (8 - N_{\text{prio}})\bigr), \qquad N_{\text{pre}} = N_{\text{prio}} - N_{\text{sub}} $$
+      </div>
+
+      <p>That formula looks fussy because the field is stored left-aligned in the 8-bit register; the practical results for the STM32F4 (<span>$N_{\text{prio}}=4$</span>) are just a table you can memorise:</p>
+
+      <div class="tbl-wrap">
+      <table>
+        <thead><tr><th>Grouping constant</th><th>Preempt bits</th><th>Sub bits</th><th>Preempt levels</th><th>Sub levels</th></tr></thead>
+        <tbody>
+          <tr><td><code>NVIC_PRIORITYGROUP_0</code></td><td>0</td><td>4</td><td>1</td><td>16</td></tr>
+          <tr><td><code>NVIC_PRIORITYGROUP_2</code></td><td>2</td><td>2</td><td>4</td><td>4</td></tr>
+          <tr><td><code>NVIC_PRIORITYGROUP_4</code></td><td>4</td><td>0</td><td>16</td><td>1</td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <p>The two fields do different jobs:</p>
+      <ul>
+        <li><strong>Preemption priority</strong> decides <em>nesting</em>. A higher-preemption interrupt (lower number) <strong>can interrupt</strong> a currently-running lower-preemption handler. This is what "nested" in NVIC means.</li>
+        <li><strong>Sub-priority</strong> only breaks ties: if two interrupts of the <em>same</em> preemption level are pending at once, the lower sub-priority runs first — but it will <strong>not</strong> preempt an already-running handler of equal preemption.</li>
+      </ul>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> Concrete example</div>
+        <p>Say IRQ&nbsp;A has preemption <code>1</code> and IRQ&nbsp;B has preemption <code>3</code>. While B's handler is running, A fires — because <span>$1 &lt; 3$</span>, A <strong>preempts</strong> B, runs to completion, then B resumes. If instead both had preemption <code>2</code> but different sub-priorities, whichever was running keeps running; the other waits its turn.</p>
+      </div>
+
+      <p>HAL wraps the encode-and-set step in one call so you never shift bits by hand:</p>
+
+      <div class="codeblock">
+        <div class="code-head">priority.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">// Choose 4 preemption levels + 4 sub-priority levels for the whole system.
+HAL_NVIC_SetPriorityGrouping(NVIC_PRIORITYGROUP_2);
+
+// EXTI0: preemption = 1 (quite urgent), sub-priority = 0
+HAL_NVIC_SetPriority(EXTI0_IRQn, /*preempt*/ 1, /*sub*/ 0);
+HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+
+// A chattier, less urgent UART: preemption = 3, sub = 0
+HAL_NVIC_SetPriority(USART2_IRQn, /*preempt*/ 3, /*sub*/ 0);
+HAL_NVIC_EnableIRQ(USART2_IRQn);
+// Now a button edge will interrupt an in-progress UART ISR, but not vice-versa.
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — set the grouping exactly once</div>
+        <p>HAL's <code>HAL_Init()</code> already calls <code>HAL_NVIC_SetPriorityGrouping(NVIC_PRIORITYGROUP_4)</code> by default — all 4 bits become preemption, zero sub-priority. If you re-group later, the meaning of every priority number you already set silently changes. Pick a grouping at startup and leave it. Mixing FreeRTOS in? The kernel <em>requires</em> <code>NVIC_PRIORITYGROUP_4</code> — don't fight it.</p>
+      </div>
+
+      <!-- live sim -->
+      <div class="sim" id="sim-prio-wrap">
+        <div class="sim-title">🔬 Live: does A preempt B?</div>
+        <canvas id="sim-prio"></canvas>
+      </div>
+      <p class="readout" style="color:var(--fg-faint);font-size:13px;">Set each interrupt's preemption level (0 = most urgent). The timeline shows B running, A firing mid-handler, and whether A is allowed to nest on top of B.</p>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="the-flow"><span class="sec-no">5</span>The full flow — and the bit you MUST clear</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>follow one edge end-to-end</small></div>
+      <p>Let's trace a single button press from copper to handler. The one step beginners skip — and pay for dearly — is the last one: <strong>clearing the pending bit</strong>.</p>
+
+      <div class="mermaid">
+flowchart TD
+    A["Edge on PA0"] --> B["EXTI detects edge<br/>sets pending bit EXTI→PR.0"]
+    B --> C["NVIC sees request<br/>checks priority"]
+    C --> D["CPU pushes context<br/>vectors to EXTI0_IRQHandler"]
+    D --> E["Your ISR runs<br/>do the work"]
+    E --> F{"Clear EXTI→PR.0?"}
+    F -- "no" --> B
+    F -- "yes (write 1)" --> G["return → resume main"]
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The pending bit is "rc_w1" — clear by writing a 1</div>
+        <p>When the edge fires, EXTI latches a <strong>pending</strong> flag in <code>EXTI-&gt;PR</code>. This flag is what told the NVIC to call you. If your handler returns <em>without clearing it</em>, the NVIC sees the request is still asserted and immediately re-enters your ISR — forever. You clear it by writing a <strong>1</strong> to that bit (writing 0 does nothing). It's a deliberately odd "write-1-to-clear" register so two handlers can't accidentally clear each other's flags.</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>The bare-metal ISR — note the write-1-to-clear and the "is it really my line?" guard:</p>
+
+      <div class="codeblock">
+        <div class="code-head">isr_baremetal.c <span class="lang">C / STM32F4 CMSIS</span></div>
+<pre><code class="language-c">void EXTI0_IRQHandler(void) {
+  // Guard: confirm THIS line is the one that's pending.
+  if (EXTI-&gt;PR &amp; (1U &lt;&lt; 0)) {
+    EXTI-&gt;PR = (1U &lt;&lt; 0);          // write-1-to-clear. DO THIS FIRST or early.
+
+    GPIOC-&gt;ODR ^= (1U &lt;&lt; 13);      // toggle the LED on PC13 — fast, atomic.
+  }
+  // Keep ISRs SHORT: no printf, no HAL_Delay, no heavy loops in here.
+}
+</code></pre>
+      </div>
+
+      <p>If you prefer HAL, the plumbing is hidden inside two functions. HAL's IRQ handler reads <code>EXTI-&gt;PR</code>, clears the flag for you, then calls a <em>weak</em> callback you override:</p>
+
+      <div class="codeblock">
+        <div class="code-head">isr_hal.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">// 1) The real vector-table entry. Let HAL parse &amp; clear the pending bit.
+void EXTI0_IRQHandler(void) {
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_0);   // clears EXTI→PR.0 internally
+}
+
+// 2) HAL then calls THIS weak callback. Override it with your logic.
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+  if (GPIO_Pin == GPIO_PIN_0) {
+    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);   // your work goes here
+  }
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — keep ISRs short</div>
+        <p>An ISR runs with your main code paused and (depending on priority) other interrupts blocked. Do the minimum: clear the flag, set a <code>volatile</code> flag or push to a queue, get out. Calling <code>HAL_Delay()</code> inside an ISR is a classic hang — it waits on the SysTick interrupt, which may have <em>lower</em> priority than your handler and can therefore never fire. The result is a permanent freeze that looks like nothing happened.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="real-case"><span class="sec-no">6</span>Real case: microsecond capture &amp; wake-from-sleep</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>this ships in products</small></div>
+      <p>Two production patterns lean entirely on EXTI + NVIC.</p>
+
+      <p><strong>Low-latency event capture.</strong> An optical encoder, a hall sensor, or a comms PHY can produce edges thousands of times per second with hard timing requirements. Polling would miss edges between reads; an EXTI interrupt timestamps each edge the instant it happens by reading a free-running timer inside the ISR. The latency from edge to first ISR instruction on an STM32F4 is a deterministic ~12 CPU cycles of hardware push plus your priority wait — nanoseconds, not milliseconds.</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — wake-from-sleep on a pin</div>
+        <p>This is EXTI's quiet superpower. Put an STM32 into <strong>Stop mode</strong> and the CPU clock halts — the core draws single-digit microamps, perfect for a battery sensor that sleeps for days. But the EXTI block stays alive in Stop mode. Configure a wake button (or a sensor's interrupt line) as an EXTI source, call <code>HAL_PWR_EnterSTOPMode(...)</code>, and the chip sits in near-zero-power sleep until an edge arrives. That edge fires the EXTI, which wakes the core, runs your handler, and returns to deep sleep. A doorbell sensor, a TV remote, a glucose monitor — all live for years on a coin cell because of exactly this mechanism.</p>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Debounce belongs out of the ISR</div>
+        <p>Mechanical buttons bounce: one press can generate dozens of edges over a few milliseconds, firing your ISR a dozen times. Don't <code>delay()</code> inside the handler to debounce — that blocks everything. Instead, on the first edge, record a timestamp and ignore further edges for ~20 ms (in the ISR, or by disabling the line and re-arming it from a timer). Software debounce is a whole topic; just know the ISR is the wrong place to <em>wait</em>.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="latency-math"><span class="sec-no">7</span>Latency math: how fast does the CPU respond?</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>turning cycles into time</small></div>
+      <p>"Interrupts are fast" is a feeling; engineering needs a number. On a Cortex-M4 the hardware takes a fixed <strong>12 cycles</strong> to stack the context and vector to your handler (assuming zero-wait-state Flash). At the STM32F4's typical <span>$f_{\text{clk}} = 168\,\text{MHz}$</span>, the cycle time is</p>
+
+      <div class="math-box">
+        $$ T_{\text{cycle}} = \frac{1}{f_{\text{clk}}} = \frac{1}{168\times10^{6}\,\text{Hz}} \approx 5.95\,\text{ns} $$
+      </div>
+
+      <p>so the best-case <strong>interrupt entry latency</strong> — edge accepted to first instruction of your ISR — is</p>
+
+      <div class="math-box">
+        $$ t_{\text{latency}} = 12 \cdot T_{\text{cycle}} = 12 \times 5.95\,\text{ns} \approx 71\,\text{ns} $$
+      </div>
+
+      <p>That's the floor. Real worst-case latency adds two things you control: any <em>higher-or-equal</em> preemption ISR already running (which you must wait out — design your priorities so the urgent line wins), and any region where you've disabled interrupts with <code>__disable_irq()</code>. Keep those critical sections to a few instructions and the system stays responsive. The maximum acceptable event rate then follows directly: if your ISR plus overhead takes <span>$t_{\text{isr}}$</span>, you can sustain at most</p>
+
+      <div class="math-box">
+        $$ f_{\max} = \frac{1}{t_{\text{isr}}} $$
+      </div>
+
+      <p>edges per second before ISRs start stacking up and you fall behind. A 1&nbsp;µs ISR caps you near 1&nbsp;MHz of events — comfortable for a button, tight for a high-speed encoder, which is exactly when you graduate from EXTI to a hardware timer-capture peripheral.</p>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>⑤ Your turn</h2>
+      <div class="layer"><span class="step">⑤</span> Practice <small>you write &amp; decide</small></div>
+      <p>Three checks. Tap an answer, type a number, or reveal a coding challenge. Your progress is saved on this device and shown on the home page.</p>
+
+      <!-- quiz -->
+      <div class="exercise" data-ex="quiz" data-id="stm04-pending-priority">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">Your <code>EXTI0_IRQHandler</code> runs once on a button press, then the CPU appears to lock up — the handler keeps re-entering endlessly. You also notice that an interrupt you set to priority <code>2</code> never preempts one at priority <code>9</code>. Which two statements are <strong>both</strong> correct?</div>
+        <ul class="ex-options">
+          <li data-correct="false">You forgot <code>NVIC_EnableIRQ</code>, and a higher number means higher priority.</li>
+          <li data-correct="true">You forgot to clear the pending bit in <code>EXTI-&gt;PR</code>, and a <em>lower</em> number means higher priority (so 2 should preempt 9).</li>
+          <li data-correct="false">The vector table is corrupt, and priority 9 outranks priority 2.</li>
+          <li data-correct="false">EXTI auto-clears its flag, and equal sub-priorities never preempt.</li>
+        </ul>
+        <div class="ex-explain">The endless re-entry is the signature of not clearing <code>EXTI-&gt;PR</code> (write a 1 to the line's bit). And Cortex-M priority is "rank 0 wins": <strong>lower number = higher priority</strong>, so a priority-2 interrupt <em>should</em> preempt a priority-9 one. If it isn't, your priority <em>grouping</em> probably put those bits into sub-priority, which only breaks ties and never preempts.</div>
+      </div>
+
+      <!-- numeric -->
+      <div class="exercise" data-ex="numeric" data-id="stm04-prio-levels" data-answer="16" data-tol="0">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">The STM32F4 implements <strong>4</strong> priority bits in the NVIC. How many distinct interrupt priority <strong>levels</strong> does that give you? (Recall $\text{levels} = 2^{N_{\text{prio}}}$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="levels"><span class="ex-unit">levels</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$2^{4} = 16$ levels, numbered 0 (most urgent) through 15 (least). A chip implementing only 3 bits would give $2^3 = 8$ levels; a high-end part with 8 bits gives $2^8 = 256$. The number of <em>implemented</em> bits — not the full 8-bit field — is what counts.</div>
+      </div>
+
+      <!-- reveal / coding challenge -->
+      <div class="exercise" data-ex="reveal" data-id="stm04-button-led">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — button EXTI toggles an LED</div>
+        <div class="ex-q">Using HAL, configure the on-board user button on <code>PA0</code> as a falling-edge EXTI source, and toggle the LED on <code>PC13</code> on each press. Write both the GPIO/NVIC init and the interrupt handler + callback. Remember: the handler must clear the pending flag (or let HAL do it), the LED toggle goes in the callback, and ISRs stay short.</div>
+        <details class="ex-acc">
+          <summary>Hint</summary>
+          <div class="acc-body">Enable the <code>GPIOA</code>, <code>GPIOC</code>, and <code>SYSCFG</code> clocks first. Configure <code>PA0</code> with <code>GPIO_MODE_IT_FALLING</code> (HAL's "interrupt on falling edge" mode does the SYSCFG/EXTI wiring for you). Then <code>HAL_NVIC_SetPriority</code> + <code>HAL_NVIC_EnableIRQ</code> for <code>EXTI0_IRQn</code>. The vector entry calls <code>HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_0)</code>; your toggle lives in <code>HAL_GPIO_EXTI_Callback</code>.</div>
+        </details>
+        <details class="ex-acc">
+          <summary>Show one solution</summary>
+          <div class="acc-body">
+            <div class="codeblock">
+              <div class="code-head">button_exti.c <span class="lang">C / STM32 HAL</span></div>
+<pre><code class="language-c">void EXTI_Button_Init(void) {
+  __HAL_RCC_GPIOA_CLK_ENABLE();   // button port
+  __HAL_RCC_GPIOC_CLK_ENABLE();   // LED port
+  __HAL_RCC_SYSCFG_CLK_ENABLE();  // needed for EXTI port routing
+
+  // LED on PC13: push-pull output
+  GPIO_InitTypeDef led = {0};
+  led.Pin   = GPIO_PIN_13;
+  led.Mode  = GPIO_MODE_OUTPUT_PP;
+  led.Pull  = GPIO_NOPULL;
+  led.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &amp;led);
+
+  // Button on PA0: interrupt on FALLING edge, with pull-up
+  GPIO_InitTypeDef btn = {0};
+  btn.Pin  = GPIO_PIN_0;
+  btn.Mode = GPIO_MODE_IT_FALLING;   // wires SYSCFG + EXTI FTSR + IMR
+  btn.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOA, &amp;btn);
+
+  // NVIC: enable EXTI0, modest priority
+  HAL_NVIC_SetPriority(EXTI0_IRQn, /*preempt*/ 2, /*sub*/ 0);
+  HAL_NVIC_EnableIRQ(EXTI0_IRQn);
+}
+
+// Vector-table entry — HAL parses &amp; clears EXTI→PR for us.
+void EXTI0_IRQHandler(void) {
+  HAL_GPIO_EXTI_IRQHandler(GPIO_PIN_0);
+}
+
+// HAL calls this after clearing the flag. Keep it short.
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+  if (GPIO_Pin == GPIO_PIN_0) {
+    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+  }
+}
+</code></pre>
+            </div>
+            <p style="margin:10px 0 0;color:var(--fg-muted);font-size:14px;">Notice the division of labour: <code>GPIO_MODE_IT_FALLING</code> handles all the SYSCFG/EXTI register writes, the NVIC calls are explicit, and the actual work is one toggle in the callback. In production you'd add software debounce so a single press doesn't register as several — but the interrupt skeleton is exactly this.</p>
+          </div>
+        </details>
+      </div>
+
+      <hr>
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🎓</span> Chapter recap</div>
+        <p>You can now explain why interrupts beat polling, how the NVIC dispatches through the vector table, and the four-step EXTI path (SYSCFG route → edge select → IMR unmask → NVIC enable) — including the line-sharing gotcha where <code>PA0</code> and <code>PB0</code> both land on EXTI0. You know that the STM32F4's 4 priority bits give <span>$2^4=16$</span> levels where <strong>lower number = higher priority</strong>, and that preemption priority enables nesting while sub-priority only breaks ties. Above all, you'll never forget to write-1-to-clear <code>EXTI-&gt;PR</code> — the bit that, left alone, re-fires your ISR forever. Next we'll use this to capture timer events with hardware precision.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+
+<button id="to-top" aria-label="Back to top">↑</button>
+
+<!-- vendored libraries (all local, load in order, app.js last) -->
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+
+<!-- chapter-specific simulator -->
+<script>
+EM.sim("sim-prio", {
+  height: 240,
+  params: [
+    { key: "preA", label: "IRQ A preempt", min: 0, max: 7, step: 1, value: 1, unit: "" },
+    { key: "preB", label: "IRQ B preempt", min: 0, max: 7, step: 1, value: 3, unit: "" }
+  ],
+  draw: function (ctx, v, g) {
+    var dpr = g.dpr, W = g.w, H = g.h, pad = 46 * dpr;
+    var laneB = H * 0.62, laneA = H * 0.30, hLane = 22 * dpr;
+    var x0 = pad, x1 = W - 14 * dpr, span = x1 - x0;
+    // A fires partway through B's handler
+    var tFire = 0.42, tEnd = 0.78;
+    var nests = v.preA < v.preB;   // lower number = higher priority preempts
+
+    ctx.font = (12 * dpr) + "px monospace";
+    ctx.fillStyle = "#6e7681";
+    ctx.fillText("B (preempt " + v.preB + ")", 6 * dpr, laneB - 6 * dpr);
+    ctx.fillText("A (preempt " + v.preA + ")", 6 * dpr, laneA - 6 * dpr);
+
+    // marker: A's edge arrives
+    var xFire = x0 + span * tFire;
+    ctx.strokeStyle = "#475066"; ctx.lineWidth = 1 * dpr;
+    ctx.setLineDash([4 * dpr, 4 * dpr]);
+    ctx.beginPath(); ctx.moveTo(xFire, 14 * dpr); ctx.lineTo(xFire, H - 14 * dpr); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#9aa4b2"; ctx.fillText("A fires", xFire + 4 * dpr, 22 * dpr);
+
+    function bar(x, w, y, col) {
+      ctx.fillStyle = col;
+      ctx.fillRect(x, y, w, hLane);
+    }
+
+    if (nests) {
+      // B runs, paused during A, then resumes
+      bar(x0, xFire - x0, laneB, "#3b4a63");                 // B before
+      bar(xFire, span * (tEnd - tFire), laneA, "#2ec4b6");   // A nested on top
+      var xResume = x0 + span * tEnd;
+      bar(xResume, x1 - xResume, laneB, "#3b4a63");          // B resumes
+      // greyed gap in B while A runs
+      ctx.fillStyle = "#222a38";
+      ctx.fillRect(xFire, laneB, span * (tEnd - tFire), hLane);
+    } else {
+      // A cannot preempt: B runs to completion, A waits, then A runs
+      var xBend = x0 + span * tEnd;
+      bar(x0, xBend - x0, laneB, "#3b4a63");                 // B uninterrupted
+      bar(xBend, x1 - xBend, laneA, "#e0a44a");              // A runs AFTER B
+      // show A pending (hatched) between fire and B's end
+      ctx.fillStyle = "#3a2f1c";
+      ctx.fillRect(xFire, laneA, xBend - xFire, hLane);
+    }
+
+    return nests
+      ? "A (" + v.preA + ") &lt; B (" + v.preB + ") → <b>A PREEMPTS B</b> &nbsp;·&nbsp; B pauses, A runs, B resumes."
+      : "A (" + v.preA + ") ≥ B (" + v.preB + ") → <b>no preemption</b> &nbsp;·&nbsp; A waits for B to finish, then runs.";
+  }
+});
+</script>
+</body>
+</html>

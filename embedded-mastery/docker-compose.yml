@@ -1,0 +1,14 @@
+# Embedded Mastery — one-command LAN deployment.
+#
+#   docker compose up -d        # build + serve in the background
+#   docker compose down         # stop
+#
+# Then open http://<your-computer-LAN-IP>:8080 on the iPad (same Wi-Fi).
+services:
+  embedded-mastery:
+    build: .
+    image: embedded-mastery:latest
+    container_name: embedded-mastery
+    ports:
+      - "8080:80"          # host 8080  ->  container 80   (change 8080 if busy)
+    restart: unless-stopped
