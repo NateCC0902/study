@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Serial &amp; the TTY Layer — Linux I/O for Robotics</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="06-serial-tty">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · Ch 06</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · Chapter 06 · Serial</div>
+        <h1>Serial &amp; the TTY Layer: getting bytes off a GPS without lag</h1>
+        <p>A serial port looks like the simplest device in the box — two wires and a baud rate. But between your <code>read()</code> and the silicon sits the TTY layer, a 40-year-old subsystem built for teletype terminals that, by default, will mangle your binary sensor stream and add tens of milliseconds of latency. This chapter is how to make a UART behave like the dumb byte pipe a robot actually needs.</p>
+        <div class="meta"><span>⏱ ~40 min</span><span>🧠 UART + termios</span><span>⚡ Live frame sim</span><span>∑ baud math</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="the-frame"><span class="sec-no">1</span>The UART frame: how one byte goes down a wire</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>A UART (Universal Asynchronous Receiver/Transmitter) sends bytes with <em>no clock wire</em>. That's the "asynchronous" part — and it's the whole trick. Both ends agree on a speed (the baud rate) ahead of time, and the receiver re-syncs on every single byte using the shape of the frame. There's no shared clock to drift, so the framing <em>is</em> the synchronization.</p>
+      <p>The idle line sits <strong>high</strong> (logic 1). To send a byte the transmitter pulls the line low for exactly one bit period — that falling edge is the <strong>start bit</strong>, the receiver's "wake up, a byte is coming" signal. Then 8 data bits go out <strong>LSB first</strong>, an optional <strong>parity bit</strong>, and finally the line is driven high again for one or two <strong>stop bits</strong>, returning to idle. Having locked onto the start edge, the receiver samples each following bit in the middle of its window.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> Why idle-high and start-low</div>
+        <p>A broken or unplugged wire floats — and a pulled-up line reads as idle (1), not an endless stream of garbage start bits. The start bit is a <em>transition</em> (1→0), detectable even when the two clocks disagree by a few percent; that's why a UART tolerates ~±3% baud mismatch and a dead cable just looks like silence.</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    I["idle<br/>HIGH"] --> S["start<br/>LOW"]
+    S --> D["8 data bits<br/>LSB first"]
+    D --> P["parity<br/>optional"]
+    P --> T["1–2 stop<br/>HIGH"]
+    T --> I2["idle<br/>HIGH"]
+</div>
+
+      <p>Parity is the cheapest possible error check: one bit chosen so the total number of 1-bits (data + parity) is even (<em>even parity</em>) or odd (<em>odd parity</em>). It catches any single-bit flip and is blind to two flips — useless against bursty noise, which is why almost all robotics links run <strong>no parity</strong> and push integrity up to a real checksum (NMEA's <code>*hh</code>, a CRC in a binary protocol). The shorthand <strong>8N1</strong> means 8 data bits, No parity, 1 stop bit — the near-universal default.</p>
+
+      <div class="layer"><span class="step">④</span> Real case <small>this ships on the USV</small></div>
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — the GPS that "drops characters"</div>
+        <p>On the Jetson AGX Orin USV a u-blox GPS streams NMEA at 8N1, 115200 baud. A field report of "garbled fixes" turned out to be the receiver configured for <strong>even parity</strong>: the GPS's parity bit was being interpreted as a 9th data bit, shifting every byte. The wire was fine; the <em>frame format</em> was wrong on one end. Frame mismatch is the #1 serial bring-up bug, ahead of baud mismatch.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="baud-math"><span class="sec-no">2</span>Baud, bit-time, and the 80% you don't get</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive it</small></div>
+      <p><strong>Baud</strong> is symbols per second; on a plain UART one symbol is one bit, so baud = bits/s on the wire. The time to send one bit is just its reciprocal:</p>
+      <div class="math-box">$$ t_\text{bit} = \frac{1}{\text{baud}}, \qquad t_\text{bit}(115200) = \frac{1}{115200}\,\text{s} \approx 8.68\ \mu\text{s} $$</div>
+      <p>But you don't get to send 8 useful bits per byte — every frame carries overhead. With $N_\text{frame}$ bits per frame (start + data + parity + stop), the achievable byte rate and the wire efficiency are:</p>
+      <div class="math-box">$$ N_\text{frame} = 1 + 8 + p + s,\qquad \dot B = \frac{\text{baud}}{N_\text{frame}},\qquad \eta = \frac{8}{N_\text{frame}} $$</div>
+      <p>For 8N1, $N_\text{frame} = 1 + 8 + 0 + 1 = 10$, so $\eta = 8/10 = 80\%$ and $\dot B = 115200/10 = 11{,}520$ bytes/s. That clean factor of 10 is exactly why people pick 8N1: divide baud by ten to get bytes/s in your head. Go to 8E2 (even parity, 2 stop) and $N_\text{frame}=12$, efficiency drops to $8/12 \approx 67\%$ — you just gave away a sixth of your bandwidth for one weak error bit.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Format</th><th>Frame bits</th><th>Efficiency</th><th>Bytes/s @ 115200</th><th>Frame time</th></tr></thead>
+        <tbody>
+          <tr><td>8N1</td><td>10</td><td>80%</td><td>11,520</td><td>86.8 µs</td></tr>
+          <tr><td>8N2</td><td>11</td><td>73%</td><td>10,473</td><td>95.5 µs</td></tr>
+          <tr><td>8E1 / 8O1</td><td>11</td><td>73%</td><td>10,473</td><td>95.5 µs</td></tr>
+          <tr><td>8E2 / 8O2</td><td>12</td><td>67%</td><td>9,600</td><td>104 µs</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Sizing a sensor budget</div>
+        <p>Flip it around: if a sensor emits a 64-byte binary record at 200 Hz, that's $64 \times 200 = 12{,}800$ bytes/s of <em>payload</em>. At 8N1 you need $12{,}800 \times 10 = 128{,}000$ bits/s on the wire — 115200 baud <strong>won't fit</strong> (it tops out at 11,520 B/s). You'd jump to 230400 or 460800 baud. Always size with the frame overhead included, never the raw payload.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="uart-sim"><span class="sec-no">3</span>See the frame — and the numbers move</h2>
+      <p>Drag the byte value to watch the data bits flip (remember: <strong>LSB first</strong>, so bit 0 is the cell right after start). Switch parity and stop bits and read the live readout: bit time, total frame bits, frame time, max byte rate, and efficiency. This is the math above, made of pixels.</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>📡</span> One UART frame — baud, byte, parity, stop</div>
+        <canvas id="sim-uart"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What to notice</div>
+        <p>At 9600 baud one bit is ~104 µs and a whole 8N1 frame is ~1.04 ms — slow enough that a few bytes of latency is milliseconds. Crank to 1,000,000 baud and the same frame is 10 µs; now the bottleneck stops being the wire and becomes <em>how often the kernel hands you the bytes</em>. Add a parity bit or a second stop bit and watch efficiency fall below 80% — every non-data bit is bandwidth you paid for and can't use.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="tty-stack"><span class="sec-no">4</span>The TTY stack: why your bytes get edited</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the layer you didn't ask for</small></div>
+      <p>When you <code>open("/dev/ttyUSB0")</code> you are not talking to the UART. You're talking to the <strong>TTY layer</strong>, three stacked pieces: the <em>tty core</em> (the <code>/dev/tty*</code> character device and its buffers), the <em>line discipline</em> (the byte-processing policy), and the <em>driver</em> (the chip-specific code that pushes bytes to hardware). The line discipline is the part that bites robots.</p>
+
+      <div class="mermaid">
+flowchart TD
+    A["your app<br/>read/write"] --> C["tty core<br/>buffers + termios"]
+    C --> LD["line discipline<br/>N_TTY: canonical / raw"]
+    LD --> DRV["uart driver<br/>ttyUSB* or ttyTHS*"]
+    DRV --> HW["UART / USB-serial chip"]
+</div>
+
+      <p>The default line discipline, <code>N_TTY</code>, is in <strong>canonical mode</strong> — it pretends your serial port is a terminal where a human is typing. It buffers input line-by-line until it sees a newline, lets the user backspace, echoes characters back, expands tabs, and treats certain bytes as control: <code>0x03</code> (Ctrl-C) raises a signal, <code>0x11</code>/<code>0x13</code> (XON/XOFF) pause the stream, <code>0x04</code> (Ctrl-D) signals EOF. For a login shell that's exactly right. For a binary GPS stream it's a disaster: a <code>0x03</code> in your payload kills your process, a <code>0x13</code> silently stops the flow, and you never see a byte until a <code>0x0A</code> happens to come by.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — canonical mode eats binary data</div>
+        <p>The classic symptom: your reader blocks forever even though the device is clearly transmitting (you can see traffic in <code>dmesg</code> or on a scope). Canonical mode is holding every byte hostage until a newline. The fix isn't a bigger buffer — it's switching to <strong>raw mode</strong>, where the line discipline becomes a transparent pass-through and a byte is a byte.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="termios"><span class="sec-no">5</span>termios: configuring the port in C</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>Every TTY setting lives in a <code>struct termios</code>: four flag words (<code>c_iflag</code> input, <code>c_oflag</code> output, <code>c_cflag</code> control, <code>c_lflag</code> local/line) plus a <code>c_cc[]</code> array of control characters and the baud rate. You <code>tcgetattr()</code> the current settings, edit the struct, then <code>tcsetattr()</code> it back. The whole "make this a raw byte pipe" dance is captured by one helper, <code>cfmakeraw()</code>, which clears the canonical/echo/signal flags and the input/output translations in one shot.</p>
+
+      <div class="codeblock">
+        <div class="code-head">serial_open.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;termios.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;unistd.h&gt;
+
+int serial_open(const char *path, speed_t baud) {
+    /* O_NOCTTY: don't let this tty become our controlling terminal
+       (a stray Ctrl-C on the line must not signal us). */
+    int fd = open(path, O_RDWR | O_NOCTTY);
+    if (fd &lt; 0) return -1;
+
+    struct termios tio;
+    if (tcgetattr(fd, &amp;tio) &lt; 0) { close(fd); return -1; }
+
+    cfmakeraw(&amp;tio);              /* raw mode: no canonical, no echo, no signals */
+    cfsetispeed(&amp;tio, baud);     /* input baud  */
+    cfsetospeed(&amp;tio, baud);     /* output baud */
+
+    tio.c_cflag |= (CLOCAL | CREAD);   /* ignore modem ctrl lines; enable receiver */
+    tio.c_cflag &amp;= ~CSTOPB;            /* 1 stop bit (clear = 1, set = 2)          */
+    tio.c_cflag &amp;= ~PARENB;            /* no parity  -&gt;  this is the N in 8N1       */
+    tio.c_cflag &amp;= ~CRTSCTS;           /* no hardware flow control (set to enable)  */
+
+    /* Blocking read policy: return as soon as >=1 byte is available,
+       but wait at most 100 ms (VTIME is in deciseconds). */
+    tio.c_cc[VMIN]  = 0;
+    tio.c_cc[VTIME] = 1;
+
+    tcflush(fd, TCIFLUSH);                       /* drop stale bytes in the kernel buffer */
+    if (tcsetattr(fd, TCSANOW, &amp;tio) &lt; 0) {      /* apply immediately */
+        close(fd); return -1;
+    }
+    return fd;
+}
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Set the speed with the <code>speed_t</code> constants</div>
+        <p>Baud is not a free integer: <code>cfsetispeed()</code> takes a <code>speed_t</code> token like <code>B115200</code> or <code>B460800</code>, which the driver maps to a divisor. Standard rates have constants; for an off-list rate (say 250000) you need the <code>termios2</code> / <code>BOTHER</code> ioctl path. <code>cfmakeraw()</code> is POSIX shorthand — it's equivalent to clearing <code>ICANON|ECHO|ISIG</code> in <code>c_lflag</code>, <code>IXON|ICRNL</code> in <code>c_iflag</code>, and <code>OPOST</code> in <code>c_oflag</code>.</p>
+      </div>
+
+      <p>The two fields that decide your <em>latency</em> are <code>VMIN</code> and <code>VTIME</code>. They form a small state machine for how a blocking <code>read()</code> returns:</p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>VMIN</th><th>VTIME</th><th>read() returns when…</th><th>Use for</th></tr></thead>
+        <tbody>
+          <tr><td>0</td><td>0</td><td>immediately, with whatever's there (polling)</td><td>non-blocking-style reads</td></tr>
+          <tr><td>&gt;0</td><td>0</td><td>at least VMIN bytes have arrived (blocks forever)</td><td>fixed-size frames</td></tr>
+          <tr><td>0</td><td>&gt;0</td><td>≥1 byte, or VTIME×0.1s overall timeout</td><td>low-latency streaming</td></tr>
+          <tr><td>&gt;0</td><td>&gt;0</td><td>VMIN bytes, or VTIME idle gap after the first byte</td><td>burst framing</td></tr>
+        </tbody>
+      </table></div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="flow-control"><span class="sec-no">6</span>Flow control: telling the sender to wait</h2>
+      <p>If the receiver can't keep up, bytes overrun the FIFO and are lost — and a UART overrun is silent (you get a bumped error counter, not an error on <code>read()</code>). Flow control is backpressure on the wire. Two flavors:</p>
+      <ul>
+        <li><strong>Hardware (RTS/CTS)</strong>: two extra wires. The receiver de-asserts <strong>RTS</strong> ("I'm not ready"); the sender watches <strong>CTS</strong> and pauses. It's out-of-band — it never touches your data — and it reacts within a byte time. Enable with <code>CRTSCTS</code> in <code>c_cflag</code>. This is the right choice for high rates, <em>if</em> the wires are connected.</li>
+        <li><strong>Software (XON/XOFF)</strong>: in-band control bytes <code>0x11</code> (XON, resume) and <code>0x13</code> (XOFF, pause), enabled with <code>IXON</code>/<code>IXOFF</code>. No extra wires — but those two byte values are now <em>reserved</em> and can never appear in your payload. For binary data that's fatal, so robotics links keep XON/XOFF <strong>off</strong> and use RTS/CTS or simply run a rate the receiver can always drain.</li>
+      </ul>
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — XON/XOFF on a binary stream</div>
+        <p>Leave <code>IXON</code> set (it often is by default) and the moment your binary payload contains a <code>0x13</code> byte, the kernel quietly stops giving you data until a <code>0x11</code> shows up. The link "hangs" with no error. <code>cfmakeraw()</code> clears <code>IXON</code> for you — one more reason to always start from raw.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="latency"><span class="sec-no">7</span>Latency: the 16 ms you didn't budget for</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>200 Hz with no lag</small></div>
+      <p>Here's the trap that ruins control loops. The wire is fast — an 8N1 byte at 115200 is 86.8 µs — but the path from "byte in the chip's FIFO" to "byte in your buffer" has two latency sources that dwarf it:</p>
+      <ol>
+        <li><strong>The FTDI / USB-serial latency timer.</strong> USB-serial adapters (FTDI, CP210x) don't interrupt the host per byte — they batch bytes into USB packets and flush on a timer. The FTDI default is <strong>16 ms</strong>. So a 1-byte GPS sentence can sit in the adapter for up to 16 ms before it ever crosses USB. For a 200 Hz loop (5 ms period) that's <em>three loop iterations</em> of pure dead time.</li>
+        <li><strong>VMIN/VTIME on the kernel side.</strong> Ask for VMIN=64 and the kernel won't wake you until 64 bytes pile up — great for throughput, terrible if your record is 20 bytes at 200 Hz.</li>
+      </ol>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — fixing IMU lag on the AGX Orin</div>
+        <p>An IMU on a USB-serial bridge into the Orin showed a stubborn ~16 ms lag in the EKF no matter how the code was tuned. The fix was one sysfs write — drop the FTDI latency timer from 16 ms to 1 ms:</p>
+        <div class="codeblock">
+          <div class="code-head">terminal <span class="lang">bash</span></div>
+<pre><code class="language-bash"># find the device, then read/write its latency_timer (milliseconds)
+cat /sys/bus/usb-serial/devices/ttyUSB0/latency_timer    # -&gt; 16
+echo 1 | sudo tee /sys/bus/usb-serial/devices/ttyUSB0/latency_timer
+
+# make it persistent with a udev rule (see Ch 03):
+# SUBSYSTEM=="usb-serial", ATTR{latency_timer}="1"
+</code></pre>
+        </div>
+        <p>Combined with <code>VMIN=0, VTIME=1</code> (wake on the first byte, 100 ms safety timeout), worst-case latency dropped from ~16 ms to ~1 ms — under one quarter of the 5 ms loop period. The on-chip UART (next section) doesn't have this timer at all.</p>
+      </div>
+
+      <p>The general latency model for a USB-serial port adds the adapter's flush window to the wire time:</p>
+      <div class="math-box">$$ t_\text{latency} \approx t_\text{flush} + n\cdot t_\text{frame}, \qquad t_\text{flush} = \text{latency\_timer} $$</div>
+      <p>At 16 ms vs 1 ms the <code>latency_timer</code> term <em>is</em> the budget; the frame time is noise next to it. Lower the timer, and you trade a little USB overhead (more, smaller packets) for responsiveness — exactly the right trade for a control loop.</p>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="ttyusb-vs-ttyths"><span class="sec-no">8</span>ttyUSB* vs ttyTHS*: two very different ports</h2>
+      <p>On the Jetson you'll see two families of serial device, and they behave differently enough to matter:</p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th></th><th><code>/dev/ttyUSB*</code></th><th><code>/dev/ttyTHS*</code></th></tr></thead>
+        <tbody>
+          <tr><td>What it is</td><td>USB-serial bridge (FTDI, CP210x, CH340)</td><td>Orin on-chip UART (Tegra High-Speed)</td></tr>
+          <tr><td>Path to host</td><td>UART → bridge chip → USB → host</td><td>UART → SoC bus directly</td></tr>
+          <tr><td>Latency floor</td><td>USB poll + <code>latency_timer</code> (1–16 ms)</td><td>per-byte/FIFO IRQ; tens of µs</td></tr>
+          <tr><td>Numbering</td><td>by enumeration order (use udev!)</td><td>fixed per the device tree pin</td></tr>
+          <tr><td>Wiring</td><td>USB cable, hot-pluggable</td><td>header pins (3.3 V TTL — not RS-232!)</td></tr>
+        </tbody>
+      </table></div>
+      <p>The on-chip <code>ttyTHS</code> ports have no USB hop and no batching timer, so they're the low-latency choice for a tightly-timed sensor — but they're 3.3 V logic-level pins, so a level shifter or transceiver is mandatory for anything off-board. USB adapters are convenient and hot-pluggable but inherit USB's latency floor, and their <code>ttyUSBn</code> number depends on plug order — which is exactly why Chapter 03's udev <code>by-id</code> symlinks exist. One more rule of the road: the kernel boot console may be parked on a UART; if a port is in <code>/proc/cmdline</code> as <code>console=ttyTHSx</code>, the kernel is writing log spam to it and it's not yours to use.</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Inspect any serial port from the shell</div>
+        <div class="codeblock">
+          <div class="code-head">terminal <span class="lang">bash</span></div>
+<pre><code class="language-bash">stty -F /dev/ttyUSB0 -a          # dump every termios flag (look for 'raw'/'-icanon')
+stty -F /dev/ttyUSB0 115200 raw -echo   # one-shot raw config from the shell
+udevadm info -q property /dev/ttyUSB0 | grep ID_   # vendor/serial for a udev rule
+dmesg | grep -i tty             # which UARTs the kernel found at boot
+</code></pre>
+        </div>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io06-efficiency">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">Why is 8N1 said to be only 80% efficient, even with a perfect, noise-free wire?</div>
+        <ul class="ex-options">
+          <li data-correct="false">The line discipline drops one byte in five.</li>
+          <li data-correct="true">Each 8-bit byte rides in a 10-bit frame (1 start + 8 data + 1 stop), so 8/10 of the wire bits are payload.</li>
+          <li data-correct="false">USB-serial adapters lose 20% of bytes to the latency timer.</li>
+          <li data-correct="false">Parity consumes 20% of the bandwidth.</li>
+        </ul>
+        <div class="ex-explain">Efficiency is $\eta = 8/N_\text{frame}$. For 8N1, $N_\text{frame} = 1+8+0+1 = 10$, so $\eta = 8/10 = 80\%$ — the start and stop bits are framing overhead, not data, and (note) 8N1 has <em>no</em> parity at all. Adding even parity (8E1) makes it 11 frame bits, $\approx 73\%$.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io06-byte-rate" data-answer="11520" data-tol="5">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">A port runs <strong>8N1 at 115200 baud</strong>. What is the maximum sustained throughput in <strong>bytes per second</strong>? (Hint: $\dot B = \text{baud}/N_\text{frame}$, and for 8N1 $N_\text{frame}=10$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">B/s</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$\dot B = 115200 / 10 = 11{,}520$ bytes/s. Each frame is $10 \times t_\text{bit} = 10 \times 8.68\,\mu\text{s} = 86.8\,\mu\text{s}$, and $1/86.8\,\mu\text{s} \approx 11{,}520$ frames/s — one byte each. The handy mental shortcut for 8N1 is simply "baud ÷ 10."</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io06-raw-termios">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — open a port in raw mode</div>
+        <div class="ex-q">Write the C that opens <code>/dev/ttyUSB0</code> at 115200 8N1, in <strong>raw</strong> mode, with a read that returns on the first byte but times out after ~100 ms. Name the three calls that set raw mode and the baud, and the two fields that set the read timing.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body"><code>cfmakeraw()</code> does the raw flag work; <code>cfsetispeed()</code>/<code>cfsetospeed()</code> set baud; <code>VMIN=0, VTIME=1</code> means "return on ≥1 byte, or after 1 decisecond." Open with <code>O_NOCTTY</code> so a stray Ctrl-C on the line can't signal you.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <div class="codeblock"><div class="code-head">raw_open.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;termios.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;unistd.h&gt;
+
+int raw_open(const char *path) {
+    int fd = open(path, O_RDWR | O_NOCTTY);
+    if (fd &lt; 0) return -1;
+
+    struct termios tio;
+    tcgetattr(fd, &amp;tio);
+    cfmakeraw(&amp;tio);                 /* raw: no canon/echo/signals/translation */
+    cfsetispeed(&amp;tio, B115200);     /* baud in */
+    cfsetospeed(&amp;tio, B115200);     /* baud out */
+    tio.c_cflag |= (CLOCAL | CREAD);
+    tio.c_cflag &amp;= ~CSTOPB;         /* 1 stop  */
+    tio.c_cflag &amp;= ~PARENB;         /* no parity -&gt; the N in 8N1 */
+    tio.c_cc[VMIN]  = 0;            /* return on >=1 byte... */
+    tio.c_cc[VTIME] = 1;           /* ...or after 100 ms */
+
+    tcflush(fd, TCIFLUSH);
+    tcsetattr(fd, TCSANOW, &amp;tio);
+    return fd;
+}
+</code></pre></div>
+          <p>The three "shape the port" calls are <code>cfmakeraw</code>, <code>cfsetispeed</code>, <code>cfsetospeed</code>; the two read-timing fields are <code>c_cc[VMIN]</code> and <code>c_cc[VTIME]</code>. Clearing <code>PARENB</code> + <code>CSTOPB</code> gives you the N1 of 8N1 (8 data bits is <code>cfmakeraw</code>'s default via <code>CS8</code>).</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>A UART frame is idle-high, a start bit, 8 data bits LSB-first, optional parity, 1–2 stop bits; 8N1 is 10 wire bits per byte, so efficiency is 80% and byte rate is baud ÷ 10. Linux wraps the port in the TTY stack (core → line discipline → driver); the default canonical mode edits and buffers your bytes, so always switch to <strong>raw</strong> via <code>cfmakeraw()</code> + <code>cfset{i,o}speed()</code>, and use <code>VMIN/VTIME</code> to trade latency against batching. Keep XON/XOFF off for binary data; prefer RTS/CTS. The real latency killer on USB-serial is the <code>latency_timer</code> (16 ms default — drop it to 1 ms); the on-chip <code>ttyTHS</code> ports skip USB entirely for the lowest latency. Next: how data actually moves — interrupts, DMA, and MMIO.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+<script src="../assets/io-sim.js"></script>
+<script>EM.ioDemo.uartFrame("sim-uart");</script>
+</body>
+</html>

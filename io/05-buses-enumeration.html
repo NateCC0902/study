@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Buses &amp; Enumeration — Linux I/O for Robotics</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="05-buses-enumeration">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · Ch 05</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · Chapter 05 · The Hardware Map</div>
+        <h1>Buses &amp; Enumeration: how the kernel finds your hardware</h1>
+        <p>Plug an NVMe drive into the Orin and it just appears. Wire an IMU onto the I²C bus and the kernel sees <em>nothing</em> — until you tell it, by hand, in the device tree. This chapter is about <strong>why</strong> those two worlds exist, and exactly what you have to declare for the silent buses.</p>
+        <div class="meta"><span>⏱ ~40 min</span><span>🧠 enumeration</span><span>⚡ device tree</span><span>∑ bus math</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="two-worlds"><span class="sec-no">1</span>Two worlds: self-describing vs. silent buses</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Every device hangs off a <strong>bus</strong>, and buses fall into two camps that behave completely differently at boot. In the first camp — <strong>PCIe</strong> and <strong>USB</strong> — the bus is <em>enumerable</em>: the host can walk it, ask each device "who are you, and what do you need," and get a machine-readable answer. The kernel discovers the whole topology automatically. Hot-plug a webcam and you didn't configure anything; <code>udev</code> (Ch 03) fired because enumeration already happened.</p>
+      <p>The second camp — <strong>I²C, SPI, SDIO, CAN</strong> — is <em>non-discoverable</em>. There is no protocol step where a chip announces "I'm a BMP280 barometer at address 0x76." The bus carries clock and data lines; that's it. The SoC has no way to know whether the thing on the wire is a temperature sensor, an OLED panel, or nothing at all. For these buses you must <strong>declare</strong> every device up front, in the <strong>device tree</strong>.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one distinction that matters</div>
+        <p><strong>Enumerable bus</strong> → the kernel asks the device what it is. <strong>Silent bus</strong> → you tell the kernel what is there. Everything else in this chapter follows from that single line.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>why silence is structural, not lazy</small></div>
+      <p>The silence isn't an oversight — it's geometry. An I²C device is addressed by a <strong>7-bit address</strong> baked into the chip (sometimes with one or two strap pins). Seven bits gives</p>
+      <div class="math-box">$$ 2^{7} = 128 \text{ addresses} \;-\; 16 \text{ reserved} \;=\; 112 \text{ usable slots per bus} $$</div>
+      <p>The reserved block ($0000\,\mathrm{xxx}$ and $1111\,\mathrm{xxx}$ — 16 addresses) covers the general-call address, 10-bit addressing escapes, and so on. So a single I²C bus can host at most 112 chips, and the only "discovery" you can do is a blind probe: hammer each of the 112 addresses and see if anyone ACKs. That tells you something is at <code>0x76</code> — never <em>what</em> it is. SPI is worse: it has no addresses at all. Each peripheral gets a dedicated <strong>chip-select (CS)</strong> line, and the master picks a device by pulling its CS low. No CS pin, no device — and nothing on the wire to identify it.</p>
+
+      <div class="mermaid">
+flowchart LR
+    subgraph EN["Enumerable — kernel discovers"]
+      PCIe["PCIe<br/>config space"] --> AUTO["auto-bind driver"]
+      USB["USB<br/>descriptors"] --> AUTO
+    end
+    subgraph SI["Silent — you declare in DT"]
+      I2C["I²C (7-bit addr)"] --> DT["device tree node"]
+      SPI["SPI (chip-select)"] --> DT
+      SDIO["SDIO"] --> DT
+      CAN["CAN"] --> DT
+    end
+    DT --> AUTO
+</div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="pcie-enumeration"><span class="sec-no">2</span>PCIe enumeration: config space, BDF, and BARs</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>a building with numbered rooms</small></div>
+      <p>PCIe is a tree of point-to-point links fanning out through switches. Every endpoint exposes a small, standardized chunk of registers called <strong>configuration space</strong> — 256 bytes in legacy PCI, 4&nbsp;KiB in PCIe (extended config). At boot, firmware (or the kernel) performs <strong>enumeration</strong>: it does a depth-first walk, reading config space at every possible address. If something answers, it's a device; the walk continues behind any bridges it finds.</p>
+      <p>Each function is named by its <strong>BDF</strong> — <strong>B</strong>us : <strong>D</strong>evice . <strong>F</strong>unction. That's the address you see in <code>lspci</code> as <code>0001:01:00.0</code> (with a 16-bit <em>domain</em> prefix on top). The geometry:</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>how big the address space is</small></div>
+      <div class="math-box">$$ \underbrace{8}_{\text{bus}}\!:\underbrace{5}_{\text{device}}.\underbrace{3}_{\text{function}} \;\Rightarrow\; 2^{8}\cdot 2^{5}\cdot 2^{3} = 256 \cdot 32 \cdot 8 = 65{,}536 \text{ functions per domain} $$</div>
+      <p>The first registers of config space hold the read-only <strong>Vendor ID</strong> and <strong>Device ID</strong> — that 32-bit pair (e.g. <code>10de:2300</code>) is exactly how Linux picks a driver: it matches the IDs against each driver's <code>pci_device_id</code> table. The device also publishes its memory needs through <strong>BARs</strong> (Base Address Registers). A BAR says "I need a 16&nbsp;MiB window of MMIO" (Ch 07); the kernel finds a free region in the physical address map, programs the BAR with the base, and from then on the driver reaches the device's registers by reading and writing that window. Discovery, identification, and resource assignment — all automatic, all from the bus itself.</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — the Orin's PCIe just works</div>
+        <p>On the AGX Orin USV, the NVMe SSD and the M.2 WiFi card sit on PCIe. We never wrote a line of config for them. The boot ROM enumerated the links, assigned BARs, and the <code>nvme</code> and WiFi drivers bound by Vendor/Device ID. Pull the drive, plug a different NVMe — same story, zero config. That is the enumerable world earning its keep.</p>
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">inspect the PCIe tree <span class="lang">bash</span></div>
+<pre><code class="language-bash"># Topology view: buses, bridges, endpoints as a tree
+lspci -tv
+
+# One device, verbose: BARs, IRQ, link speed/width, capabilities
+lspci -s 0001:01:00.0 -vvv
+
+# Raw IDs and kernel driver bound to each function
+lspci -nnk
+
+# The same data straight from sysfs (Ch 02) — no lspci needed
+cat /sys/bus/pci/devices/0001:01:00.0/vendor   # e.g. 0x10de
+cat /sys/bus/pci/devices/0001:01:00.0/device
+cat /sys/bus/pci/devices/0001:01:00.0/resource # BAR base/limit/flags, one per line
+ls  /sys/bus/pci/devices/0001:01:00.0/driver   # symlink -&gt; the bound driver
+</code></pre>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="usb-enumeration"><span class="sec-no">3</span>USB enumeration: descriptors and dynamic addresses</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>a handshake on plug-in</small></div>
+      <p>USB is the other enumerable bus, but it discovers differently. When you plug a device in, the hub detects the electrical change and reports it upstream. The host resets the new device — which always starts answering at <strong>address 0</strong> — then assigns it a fresh 7-bit address ($2^7 = 128$, address 0 reserved → 127 devices per bus). Now addressed, the device hands over its <strong>descriptors</strong>: a small tree of structs describing itself.</p>
+      <p>The descriptor hierarchy is the whole point. A <em>device descriptor</em> carries <code>idVendor</code>/<code>idProduct</code> (the match keys, just like PCIe). Under it sit <em>configuration</em> → <em>interface</em> → <em>endpoint</em> descriptors. Critically, the <strong>interface</strong> descriptor names a <em>class</em> — Mass Storage, CDC-ACM serial, HID, Video. That's why a generic USB-serial adapter binds to a generic driver with no per-device config: it advertises class 0x02 (CDC) or matches the FTDI VID/PID, and the kernel knows what to do.</p>
+
+      <div class="mermaid">
+flowchart TD
+    DEV["Device descriptor<br/>idVendor / idProduct"] --> CFG["Configuration<br/>power, # interfaces"]
+    CFG --> IF["Interface<br/>class (e.g. CDC serial)"]
+    IF --> EP["Endpoint(s)<br/>direction, type, maxpkt"]
+</div>
+
+      <div class="codeblock">
+        <div class="code-head">inspect the USB tree <span class="lang">bash</span></div>
+<pre><code class="language-bash"># Tree: hubs, devices, the driver bound to each interface, link speeds
+lsusb -t
+
+# All devices with VID:PID and product strings
+lsusb
+
+# Full descriptor dump for one device (Bus 001 Device 004)
+lsusb -v -s 001:004 | grep -E 'idVendor|idProduct|bInterfaceClass'
+
+# From sysfs: the kernel-assigned address and the descriptors
+cat /sys/bus/usb/devices/1-2/idVendor      # e.g. 0403  (FTDI)
+cat /sys/bus/usb/devices/1-2/idProduct     # e.g. 6001
+cat /sys/bus/usb/devices/1-2/speed         # 12 / 480 / 5000  (Mb/s)
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Enumeration is why <code>udev</code> can do its job</div>
+        <p>Remember Ch 03: <code>udev</code> matches on <code>idVendor</code>/<code>idProduct</code>/<code>serial</code>. Those values <em>exist</em> because USB enumeration extracted them from the descriptors. On a silent bus there is no serial number to match — which is exactly why naming a SPI sensor "persistently" is a non-question: you placed it at chip-select 0 in the device tree, so it's deterministic by construction.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="i2c-spi-sdio"><span class="sec-no">4</span>I²C, SPI &amp; SDIO: no auto-discovery, ever</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>just clock and data</small></div>
+      <p>Step down to the silent buses and the contract inverts. <strong>I²C</strong> is two wires (SCL clock, SDA data) shared by every chip; each device is picked by its 7-bit address in the first byte of a transaction. <strong>SPI</strong> is four wires (SCLK, MOSI, MISO, plus a per-device CS); the master selects a slave by asserting its chip-select. Neither carries an ID. The kernel's only discovery tool is <code>i2cdetect</code>, which ACK-probes the address range and prints which slots respond — useful to confirm wiring, useless for identification.</p>
+
+      <div class="codeblock">
+        <div class="code-head">probing I²C (confirms presence, not identity) <span class="lang">bash</span></div>
+<pre><code class="language-bash"># List the I²C adapters the SoC exposes
+i2cdetect -l
+
+# Scan bus 1: each cell is an address that ACKed (here 0x76 = a barometer)
+i2cdetect -y -r 1
+#      0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f
+# 70: -- -- -- -- -- -- 76 --
+
+# Read one byte from register 0xD0 (chip-id reg) of the device at 0x76
+i2cget -y 1 0x76 0xD0     # returns 0x58 -&gt; that's a BMP280; YOU had to know that
+</code></pre>
+      </div>
+
+      <div class="layer"><span class="step">④</span> Real case <small>where the SDIO WiFi lives</small></div>
+      <p><strong>SDIO</strong> is the SD-card protocol carrying I/O instead of storage — a common home for embedded WiFi/BT modules. SDIO has a thin <em>card</em>-enumeration step (the controller can read a card's CIS to learn it's an I/O card), but the SoC still cannot know <em>which</em> SDIO controller you wired the module to, what its reference clock is, or how its reset GPIO and interrupt are routed. All of that is board-specific and invisible to any protocol. So even SDIO modules must be <strong>declared in the device tree</strong> — you point the kernel at the right SDHCI controller node and hand it the clock, power, and IRQ wiring.</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — the Orin's split personality</div>
+        <p>This is the chapter's punchline. On our AGX Orin USV the PCIe NVMe and the PCIe WiFi card <em>auto-enumerate</em> — nothing to do. But when we add an <strong>SDIO</strong> WiFi/BT module on a carrier board, it is silent: we must add a DT node under the SDHCI controller, set <code>status = "okay"</code>, declare the bus clock and the module's reset/IRQ pins, and apply the pinmux. Same WiFi function, two completely different bring-up stories — decided entirely by which bus it hangs on.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="device-tree"><span class="sec-no">5</span>The device tree: declaring the silent half</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>a wiring diagram the kernel can read</small></div>
+      <p>The <strong>device tree (DT)</strong> is a data structure — not code — describing the hardware the kernel can't discover. It's authored as <code>.dts</code> text, compiled to a binary <code>.dtb</code> blob with <code>dtc</code>, and handed to the kernel at boot. The kernel walks it exactly the way it walks PCIe config space, but here <em>you</em> are the bus that announces the devices.</p>
+      <p>The grammar is small. A <strong>node</strong> represents a device or bus; the <strong>compatible</strong> string is the match key (the DT equivalent of a Vendor/Device ID) that selects a driver; <strong>reg</strong> gives the address on the parent bus (an I²C 7-bit address, a SPI chip-select index, or an MMIO base+size); <strong>status</strong> = <code>"okay"</code> turns the node on (<code>"disabled"</code> leaves it dormant); and <strong>pinmux</strong> references tell the SoC's pin controller to route the right physical pins to the right peripheral block.</p>
+
+      <div class="codeblock">
+        <div class="code-head">an I²C sensor, declared <span class="lang">device tree</span></div>
+<pre><code class="language-c">&amp;i2c1 {                          /* extend the SoC's I2C1 controller node */
+    status = "okay";             /* turn the bus on */
+    clock-frequency = &lt;400000&gt;;   /* 400 kHz fast-mode */
+
+    barometer@76 {               /* node name@unit-address */
+        compatible = "bosch,bmp280";   /* picks the bmp280 driver */
+        reg = &lt;0x76&gt;;            /* the 7-bit I2C address */
+        status = "okay";
+    };
+};
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the node exists but nothing happens</div>
+        <p>Three classic silent failures: <code>status</code> left as <code>"disabled"</code> (the kernel skips the node), a <code>compatible</code> string with no matching driver built in (the device is described but never bound — check <code>dmesg</code>), or correct DT but the <strong>pinmux</strong> still routes those pads to a different function. The DT can be perfect and the device still dead if the pins aren't connected to the controller.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="overlays-jetson-io"><span class="sec-no">6</span>Overlays and jetson-io</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>patch the tree without forking it</small></div>
+      <p>Editing the base <code>.dts</code> and rebuilding the whole tree is heavy and fragile. <strong>Overlays</strong> (<code>.dtbo</code>) are small fragments applied on top of the base DTB at boot — the clean way to enable a header peripheral or a carrier-board device without forking the kernel's device tree. On Jetson, the <code>jetson-io</code> tool is the friendly front-end: it edits the 40-pin header configuration (which pins are GPIO vs. I²C vs. SPI vs. PWM) and writes the matching overlay so you don't hand-author pinmux.</p>
+
+      <div class="codeblock">
+        <div class="code-head">device tree on a running Jetson <span class="lang">bash</span></div>
+<pre><code class="language-bash"># The kernel exposes the live tree it booted with, under /proc
+ls /proc/device-tree/                     # nodes as directories
+cat /proc/device-tree/compatible | tr '\0' '\n'   # board's compatible strings
+cat /proc/device-tree/i2c@3160000/status  # "okay" or "disabled"
+
+# Configure the 40-pin header / apply an overlay (NVIDIA tool)
+sudo /opt/nvidia/jetson-io/jetson-io.py
+
+# Compile / decompile a tree by hand when you need to
+dtc -I dtb -O dts -o board.dts /boot/dtb/your-board.dtb   # read the blob back
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The mental model in one line</div>
+        <p>PCIe/USB: the kernel reads config space / descriptors and binds by <code>VendorID:DeviceID</code>. I²C/SPI/SDIO/CAN: <em>you</em> write a DT node and the kernel binds by <code>compatible</code>. The device tree is just the config space you have to fill in yourself.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="match-the-bus"><span class="sec-no">7</span>Match the bus to the load</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>bandwidth, not just discovery</small></div>
+      <p>Discovery is half the decision; <strong>throughput</strong> is the other half. The bus you declare also caps how much data can flow. A useful sanity check is the raw capacity of a serial-ish bus: bits per second divided by the framing overhead. For a payload stream of $B$ useful bytes per second over a bus of $R$ bit/s with $f$ framing bits per useful byte,</p>
+      <div class="math-box">$$ B = \frac{R}{f} \quad\Longrightarrow\quad \text{e.g. I²C @ 400\,kHz},\; f \approx 9 \text{ bits/byte} \;\Rightarrow\; B \approx \frac{400{,}000}{9} \approx 44\,\text{kB/s} $$</div>
+      <p>That's why a high-rate LiDAR never sits on I²C: even before addressing overhead, 44&nbsp;kB/s can't carry it. The simulator below plots typical maxima for every bus we've met on a log axis, against a draggable "required throughput" line — drag it up and watch the slow buses drop out. Discovery decides <em>whether</em> the kernel finds the device; this decides whether the bus can <em>feed</em> it.</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>📊</span> Bus bandwidth vs. required throughput</div>
+        <canvas id="sim-bus"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What to notice</div>
+        <p>The axis is <strong>logarithmic</strong> — each gridline is 10×. The orange bars are buses that meet your demand line; grey bars fall short. Notice how I²C/UART/CAN cluster at the bottom (≤ a few Mb/s) while PCIe and 10GbE sit four-plus decades higher. Drag the red line to a LiDAR-class 100&nbsp;Mb/s and only USB&nbsp;3, PCIe, and 10GbE survive — the same buses that happen to be <em>enumerable</em>. Fast and self-describing tend to come together; slow and silent tend to come together. That correlation is the whole reason the device tree exists.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io05-which-needs-dt">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You add four peripherals to the Orin: a PCIe NVMe drive, a USB GPS dongle, an I²C barometer, and a SPI IMU. Which of them must be <strong>declared in the device tree</strong> for the kernel to find them?</div>
+        <ul class="ex-options">
+          <li data-correct="false">All four — the kernel can't discover anything without a DT.</li>
+          <li data-correct="false">Only the NVMe drive, because storage needs special config.</li>
+          <li data-correct="true">The I²C barometer and the SPI IMU — those buses are non-discoverable; PCIe and USB auto-enumerate.</li>
+          <li data-correct="false">Only the USB GPS, because USB needs descriptors loaded manually.</li>
+        </ul>
+        <div class="ex-explain">PCIe (config space) and USB (descriptors) are enumerable — the kernel reads each device's identity off the bus and binds by Vendor/Device ID, no DT entry needed. I²C and SPI carry only clock/data and no identity, so each device must be declared as a DT node with a <code>compatible</code> string and a <code>reg</code> (the I²C address or SPI chip-select).</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io05-i2c-usable" data-answer="112" data-tol="0">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">I²C uses a 7-bit address, and the I²C spec reserves 16 addresses (the two blocks $0000\,\mathrm{xxx}$ and $1111\,\mathrm{xxx}$). How many <strong>usable</strong> device addresses remain on a single I²C bus?</div>
+        <input class="ex-input" type="number" step="1" placeholder="value"><span class="ex-unit">addresses</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$2^{7} = 128$ total, minus $16$ reserved $= 112$ usable. In practice you also can't share an address between two chips on the same bus, which is why boards add a second I²C controller (or an address-strap pin) when two identical sensors are needed.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io05-inspect-tree">
+        <div class="ex-head"><span class="badge">Q3</span> Hands-on — inspect both worlds</div>
+        <div class="ex-q">On a Jetson (or any Linux box), show the commands to (a) read the live device-tree node for an I²C controller and confirm it's enabled, and (b) print the PCIe topology with the driver bound to each function. Explain what each output proves.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">The booted device tree is exposed under <code>/proc/device-tree/</code> as a directory of nodes; each property is a file. For PCIe, <code>lspci</code> has a tree flag and a "kernel driver" flag.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <div class="codeblock"><div class="code-head">inspect.sh <span class="lang">bash</span></div>
+<pre><code class="language-bash"># (a) The DECLARED world — read the live device tree
+ls /proc/device-tree/                      # all nodes the kernel booted with
+cat /proc/device-tree/i2c@3160000/status   # must print "okay", else the bus is off
+ls /proc/device-tree/i2c@3160000/          # child nodes = the sensors YOU declared
+
+# (b) The ENUMERATED world — PCIe discovered itself
+lspci -tv                                  # tree of buses/bridges/endpoints
+lspci -nnk                                 # [vendor:device] + "Kernel driver in use:"
+</code></pre></div>
+          <p>Output (a) proves the kernel only knows about the I²C sensor because a DT node declared it — delete the node and the device vanishes from the kernel's view even though the chip is still soldered on. Output (b) proves the opposite: each PCIe function appears with a Vendor:Device ID and a bound driver that the kernel obtained by <em>reading config space</em>, with nothing in the DT. Two worlds, one kernel device model.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>Buses split into two worlds. <strong>Enumerable</strong> buses — PCIe (config space, BDF, BARs, <code>lspci -tv</code>) and USB (descriptors, dynamic addresses, <code>lsusb -t</code>) — let the kernel discover and identify devices itself and bind by Vendor/Device ID. <strong>Silent</strong> buses — I²C (7-bit address, 112 usable), SPI (chip-select), SDIO, CAN — carry no identity, so every device must be <strong>declared in the device tree</strong>: a node with <code>compatible</code>, <code>reg</code>, <code>status&nbsp;=&nbsp;"okay"</code>, and pinmux, patched cleanly via overlays (<code>jetson-io</code> on Jetson). On the Orin USV, PCIe NVMe/WiFi auto-enumerate while an SDIO WiFi module must be declared. And the bus you pick caps throughput — match it to the load. Next: zoom into one silent bus and its kernel plumbing — the serial &amp; TTY layer.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+<script src="../assets/io-sim.js"></script>
+<script>EM.ioDemo.busBandwidth("sim-bus");</script>
+</body>
+</html>

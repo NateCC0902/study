@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Glossary — Linux I/O for Robotics</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="glossary">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · Ref</span>
+  <span class="done-chip" id="done-chip">Reference</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · Reference</div>
+        <h1>Glossary <span style="opacity:.7">/ 术语表</span></h1>
+        <p>One page, every term in the course, bilingual. This is a lookup table, not a lesson — skim it before an interview, search it when a kernel log throws a word at you, or read it top-to-bottom once to see how the whole stack fits together. Each term gets its English name, the 中文 you'll hear in a Shenzhen lab, and a one-line definition tight enough to be useful at 2 a.m. on a boat. The running example throughout the course — and the device most of these terms were learned on — is the <strong>Jetson AGX Orin</strong> brain of an unmanned surface vessel (USV).</p>
+        <div class="meta"><span>📚 reference</span><span>🌐 EN / 中文</span><span>🔎 6 groups · 60+ terms</span></div>
+      </section>
+
+      <p>The stack below is the spine of the course. Every term in this glossary lives at one of these layers — when a word confuses you, first ask <em>which box does it belong to?</em></p>
+
+      <div class="mermaid">
+flowchart TB
+    APP["Your code<br/>(ROS 2 node)"] -->|"syscall: read/write/ioctl"| VFS["VFS<br/>everything is a file"]
+    VFS --> DRV["Device driver<br/>char / block / net"]
+    DRV --> BUS["Bus<br/>PCIe · USB · I2C · SPI · SDIO · CAN"]
+    BUS --> HW["Hardware<br/>sensor · NIC · actuator"]
+    DRV -.->|"sysfs / procfs"| OBS["Observability<br/>/sys · /proc"]
+    HW -.->|"interrupt / DMA"| DRV
+</div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="core-io"><span class="sec-no">1</span>Core I/O <span style="opacity:.6;font-weight:400">核心 I/O</span></h2>
+      <p>The bedrock: the boundary between your program and the kernel, and the abstraction — the file descriptor — that everything else hangs off. If these are fuzzy, nothing above makes sense.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Term</th><th>中文</th><th>One-line definition</th></tr></thead>
+        <tbody>
+          <tr><td><strong>System call (syscall)</strong></td><td>系统调用</td><td>The controlled doorway from user space into the kernel; the CPU traps, switches privilege, runs kernel code, returns. <code>read</code>, <code>write</code>, <code>ioctl</code> are syscalls.</td></tr>
+          <tr><td><strong>User space / kernel space</strong></td><td>用户态 / 内核态</td><td>Two privilege rings. Your process runs unprivileged; only the kernel touches hardware. The syscall is the only legal crossing.</td></tr>
+          <tr><td><strong>File descriptor (fd)</strong></td><td>文件描述符</td><td>A small non-negative integer indexing your process's open-file table. <code>0/1/2</code> are stdin/stdout/stderr; everything you open gets the next free one.</td></tr>
+          <tr><td><strong>VFS (Virtual File System)</strong></td><td>虚拟文件系统</td><td>The kernel layer that makes files, sockets, devices and pipes all answer the same <code>read</code>/<code>write</code>/<code>close</code> API — the machinery behind "everything is a file."</td></tr>
+          <tr><td><strong>inode</strong></td><td>索引节点</td><td>The on-disk (or in-memory) record of a filesystem object's metadata — type, permissions, and for a device node, the major/minor pair. Not the name; names live in directories.</td></tr>
+          <tr><td><strong>Blocking I/O</strong></td><td>阻塞 I/O</td><td>A <code>read()</code> that puts your thread to sleep until data arrives. Simple, but one slow device stalls the whole thread.</td></tr>
+          <tr><td><strong>Non-blocking I/O</strong></td><td>非阻塞 I/O</td><td>Open with <code>O_NONBLOCK</code>; a <code>read()</code> with no data returns immediately with <code>-1</code> and <code>errno == EAGAIN</code> instead of sleeping. The prerequisite for an event loop.</td></tr>
+          <tr><td><strong>Partial read / short read</strong></td><td>部分读取</td><td><code>read()</code> may return fewer bytes than asked — it is not an error. Robust code loops until it has a full message or hits EOF.</td></tr>
+          <tr><td><strong>Buffering (stdio)</strong></td><td>缓冲</td><td>The C library hoards bytes in a userspace buffer and flushes in big chunks, so one <code>fwrite</code> ≠ one syscall. Great for throughput, deadly for latency if you forget to flush.</td></tr>
+          <tr><td><strong>Raw / unbuffered I/O</strong></td><td>无缓冲 I/O</td><td>Calling <code>read</code>/<code>write</code> directly — one syscall per call, no library hoarding. What you want for a 200 Hz sensor where staleness is a bug.</td></tr>
+          <tr><td><strong>Page cache</strong></td><td>页缓存</td><td>The kernel's RAM cache of file/block data. A <code>write()</code> to a file lands here first and is flushed to media later — fast, but the bytes aren't durable until <code>fsync()</code>.</td></tr>
+          <tr><td><strong>errno</strong></td><td>错误码</td><td>The thread-local integer a failing syscall sets to say <em>why</em>. <code>EINTR</code>, <code>EAGAIN</code>, <code>ENODEV</code> are the ones you'll handle on a robot.</td></tr>
+          <tr><td><strong>EINTR</strong></td><td>系统调用被中断</td><td>"Interrupted system call" — a signal arrived mid-syscall. Not a real failure; retry the call.</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The amortization formula you keep coming back to</div>
+        <p>Every syscall costs a fixed overhead (trap + privilege switch + return), call it $C_s \approx 1\text{–}3\,\mu\text{s}$. If you read $B$ bytes per call at a per-byte cost $c_b$, the effective rate is</p>
+        <div class="math-box">$$ R_\text{eff} = \frac{B}{C_s + B\,c_b} \xrightarrow{B \to \infty} \frac{1}{c_b} $$</div>
+        <p>Small reads spend all their time in $C_s$; big reads amortize it away. This single fact is <em>why</em> stdio buffers, why you batch sensor reads, and why <code>io_uring</code> exists.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="devices-drivers"><span class="sec-no">2</span>Devices &amp; drivers <span style="opacity:.6;font-weight:400">设备与驱动</span></h2>
+      <p>How a lump of silicon becomes a file you can <code>open()</code>. The driver is the translator; <code>/dev</code> is the phone book; <code>/sys</code> is the live map of what's plugged in.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Term</th><th>中文</th><th>One-line definition</th></tr></thead>
+        <tbody>
+          <tr><td><strong>/dev</strong></td><td>设备目录</td><td>The directory of device nodes. Each node is a name carrying a (type, major, minor) triple that routes <code>open()</code> to a driver. Populated at boot by <code>devtmpfs</code>.</td></tr>
+          <tr><td><strong>sysfs (/sys)</strong></td><td>系统文件系统</td><td>An in-RAM filesystem exposing the kernel's device model as browsable files. <code>cat</code> an attribute to read a register-ish value; <code>echo</code> to one to poke hardware.</td></tr>
+          <tr><td><strong>procfs (/proc)</strong></td><td>进程文件系统</td><td>Sibling of sysfs for process and kernel state — <code>/proc/interrupts</code>, <code>/proc/cpuinfo</code>, <code>/proc/PID/fd</code>.</td></tr>
+          <tr><td><strong>Character device</strong></td><td>字符设备</td><td>A byte-stream device — UART, I²C bus, GPIO, camera. No page cache between you and the driver. Shows as <code>c</code> in <code>ls -l</code>.</td></tr>
+          <tr><td><strong>Block device</strong></td><td>块设备</td><td>A fixed-block, random-access, cached device — eMMC, NVMe, SD card. Goes through the block layer and page cache. Shows as <code>b</code>.</td></tr>
+          <tr><td><strong>Major / minor number</strong></td><td>主设备号 / 次设备号</td><td>The two integers in a device node. Major selects the driver; minor selects which instance. Packed into a <code>dev_t</code>.</td></tr>
+          <tr><td><strong>dev_t</strong></td><td>设备号</td><td>The 32-bit (modern: 12-bit major + 20-bit minor) packed device number. Encode with <code>MKDEV(maj, min)</code>; decode with <code>MAJOR()</code>/<code>MINOR()</code>.</td></tr>
+          <tr><td><strong>devtmpfs</strong></td><td>设备临时文件系统</td><td>The tmpfs the kernel auto-mounts on <code>/dev</code> at boot and pre-populates with nodes as drivers register, so <code>/dev</code> exists before udev runs.</td></tr>
+          <tr><td><strong>udev / udevd</strong></td><td>设备管理器</td><td>The userspace daemon that listens for kernel <em>uevents</em> and applies rules — renaming, symlinking, setting permissions. How you get a stable <code>/dev/gps</code>.</td></tr>
+          <tr><td><strong>uevent</strong></td><td>设备事件</td><td>A netlink message the kernel emits on add/remove/change of a device. udev's input.</td></tr>
+          <tr><td><strong>Kernel module (.ko)</strong></td><td>内核模块</td><td>Driver code loaded into the running kernel at runtime with <code>modprobe</code>/<code>insmod</code> — no reboot. Inspect with <code>modinfo</code>, list with <code>lsmod</code>.</td></tr>
+          <tr><td><strong>In-tree / out-of-tree</strong></td><td>主线 / 树外驱动</td><td>In-tree drivers ship with the kernel source and rebuild with it; out-of-tree drivers (vendor blobs, DKMS) are compiled separately and break on kernel upgrade.</td></tr>
+          <tr><td><strong>Firmware</strong></td><td>固件</td><td>A binary blob the driver loads <em>into</em> the device (Wi-Fi, GPU) at probe time via <code>request_firmware()</code>, from <code>/lib/firmware</code>. A missing file shows as error <code>-2</code> (ENOENT) in <code>dmesg</code>.</td></tr>
+          <tr><td><strong>Device tree (DT)</strong></td><td>设备树</td><td>A data structure (<code>.dts</code> → <code>.dtb</code>) that <em>describes</em> non-discoverable hardware to the kernel — addresses, IRQs, <code>compatible</code> strings — so the right driver binds. Essential on ARM SoCs like the Orin.</td></tr>
+          <tr><td><strong>ioctl</strong></td><td>设备控制</td><td>The catch-all syscall for device commands that don't fit <code>read</code>/<code>write</code> — set a serial baud, query a CAN bitrate, fire a custom command. <code>ioctl(fd, REQUEST, &amp;arg)</code>.</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — the USV's Wi-Fi is the whole second column</div>
+        <p>On the AGX Orin, the onboard Wi-Fi module sits on <strong>SDIO</strong> (a non-discoverable bus), so it must be <em>declared</em> in the <strong>device tree</strong>; its <strong>out-of-tree</strong> vendor <strong>kernel module</strong> loads a <strong>firmware</strong> blob from <code>/lib/firmware</code>; <strong>udev</strong> then gives the resulting interface a predictable name. Every term in that sentence is a row above — and if any one step fails, <code>dmesg</code> tells you which.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="buses"><span class="sec-no">3</span>Buses &amp; enumeration <span style="opacity:.6;font-weight:400">总线与枚举</span></h2>
+      <p>The wires hardware actually talks over. The single most useful distinction: buses that <em>find their own devices</em> (PCIe, USB) versus buses where you must <em>tell the kernel what's there</em> (I²C, SPI, SDIO) via the device tree.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Term</th><th>中文</th><th>One-line definition</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Enumeration</strong></td><td>枚举</td><td>The process of discovering what's on a bus and assigning addresses. PCIe and USB enumerate automatically; I²C/SPI/SDIO devices must be declared in the device tree.</td></tr>
+          <tr><td><strong>PCIe</strong></td><td>PCIe 高速总线</td><td>High-speed, switched, point-to-point serial bus for NVMe, NICs, GPUs. Self-enumerating; inspect topology with <code>lspci -t</code>.</td></tr>
+          <tr><td><strong>BDF (Bus:Device.Function)</strong></td><td>PCIe 地址</td><td>A PCIe device's address, e.g. <code>0000:05:00.0</code> = domain:bus:device.function. The handle <code>lspci</code> prints.</td></tr>
+          <tr><td><strong>BAR (Base Address Register)</strong></td><td>基址寄存器</td><td>A PCIe config-space register telling the OS where to map the device's MMIO window into physical memory.</td></tr>
+          <tr><td><strong>USB</strong></td><td>通用串行总线</td><td>Hot-pluggable, tree-topology, self-enumerating bus. Devices describe themselves via <em>descriptors</em>; see the tree with <code>lsusb -t</code>.</td></tr>
+          <tr><td><strong>USB descriptor</strong></td><td>USB 描述符</td><td>The self-describing data (idVendor, idProduct, serial, endpoints) a USB device reports on plug-in. udev rules match on these.</td></tr>
+          <tr><td><strong>I²C</strong></td><td>I²C 总线</td><td>Two-wire (SDA/SCL) multi-drop bus for low-rate sensors. 7-bit addressing → 128 addresses (a few reserved). Must be declared in the DT.</td></tr>
+          <tr><td><strong>SPI</strong></td><td>SPI 总线</td><td>Four-wire (MOSI/MISO/SCLK/CS) full-duplex bus; faster than I²C, addressed by chip-select line, not by address. Declared in the DT.</td></tr>
+          <tr><td><strong>SDIO</strong></td><td>SDIO 总线</td><td>SD-card electrical bus repurposed for I/O peripherals (notably Wi-Fi). Non-discoverable — must be declared in the device tree.</td></tr>
+          <tr><td><strong>MMIO</strong></td><td>内存映射 I/O</td><td>Memory-Mapped I/O: device registers appear as physical memory addresses, so a CPU load/store reads/writes a register. Access from userspace via <code>mmap</code> and <code>volatile</code>.</td></tr>
+          <tr><td><strong>compatible string</strong></td><td>兼容性标识</td><td>The DT property (e.g. <code>"ti,tmp102"</code>) that names a device's type so the kernel can pick the matching driver.</td></tr>
+          <tr><td><strong>Device tree overlay</strong></td><td>设备树覆盖</td><td>A patch (<code>.dtbo</code>) applied on top of the base DT to enable a header pin or attach a sensor without recompiling the whole tree — e.g. via <code>jetson-io</code>.</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Why "is this bus fast enough?" is just a comparison</div>
+        <p>Pick a bus by comparing your required throughput against its ceiling. I²C standard-mode tops out near $100\,\text{kbit/s}$ (fast-mode $400\,\text{k}$); a single PCIe Gen4 lane carries about $1.97\,\text{GB/s}$ usable after 128b/130b encoding. A 16-channel lidar at $1\,\text{Mpoint/s} \times 16\,\text{B/point}$ needs</p>
+        <div class="math-box">$$ R_\text{req} = 1{\times}10^6 \cdot 16 = 16\,\text{MB/s} $$</div>
+        <p>— laughably impossible over I²C, trivial over PCIe or Gigabit Ethernet. Choosing a bus is this one inequality, $R_\text{req} \le R_\text{bus}$, done per device.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="data-movement"><span class="sec-no">4</span>Data movement &amp; multiplexing <span style="opacity:.6;font-weight:400">数据搬运与多路复用</span></h2>
+      <p>Two questions: <em>how</em> bytes physically get from the device into RAM (interrupts vs. DMA), and how one thread watches <em>many</em> devices at once without busy-waiting (epoll, io_uring).</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Term</th><th>中文</th><th>One-line definition</th></tr></thead>
+        <tbody>
+          <tr><td><strong>PIO (Programmed I/O)</strong></td><td>程序控制 I/O</td><td>The CPU copies every byte itself, register by register. Simple, but it burns a core during transfers.</td></tr>
+          <tr><td><strong>Interrupt</strong></td><td>中断</td><td>A hardware signal that yanks the CPU off its current work to run an <em>interrupt service routine</em> — "data ready, come deal with it" instead of polling.</td></tr>
+          <tr><td><strong>IRQ (Interrupt Request line)</strong></td><td>中断请求</td><td>The numbered line a device raises an interrupt on. Counts live in <code>/proc/interrupts</code>.</td></tr>
+          <tr><td><strong>ISR / top half / bottom half</strong></td><td>中断服务程序 / 上半部 / 下半部</td><td>The handler. The <em>top half</em> runs fast with interrupts off; heavy work is deferred to a <em>bottom half</em> (softirq/tasklet/threaded IRQ) that can sleep.</td></tr>
+          <tr><td><strong>DMA</strong></td><td>直接内存访问</td><td>Direct Memory Access: a dedicated engine moves bytes between device and RAM <em>without</em> the CPU, which only gets one interrupt when the whole block is done. The key to keeping a control loop responsive under heavy I/O.</td></tr>
+          <tr><td><strong>Coherent vs. streaming DMA</strong></td><td>一致性 / 流式 DMA</td><td>Coherent buffers stay cache-consistent automatically (small, long-lived); streaming buffers are mapped per-transfer with explicit cache sync (large, one-shot).</td></tr>
+          <tr><td><strong>IRQ affinity</strong></td><td>中断亲和性</td><td>Pinning an IRQ to specific CPUs via <code>/proc/irq/N/smp_affinity</code>, so interrupt storms don't land on the core running your real-time loop.</td></tr>
+          <tr><td><strong>Coalescing</strong></td><td>中断合并</td><td>Batching many events into one interrupt (e.g. NIC rx-coalesce) to trade a little latency for far less CPU overhead under high rates.</td></tr>
+          <tr><td><strong>select / poll</strong></td><td>多路复用 (select/poll)</td><td>Old syscalls to wait on many fds at once. Cost scales $O(n)$ in the number of watched fds — they rescan the whole set every call.</td></tr>
+          <tr><td><strong>epoll</strong></td><td>epoll 事件机制</td><td>Linux's scalable readiness API: register fds once, then each wait costs $O(\text{ready})$, not $O(n)$. Supports level- and edge-triggered modes. The backbone of a sensor manager.</td></tr>
+          <tr><td><strong>Level vs. edge triggered</strong></td><td>水平 / 边沿触发</td><td>Level-triggered keeps reporting an fd while data remains; edge-triggered reports only on the <em>transition</em> to readable, so you must drain it fully (loop until <code>EAGAIN</code>).</td></tr>
+          <tr><td><strong>io_uring</strong></td><td>io_uring 异步 I/O</td><td>Modern shared-memory ring (submission + completion queues) for true async I/O with near-zero syscalls per op — the high end of multiplexing.</td></tr>
+          <tr><td><strong>C10k problem</strong></td><td>C10k 问题</td><td>The classic challenge of serving 10 000 concurrent connections; the reason thread-per-fd lost to event loops.</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> The edge-trigger footgun</div>
+        <p>With epoll in edge-triggered mode, if you read once per event you'll leave bytes in the buffer and never get woken again — the fd looks dead. The contract is: on every wakeup, <code>read()</code> in a loop until you get <code>EAGAIN</code>. Half the "my sensor randomly hangs" bugs are this.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="networking"><span class="sec-no">5</span>Networking <span style="opacity:.6;font-weight:400">网络</span></h2>
+      <p>From the NIC to the socket fd. The two ideas that bite robots most: the routing table (and who steals the default route) and the bandwidth-delay product (how much data is "in flight").</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Term</th><th>中文</th><th>One-line definition</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Socket</strong></td><td>套接字</td><td>A file descriptor that speaks the network. <code>socket()</code> returns an fd you then <code>read</code>/<code>write</code> like any other — the network as a file.</td></tr>
+          <tr><td><strong>TCP vs. UDP</strong></td><td>TCP / UDP</td><td>TCP is reliable, ordered, stream — at the cost of retransmits and head-of-line blocking. UDP is fire-and-forget datagrams — perfect for sensor data where a fresh packet beats a re-sent stale one.</td></tr>
+          <tr><td><strong>NIC</strong></td><td>网卡</td><td>Network Interface Controller — the hardware. The kernel driver hands received frames up the stack via interrupts/DMA and NAPI polling.</td></tr>
+          <tr><td><strong>Routing table</strong></td><td>路由表</td><td>The rules deciding which interface a packet leaves by, matched longest-prefix-first. Inspect with <code>ip route</code>.</td></tr>
+          <tr><td><strong>Default route</strong></td><td>默认路由</td><td>The catch-all entry (<code>0.0.0.0/0</code>) for any destination no specific route matches. There should be exactly one you trust.</td></tr>
+          <tr><td><strong>Default-route theft</strong></td><td>默认路由抢占</td><td>When a second interface (a freshly-connected Wi-Fi) installs its own default route and silently steals all egress traffic — the classic "SSH died after I plugged in Ethernet" bug. Fix with route metrics.</td></tr>
+          <tr><td><strong>Metric</strong></td><td>路由度量值</td><td>A priority number on a route; lower wins. How you make Wi-Fi the preferred default and Ethernet the sensor-only path.</td></tr>
+          <tr><td><strong>MTU</strong></td><td>最大传输单元</td><td>Maximum Transmission Unit — the largest payload a link carries in one frame (Ethernet default $1500\,\text{B}$). Exceed it and packets fragment or drop.</td></tr>
+          <tr><td><strong>BDP (Bandwidth-Delay Product)</strong></td><td>带宽时延积</td><td>Bandwidth × round-trip time = the bytes "in flight" on a link; the minimum socket buffer needed to keep a pipe full.</td></tr>
+          <tr><td><strong>SO_RCVBUF / SO_SNDBUF</strong></td><td>套接字缓冲区</td><td>Socket options sizing the kernel receive/send buffers. Too small caps throughput on a high-BDP link; too big invites bufferbloat.</td></tr>
+          <tr><td><strong>Bufferbloat</strong></td><td>缓冲膨胀</td><td>Oversized buffers hoarding packets, adding latency under load even though throughput looks fine — murder for a control link.</td></tr>
+          <tr><td><strong>Backpressure</strong></td><td>背压</td><td>The signal (full buffer, <code>EAGAIN</code>, TCP window closing) telling a fast producer to slow down so a slow consumer can keep up.</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> BDP, and why the buffer matters</div>
+        <p>The bytes a link can hold mid-flight — and thus the socket buffer needed to saturate it — is</p>
+        <div class="math-box">$$ \text{BDP} = \text{Bandwidth} \times \text{RTT} $$</div>
+        <p>A $1\,\text{Gbit/s}$ shore-to-USV link with a $20\,\text{ms}$ RTT holds $1{\times}10^9/8 \cdot 0.020 = 2.5\,\text{MB}$ in flight. If <code>SO_RCVBUF</code> is the default $\sim 200\,\text{kB}$, the sender stalls waiting for ACKs and you'll never see line rate.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="can-realtime"><span class="sec-no">6</span>CAN &amp; real-time <span style="opacity:.6;font-weight:400">CAN 与实时</span></h2>
+      <p>The actuator bus, and what it takes to make a control loop hit its deadline <em>every</em> time. Real-time is about the worst case, never the average.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Term</th><th>中文</th><th>One-line definition</th></tr></thead>
+        <tbody>
+          <tr><td><strong>CAN</strong></td><td>CAN 总线</td><td>Controller Area Network — a robust, differential, multi-drop bus for actuators and instruments. Frames carry an ID and up to 8 data bytes (64 in CAN-FD).</td></tr>
+          <tr><td><strong>Arbitration</strong></td><td>仲裁</td><td>How CAN resolves simultaneous transmitters: the message with the numerically <em>lowest</em> ID wins (dominant bit overrides recessive); the loser backs off and retries. Lowest ID = highest priority.</td></tr>
+          <tr><td><strong>Bit stuffing</strong></td><td>位填充</td><td>Inserting an opposite bit after 5 identical bits so receivers stay clock-synced — it makes worst-case frame length a few bits longer than nominal.</td></tr>
+          <tr><td><strong>SocketCAN</strong></td><td>SocketCAN</td><td>Linux's framework treating a CAN interface as a network socket (<code>AF_CAN</code>), so you <code>read</code>/<code>write</code> CAN frames like any fd and use <code>candump</code>/<code>cansend</code>.</td></tr>
+          <tr><td><strong>Sample point</strong></td><td>采样点</td><td>The fraction of a bit time (typically 75–87.5%) at which the controller samples the level. Must match across all nodes or you get errors.</td></tr>
+          <tr><td><strong>Termination (60 Ω test)</strong></td><td>终端电阻</td><td>A 120 Ω resistor at each end of the bus; with both fitted, measuring across CAN-H/CAN-L on a powered-off bus reads ~60 Ω. Wrong termination = reflections = errors.</td></tr>
+          <tr><td><strong>Error counters / bus-off</strong></td><td>错误计数 / 总线关闭</td><td>Each node counts TX/RX errors; cross 255 and it goes <em>bus-off</em>, silently dropping off the bus until reset. The "actuators stopped responding" symptom.</td></tr>
+          <tr><td><strong>restart-ms</strong></td><td>自动重启间隔</td><td>The SocketCAN option (<code>ip link set can0 type can restart-ms 100</code>) that auto-recovers a bus-off interface after the given delay.</td></tr>
+          <tr><td><strong>CAN-FD</strong></td><td>CAN-FD</td><td>Flexible Data-rate CAN: up to 64-byte payloads and a faster data phase, for higher throughput while keeping CAN's arbitration.</td></tr>
+          <tr><td><strong>NMEA 2000</strong></td><td>NMEA 2000</td><td>The marine instrument protocol layered on CAN at $250\,\text{kbit/s}$ — GPS, depth, wind on a USV.</td></tr>
+          <tr><td><strong>Real-time</strong></td><td>实时</td><td>A guarantee about <em>worst-case</em> response, not speed. A 20 Hz loop is real-time if it <em>never</em> misses its $50\,\text{ms}$ deadline — average latency is irrelevant.</td></tr>
+          <tr><td><strong>Deadline</strong></td><td>截止期限</td><td>The latest time a task may finish to be correct. Missing it in a hard-real-time system is a failure, not just slow.</td></tr>
+          <tr><td><strong>Jitter</strong></td><td>抖动</td><td>The variation in how long a periodic task actually takes from cycle to cycle. Low average + high jitter still blows deadlines.</td></tr>
+          <tr><td><strong>PREEMPT_RT</strong></td><td>实时内核补丁</td><td>The kernel patchset making nearly all kernel code preemptible, slashing worst-case scheduling latency from milliseconds to microseconds.</td></tr>
+          <tr><td><strong>SCHED_FIFO / rtprio</strong></td><td>实时调度 / 实时优先级</td><td>A real-time scheduling policy that runs a thread ahead of all normal tasks until it yields — how the control loop gets the CPU on time.</td></tr>
+          <tr><td><strong>mlockall</strong></td><td>锁定内存</td><td>Locks a process's pages in RAM so a page fault never stalls the real-time loop mid-cycle.</td></tr>
+          <tr><td><strong>Watchdog</strong></td><td>看门狗</td><td>A timer that resets (or fails-safe) the system if the software doesn't "kick" it in time — the last line of defense when a loop hangs.</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — the USV's worst-case budget</div>
+        <p>The Orin runs the steering PID at 20 Hz, so the deadline is $50\,\text{ms}$. Average loop time is $4\,\text{ms}$ — meaningless. What matters is the worst case: a Wi-Fi <strong>IRQ</strong> storm landing on the loop's core, a <strong>page fault</strong>, a logging <code>fsync</code> blocking. Fix the budget with <strong>IRQ affinity</strong> (move the NIC off the loop's CPU), <strong>SCHED_FIFO</strong>, <strong>mlockall</strong>, and a <strong>watchdog</strong> that fails the rudder to neutral if the loop ever does miss.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="quiz"><span class="sec-no">G</span>Quick self-test <span style="opacity:.6;font-weight:400">小测验</span></h2>
+      <p>If these four feel obvious, the glossary did its job. If not, the linked layer is where to look.</p>
+
+      <div class="exercise" data-ex="quiz" data-id="ioG-arbitration">
+        <div class="ex-head"><span class="badge">Q1</span> CAN arbitration</div>
+        <div class="ex-q">Two CAN nodes start transmitting at the same instant — one with ID <code>0x0A0</code>, the other with ID <code>0x320</code>. Which message wins the bus, and what happens to the other?</div>
+        <ul class="ex-options">
+          <li data-correct="true"><code>0x0A0</code> wins (lower ID = higher priority); the <code>0x320</code> sender detects it lost, backs off, and retries automatically.</li>
+          <li data-correct="false"><code>0x320</code> wins because the higher number has priority; <code>0x0A0</code> is dropped.</li>
+          <li data-correct="false">Both collide and corrupt; each node must wait a random backoff like Ethernet.</li>
+          <li data-correct="false">Whichever node started transmitting first wins regardless of ID.</li>
+        </ul>
+        <div class="ex-explain">CAN arbitration is non-destructive and priority-based: a dominant (0) bit overrides a recessive (1), so the numerically <em>lowest</em> ID wins bit-by-bit without any data loss. The loser sees the mismatch, immediately stops, and re-arbitrates on the next bus-idle. See <a href="#can-realtime">§6 — Arbitration</a>.</div>
+      </div>
+
+      <div class="exercise" data-ex="quiz" data-id="ioG-bus-discovery">
+        <div class="ex-head"><span class="badge">Q2</span> Buses &amp; the device tree</div>
+        <div class="ex-q">Which of these buses requires you to <em>declare</em> the attached device in the device tree because it cannot discover devices on its own?</div>
+        <ul class="ex-options">
+          <li data-correct="false">PCIe — it self-enumerates and you read addresses from <code>lspci</code>.</li>
+          <li data-correct="false">USB — devices report descriptors on plug-in and the kernel matches drivers automatically.</li>
+          <li data-correct="true">SDIO (and I²C/SPI) — non-discoverable, so the hardware must be described in the DT for a driver to bind.</li>
+          <li data-correct="false">None — the kernel always probes every bus and finds everything by itself.</li>
+        </ul>
+        <div class="ex-explain">PCIe and USB are <em>enumerable</em>: the bus protocol lets the host walk it and read each device's identity. I²C, SPI, and SDIO have no such mechanism — there's no way to ask "who's at address 0x48?" reliably — so the kernel relies on the <strong>device tree</strong> to know what's wired up and where. This is exactly why the Orin's SDIO Wi-Fi must be in the DT. See <a href="#buses">§3 — Enumeration</a>.</div>
+      </div>
+
+      <div class="exercise" data-ex="quiz" data-id="ioG-epoll-trigger">
+        <div class="ex-head"><span class="badge">Q3</span> epoll triggering</div>
+        <div class="ex-q">You use epoll in <strong>edge-triggered</strong> mode and call <code>read()</code> exactly once per wakeup. Your sensor "randomly stops" delivering data even though it's still sending. Why?</div>
+        <ul class="ex-options">
+          <li data-correct="false">Edge-triggered mode is buggy and should never be used for sensors.</li>
+          <li data-correct="true">Edge-triggered fires only on the transition to readable; leftover bytes don't re-fire, so you must <code>read()</code> in a loop until <code>EAGAIN</code> to drain the fd.</li>
+          <li data-correct="false">The fd was never registered with epoll; you need to re-add it after every read.</li>
+          <li data-correct="false"><code>read()</code> in edge-triggered mode returns 0 bytes, so no data ever arrives.</li>
+        </ul>
+        <div class="ex-explain">Edge-triggered epoll reports the <em>edge</em> — the moment an fd <em>became</em> readable — not the ongoing level. If you leave bytes unread, there's no new edge, so no new wakeup, and the fd looks dead while data piles up. The rule: on each event, loop <code>read()</code> until it returns <code>EAGAIN</code>. See <a href="#data-movement">§4 — Level vs. edge triggered</a>.</div>
+      </div>
+
+      <div class="exercise" data-ex="quiz" data-id="ioG-realtime-metric">
+        <div class="ex-head"><span class="badge">Q4</span> What "real-time" means</div>
+        <div class="ex-q">Your 20 Hz ($50\,\text{ms}$ deadline) control loop averages $4\,\text{ms}$ per cycle but occasionally spikes to $60\,\text{ms}$. Is this loop real-time?</div>
+        <ul class="ex-options">
+          <li data-correct="false">Yes — the average is well under the deadline, so it's comfortably real-time.</li>
+          <li data-correct="true">No — real-time is a guarantee about the <em>worst case</em>; a single $60\,\text{ms}$ spike misses the $50\,\text{ms}$ deadline and is a failure.</li>
+          <li data-correct="false">Yes, as long as the spikes happen less than 1% of the time.</li>
+          <li data-correct="false">It's impossible to tell without knowing the CPU clock speed.</li>
+        </ul>
+        <div class="ex-explain">Real-time correctness is defined by the worst-case latency, not the mean. A loop that meets its deadline 999 times and misses once is not hard-real-time. The spike is the bug to chase — usually an IRQ, page fault, or blocking <code>fsync</code> — and the tools to kill it are PREEMPT_RT, <code>SCHED_FIFO</code>, <code>mlockall</code>, and IRQ affinity. See <a href="#can-realtime">§6 — Real-time</a>.</div>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>Six layers, one vocabulary: the <strong>syscall</strong>/<strong>fd</strong>/<strong>VFS</strong> boundary turns hardware into files; <strong>drivers</strong> and the <strong>device tree</strong> bind silicon to <code>/dev</code>, with <code>/sys</code> as the live map; <strong>buses</strong> split into self-enumerating (PCIe/USB) versus declared (I²C/SPI/SDIO); <strong>DMA</strong> and <strong>epoll</strong> move and multiplex bytes without burning the CPU; <strong>routing</strong> and <strong>BDP</strong> govern the network; and <strong>CAN</strong> plus <strong>PREEMPT_RT</strong> deliver actuators on a hard deadline. Every kernel log line you'll ever read on the USV is one of these words — now you can decode it.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

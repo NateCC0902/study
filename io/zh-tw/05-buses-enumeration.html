@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>匯流排與列舉 — 機器人的 Linux I/O</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="05-buses-enumeration">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · 第 05 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · 第 05 章 · 硬體地圖</div>
+        <h1>匯流排與列舉：核心如何找到你的硬體</h1>
+        <p>把一顆 NVMe 硬碟插上 Orin，它就這麼出現了。把一顆 IMU 接到 I²C 匯流排（bus）上，核心卻<em>什麼也看不到</em>——直到你親手在裝置樹（device tree）裡告訴它。這一章談的就是<strong>為什麼</strong>會存在這兩個世界，以及對那些沉默的匯流排，你究竟得宣告些什麼。</p>
+        <div class="meta"><span>⏱ 約 40 分鐘</span><span>🧠 列舉</span><span>⚡ 裝置樹</span><span>∑ 匯流排數學</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="two-worlds"><span class="sec-no">1</span>兩個世界：自我描述 vs. 沉默的匯流排</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先把畫面建起來</small></div>
+      <p>每個裝置都掛在某條<strong>匯流排（bus）</strong>上，而匯流排分成兩大陣營，在開機時的行為截然不同。第一個陣營——<strong>PCIe</strong> 與 <strong>USB</strong>——是<em>可列舉的（enumerable）</em>：主機可以走遍整條匯流排，問每個裝置「你是誰、你需要什麼」，並得到一份機器可讀的答覆。核心會自動發現整個拓撲。熱插一顆網路攝影機，你什麼都沒設定；<code>udev</code>（第 03 章）之所以會觸發，正是因為列舉（enumeration）早就完成了。</p>
+      <p>第二個陣營——<strong>I²C、SPI、SDIO、CAN</strong>——是<em>不可發現的（non-discoverable）</em>。沒有任何協定步驟讓晶片宣告「我是位於位址 0x76 的 BMP280 氣壓計」。匯流排上只承載時脈（clock）與資料（data）線；就這樣而已。SoC 無從得知接在線上的東西是溫度感測器、OLED 面板，還是根本什麼都沒有。對這些匯流排，你必須在<strong>裝置樹（device tree）</strong>裡事先<strong>宣告（declare）</strong>每一個裝置。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 唯一重要的那條分界</div>
+        <p><strong>可列舉的匯流排</strong> → 核心向裝置詢問它是什麼。<strong>沉默的匯流排</strong> → 你告訴核心那裡有什麼。本章其餘的一切，都從這一句話推導出來。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>為什麼沉默是結構性的，而非偷懶</small></div>
+      <p>這份沉默不是疏忽——它是幾何學決定的。一個 I²C 裝置由烙進晶片裡的<strong>7 位元位址</strong>定址（有時搭配一兩支綁定接腳）。七個位元能給出</p>
+      <div class="math-box">$$ 2^{7} = 128 \text{ addresses} \;-\; 16 \text{ reserved} \;=\; 112 \text{ usable slots per bus} $$</div>
+      <p>那塊保留區（$0000\,\mathrm{xxx}$ 與 $1111\,\mathrm{xxx}$——共 16 個位址）涵蓋了一般呼叫位址（general-call）、10 位元定址跳脫碼等等。所以一條 I²C 匯流排最多只能掛 112 顆晶片，而你唯一能做的「發現」就是盲探（blind probe）：逐一敲遍這 112 個位址，看誰會回應 ACK。那只告訴你 <code>0x76</code> 有東西——永遠不知道那<em>是</em>什麼。SPI 更糟：它根本沒有位址。每個周邊都分到一條專屬的<strong>晶片選擇（chip-select，CS）</strong>線，主機（master）藉由把某裝置的 CS 拉低來挑選它。沒有 CS 接腳，就沒有裝置——而線上也沒有任何東西能用來辨識它。</p>
+
+      <div class="mermaid">
+flowchart LR
+    subgraph EN["可列舉 — 核心自行發現"]
+      PCIe["PCIe<br/>組態空間"] --> AUTO["自動綁定驅動"]
+      USB["USB<br/>描述符"] --> AUTO
+    end
+    subgraph SI["沉默 — 你在 DT 裡宣告"]
+      I2C["I²C（7 位元位址）"] --> DT["裝置樹節點"]
+      SPI["SPI（晶片選擇）"] --> DT
+      SDIO["SDIO"] --> DT
+      CAN["CAN"] --> DT
+    end
+    DT --> AUTO
+</div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="pcie-enumeration"><span class="sec-no">2</span>PCIe 列舉：組態空間、BDF 與 BAR</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>一棟有編號房間的大樓</small></div>
+      <p>PCIe 是一棵點對點連結的樹，透過交換器（switch）向外扇出。每個端點（endpoint）都暴露一小塊標準化的暫存器，稱為<strong>組態空間（configuration space）</strong>——傳統 PCI 是 256 位元組，PCIe 則是 4&nbsp;KiB（延伸組態）。開機時，韌體（或核心）執行<strong>列舉（enumeration）</strong>：它做一次深度優先走訪，在每個可能的位址讀取組態空間。若有東西回應，那就是個裝置；走訪會繼續深入它所找到的任何橋接器（bridge）之後。</p>
+      <p>每個功能（function）以它的 <strong>BDF</strong> 命名——<strong>B</strong>us（匯流排）：<strong>D</strong>evice（裝置）.<strong>F</strong>unction（功能）。那正是你在 <code>lspci</code> 裡看到的位址，例如 <code>0001:01:00.0</code>（前面再加上 16 位元的<em>網域（domain）</em>前綴）。它的幾何如下：</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>位址空間有多大</small></div>
+      <div class="math-box">$$ \underbrace{8}_{\text{bus}}\!:\underbrace{5}_{\text{device}}.\underbrace{3}_{\text{function}} \;\Rightarrow\; 2^{8}\cdot 2^{5}\cdot 2^{3} = 256 \cdot 32 \cdot 8 = 65{,}536 \text{ functions per domain} $$</div>
+      <p>組態空間最前面的暫存器存放著唯讀的<strong>Vendor ID</strong>（廠商 ID）與 <strong>Device ID</strong>（裝置 ID）——這對 32 位元數值（例如 <code>10de:2300</code>）正是 Linux 挑選驅動的依據：它拿這些 ID 去比對每個驅動的 <code>pci_device_id</code> 表。裝置也透過 <strong>BAR</strong>（Base Address Register，基底位址暫存器）公告它的記憶體需求。一個 BAR 說「我需要一個 16&nbsp;MiB 的 MMIO 視窗」（第 07 章）；核心在實體位址映射裡找出一塊空閒區域，把基底寫進 BAR，從此驅動便能藉由讀寫那個視窗來觸及裝置的暫存器。發現、辨識與資源配置——全都自動完成，全都來自匯流排本身。</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——Orin 的 PCIe 就是能用</div>
+        <p>在 AGX Orin USV 上，NVMe SSD 與 M.2 WiFi 卡都掛在 PCIe 上。我們從沒為它們寫過一行組態。開機 ROM 列舉了這些連結、配置了 BAR，而 <code>nvme</code> 與 WiFi 驅動就靠 Vendor/Device ID 綁定。拔掉硬碟、換上另一顆 NVMe——還是一樣，零組態。這就是可列舉的世界發揮它的價值。</p>
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">檢視 PCIe 樹 <span class="lang">bash</span></div>
+<pre><code class="language-bash"># Topology view: buses, bridges, endpoints as a tree
+lspci -tv
+
+# One device, verbose: BARs, IRQ, link speed/width, capabilities
+lspci -s 0001:01:00.0 -vvv
+
+# Raw IDs and kernel driver bound to each function
+lspci -nnk
+
+# The same data straight from sysfs (Ch 02) — no lspci needed
+cat /sys/bus/pci/devices/0001:01:00.0/vendor   # e.g. 0x10de
+cat /sys/bus/pci/devices/0001:01:00.0/device
+cat /sys/bus/pci/devices/0001:01:00.0/resource # BAR base/limit/flags, one per line
+ls  /sys/bus/pci/devices/0001:01:00.0/driver   # symlink -&gt; the bound driver
+</code></pre>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="usb-enumeration"><span class="sec-no">3</span>USB 列舉：描述符與動態位址</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>插上時的一次握手</small></div>
+      <p>USB 是另一條可列舉的匯流排，但它的發現方式不同。當你插上裝置時，集線器（hub）偵測到電氣變化並向上回報。主機重置這個新裝置——它一律從<strong>位址 0</strong> 開始應答——接著指派給它一個全新的 7 位元位址（$2^7 = 128$，位址 0 保留 → 每條匯流排 127 個裝置）。一旦定了址，裝置便交出它的<strong>描述符（descriptors）</strong>：一棵描述自己的小小結構樹。</p>
+      <p>這套描述符階層才是重點所在。<em>裝置描述符（device descriptor）</em>帶著 <code>idVendor</code>/<code>idProduct</code>（比對用的鍵，就跟 PCIe 一樣）。其下是<em>組態（configuration）</em> → <em>介面（interface）</em> → <em>端點（endpoint）</em>描述符。關鍵在於，<strong>介面</strong>描述符指明了一個<em>類別（class）</em>——大量儲存（Mass Storage）、CDC-ACM 串列、HID、視訊。這就是為什麼一個泛用 USB 轉串列轉接器能綁到一個泛用驅動、且不需任何逐裝置的組態：它公告了 class 0x02（CDC）或比對到 FTDI 的 VID/PID，核心便知道該怎麼做。</p>
+
+      <div class="mermaid">
+flowchart TD
+    DEV["裝置描述符<br/>idVendor / idProduct"] --> CFG["組態<br/>功耗、介面數"]
+    CFG --> IF["介面<br/>類別（如 CDC 串列）"]
+    IF --> EP["端點<br/>方向、型別、maxpkt"]
+</div>
+
+      <div class="codeblock">
+        <div class="code-head">檢視 USB 樹 <span class="lang">bash</span></div>
+<pre><code class="language-bash"># Tree: hubs, devices, the driver bound to each interface, link speeds
+lsusb -t
+
+# All devices with VID:PID and product strings
+lsusb
+
+# Full descriptor dump for one device (Bus 001 Device 004)
+lsusb -v -s 001:004 | grep -E 'idVendor|idProduct|bInterfaceClass'
+
+# From sysfs: the kernel-assigned address and the descriptors
+cat /sys/bus/usb/devices/1-2/idVendor      # e.g. 0403  (FTDI)
+cat /sys/bus/usb/devices/1-2/idProduct     # e.g. 6001
+cat /sys/bus/usb/devices/1-2/speed         # 12 / 480 / 5000  (Mb/s)
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 列舉正是 <code>udev</code> 能做事的原因</div>
+        <p>回想第 03 章：<code>udev</code> 用 <code>idVendor</code>/<code>idProduct</code>/<code>serial</code> 來比對。那些值之所以<em>存在</em>，是因為 USB 列舉從描述符裡把它們萃取了出來。在沉默的匯流排上根本沒有序號可比對——這也正是為什麼「替一顆 SPI 感測器做持久化命名」根本是個偽問題：你已經把它放在裝置樹裡的晶片選擇 0，所以它就構造上而言就是確定的。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="i2c-spi-sdio"><span class="sec-no">4</span>I²C、SPI 與 SDIO：永遠沒有自動發現</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>就只有時脈與資料</small></div>
+      <p>降到沉默的匯流排，契約就反了過來。<strong>I²C</strong> 是兩條線（SCL 時脈、SDA 資料）由每顆晶片共用；每個裝置靠它在交易首位元組裡的 7 位元位址被挑選。<strong>SPI</strong> 是四條線（SCLK、MOSI、MISO，再加上每裝置一條 CS）；主機藉由拉起某從機（slave）的晶片選擇來選定它。兩者都不承載 ID。核心唯一的發現工具是 <code>i2cdetect</code>，它對位址範圍逐一發 ACK 探測，印出哪些槽位有回應——拿來確認接線很有用，拿來辨識則毫無用處。</p>
+
+      <div class="codeblock">
+        <div class="code-head">探測 I²C（確認存在，而非身分） <span class="lang">bash</span></div>
+<pre><code class="language-bash"># List the I²C adapters the SoC exposes
+i2cdetect -l
+
+# Scan bus 1: each cell is an address that ACKed (here 0x76 = a barometer)
+i2cdetect -y -r 1
+#      0  1  2  3  4  5  6  7  8  9  a  b  c  d  e  f
+# 70: -- -- -- -- -- -- 76 --
+
+# Read one byte from register 0xD0 (chip-id reg) of the device at 0x76
+i2cget -y 1 0x76 0xD0     # returns 0x58 -&gt; that's a BMP280; YOU had to know that
+</code></pre>
+      </div>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>SDIO WiFi 住在哪裡</small></div>
+      <p><strong>SDIO</strong> 是 SD 卡協定拿來承載 I/O 而非儲存——是嵌入式 WiFi/BT 模組常見的歸宿。SDIO 有一個薄薄的<em>卡片（card）</em>列舉步驟（控制器可以讀卡片的 CIS，得知它是一張 I/O 卡），但 SoC 仍然無法得知你把模組接到了<em>哪一個</em> SDIO 控制器、它的參考時脈是多少、或它的重置 GPIO 與中斷（interrupt）是怎麼接的。這一切都是板子特有的，對任何協定都不可見。所以即使是 SDIO 模組，也必須<strong>在裝置樹裡宣告</strong>——你把核心指向正確的 SDHCI 控制器節點，再把時脈、電源與 IRQ 接線交給它。</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——Orin 的雙重人格</div>
+        <p>這正是本章的點睛之筆。在我們的 AGX Orin USV 上，PCIe NVMe 與 PCIe WiFi 卡會<em>自動列舉</em>——什麼都不用做。但當我們在載板（carrier board）上加一顆 <strong>SDIO</strong> WiFi/BT 模組時，它是沉默的：我們必須在 SDHCI 控制器底下加一個 DT 節點、把 <code>status = "okay"</code> 設好、宣告匯流排時脈與模組的重置/IRQ 接腳，並套用接腳多工（pinmux）。同樣的 WiFi 功能，卻有兩套完全不同的初始化（bring-up）故事——全由它掛在哪條匯流排上決定。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="device-tree"><span class="sec-no">5</span>裝置樹：把沉默的那一半宣告出來</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>一張核心讀得懂的接線圖</small></div>
+      <p><strong>裝置樹（device tree，DT）</strong>是一種資料結構——不是程式碼——用來描述核心無法發現的硬體。它以 <code>.dts</code> 文字撰寫，用 <code>dtc</code> 編譯成二進位的 <code>.dtb</code> blob，於開機時交給核心。核心走訪它的方式，跟它走訪 PCIe 組態空間如出一轍，只不過在這裡<em>你</em>才是那條公告裝置的匯流排。</p>
+      <p>它的文法很小。一個<strong>節點（node）</strong>代表一個裝置或一條匯流排；<strong>compatible</strong> 字串是比對鍵（DT 裡相當於 Vendor/Device ID 的東西），用來選定驅動；<strong>reg</strong> 給出在父匯流排上的位址（一個 I²C 7 位元位址、一個 SPI 晶片選擇索引，或一組 MMIO 基底＋大小）；<strong>status</strong> = <code>"okay"</code> 把節點開啟（<code>"disabled"</code> 讓它休眠）；而 <strong>pinmux</strong> 參考則告訴 SoC 的接腳控制器把正確的實體接腳繞接到正確的周邊區塊。</p>
+
+      <div class="codeblock">
+        <div class="code-head">宣告一顆 I²C 感測器 <span class="lang">device tree</span></div>
+<pre><code class="language-c">&amp;i2c1 {                          /* extend the SoC's I2C1 controller node */
+    status = "okay";             /* turn the bus on */
+    clock-frequency = &lt;400000&gt;;   /* 400 kHz fast-mode */
+
+    barometer@76 {               /* node name@unit-address */
+        compatible = "bosch,bmp280";   /* picks the bmp280 driver */
+        reg = &lt;0x76&gt;;            /* the 7-bit I2C address */
+        status = "okay";
+    };
+};
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——節點存在，卻什麼也沒發生</div>
+        <p>三種經典的沉默失敗：<code>status</code> 還停在 <code>"disabled"</code>（核心略過該節點）；<code>compatible</code> 字串沒有任何已內建的匹配驅動（裝置被描述了卻從未被綁定——查 <code>dmesg</code>）；或者 DT 正確，但 <strong>pinmux</strong> 仍把那些接腳繞到了別的功能。DT 可以完美無瑕，裝置卻照樣是死的——只要接腳沒接到控制器。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="overlays-jetson-io"><span class="sec-no">6</span>疊加層與 jetson-io</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>不分叉整棵樹就能打補丁</small></div>
+      <p>去編輯基礎 <code>.dts</code> 再重建整棵樹既笨重又脆弱。<strong>疊加層（overlays）</strong>（<code>.dtbo</code>）是開機時套在基礎 DTB 之上的小片段——這是不分叉核心裝置樹、就能啟用某個排針周邊或載板裝置的乾淨做法。在 Jetson 上，<code>jetson-io</code> 工具是親切的前端：它編輯 40 針排針的組態（哪些接腳要當 GPIO、I²C、SPI 或 PWM），並寫出相應的疊加層，讓你不必親手撰寫 pinmux。</p>
+
+      <div class="codeblock">
+        <div class="code-head">在執行中的 Jetson 上看裝置樹 <span class="lang">bash</span></div>
+<pre><code class="language-bash"># The kernel exposes the live tree it booted with, under /proc
+ls /proc/device-tree/                     # nodes as directories
+cat /proc/device-tree/compatible | tr '\0' '\n'   # board's compatible strings
+cat /proc/device-tree/i2c@3160000/status  # "okay" or "disabled"
+
+# Configure the 40-pin header / apply an overlay (NVIDIA tool)
+sudo /opt/nvidia/jetson-io/jetson-io.py
+
+# Compile / decompile a tree by hand when you need to
+dtc -I dtb -O dts -o board.dts /boot/dtb/your-board.dtb   # read the blob back
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 一句話的心智模型</div>
+        <p>PCIe/USB：核心讀組態空間／描述符，並以 <code>VendorID:DeviceID</code> 綁定。I²C/SPI/SDIO/CAN：<em>你</em>寫一個 DT 節點，核心以 <code>compatible</code> 綁定。裝置樹，不過就是那份你得自己填的組態空間。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="match-the-bus"><span class="sec-no">7</span>讓匯流排匹配負載</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>不只是發現，還有頻寬</small></div>
+      <p>發現只是這個決定的一半；<strong>吞吐量（throughput）</strong>是另一半。你宣告的匯流排也限定了能流過多少資料。一個有用的快速檢查，是估算一條類串列匯流排的原始容量：每秒位元數除以訊框（framing）開銷。對一條速率為 $R$ bit/s、每個有效位元組需 $f$ 個訊框位元的匯流排上、每秒 $B$ 個有效位元組的負載流而言，</p>
+      <div class="math-box">$$ B = \frac{R}{f} \quad\Longrightarrow\quad \text{e.g. I²C @ 400\,kHz},\; f \approx 9 \text{ bits/byte} \;\Rightarrow\; B \approx \frac{400{,}000}{9} \approx 44\,\text{kB/s} $$</div>
+      <p>這就是為什麼高速率的 LiDAR 永遠不會掛在 I²C 上：甚至還沒算進定址開銷，44&nbsp;kB/s 就已經承載不了它。下方的模擬器在對數軸上繪出我們見過的每一條匯流排的典型最大值，並對照一條可拖動的「所需吞吐量」線——把它往上拖，看那些慢速匯流排逐一掉出局。發現決定的是核心<em>能否</em>找到裝置；而這個決定的是匯流排能否<em>餵飽</em>它。</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>📊</span> 匯流排頻寬 vs. 所需吞吐量</div>
+        <canvas id="sim-bus"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 該注意的地方</div>
+        <p>這條軸是<strong>對數的</strong>——每一條格線都是 10×。橙色長條是滿足你需求線的匯流排；灰色長條則差了一截。注意 I²C/UART/CAN 如何聚集在底部（≤ 數 Mb/s），而 PCIe 與 10GbE 則高出四個以上的數量級。把那條紅線拖到 LiDAR 等級的 100&nbsp;Mb/s，只有 USB&nbsp;3、PCIe 與 10GbE 存活下來——正好就是那些<em>可列舉</em>的匯流排。快速與自我描述往往結伴而來；慢速與沉默也往往結伴而來。那份相關性，正是裝置樹存在的全部理由。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>換你了</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io05-which-needs-dt">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">你在 Orin 上加了四個周邊：一顆 PCIe NVMe 硬碟、一支 USB GPS 接收器、一顆 I²C 氣壓計，以及一顆 SPI IMU。其中哪些必須<strong>在裝置樹裡宣告</strong>，核心才找得到它們？</div>
+        <ul class="ex-options">
+          <li data-correct="false">四個都要——核心沒有 DT 就什麼都發現不了。</li>
+          <li data-correct="false">只有 NVMe 硬碟，因為儲存裝置需要特別的組態。</li>
+          <li data-correct="true">I²C 氣壓計與 SPI IMU——那些匯流排不可發現；PCIe 與 USB 會自動列舉。</li>
+          <li data-correct="false">只有 USB GPS，因為 USB 需要手動載入描述符。</li>
+        </ul>
+        <div class="ex-explain">PCIe（組態空間）與 USB（描述符）是可列舉的——核心從匯流排上讀出每個裝置的身分並以 Vendor/Device ID 綁定，不需要任何 DT 條目。I²C 與 SPI 只承載時脈／資料、毫無身分可言，所以每個裝置都必須宣告成一個 DT 節點，帶著 <code>compatible</code> 字串與一個 <code>reg</code>（I²C 位址或 SPI 晶片選擇）。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io05-i2c-usable" data-answer="112" data-tol="0">
+        <div class="ex-head"><span class="badge">Q2</span> 算一算</div>
+        <div class="ex-q">I²C 用 7 位元位址，而 I²C 規範保留了 16 個位址（$0000\,\mathrm{xxx}$ 與 $1111\,\mathrm{xxx}$ 這兩個區塊）。一條 I²C 匯流排上還剩下多少個<strong>可用</strong>的裝置位址？</div>
+        <input class="ex-input" type="number" step="1" placeholder="數值"><span class="ex-unit">個位址</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$2^{7} = 128$ 總數，減去 $16$ 保留 $= 112$ 可用。實務上同一條匯流排的兩顆晶片也不能共用同一個位址，這就是為什麼當需要兩顆相同的感測器時，板子會加上第二個 I²C 控制器（或一支位址綁定接腳）。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io05-inspect-tree">
+        <div class="ex-head"><span class="badge">Q3</span> 動手做——檢視兩個世界</div>
+        <div class="ex-q">在 Jetson（或任何 Linux 機器）上，寫出指令來：(a) 讀取某個 I²C 控制器的即時裝置樹節點並確認它已啟用；以及 (b) 印出 PCIe 拓撲，連同綁到每個功能的驅動。並說明每段輸出證明了什麼。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">開機後的裝置樹暴露在 <code>/proc/device-tree/</code> 底下，是一個由節點組成的目錄；每個屬性都是一個檔案。至於 PCIe，<code>lspci</code> 有一個樹狀旗標與一個「kernel driver」旗標。</div></details>
+        <details class="ex-acc"><summary>看一個解答</summary><div class="acc-body">
+          <div class="codeblock"><div class="code-head">inspect.sh <span class="lang">bash</span></div>
+<pre><code class="language-bash"># (a) The DECLARED world — read the live device tree
+ls /proc/device-tree/                      # all nodes the kernel booted with
+cat /proc/device-tree/i2c@3160000/status   # must print "okay", else the bus is off
+ls /proc/device-tree/i2c@3160000/          # child nodes = the sensors YOU declared
+
+# (b) The ENUMERATED world — PCIe discovered itself
+lspci -tv                                  # tree of buses/bridges/endpoints
+lspci -nnk                                 # [vendor:device] + "Kernel driver in use:"
+</code></pre></div>
+          <p>輸出 (a) 證明核心之所以知道這顆 I²C 感測器，唯一的原因就是有個 DT 節點宣告了它——刪掉節點，即使晶片仍焊在板上，裝置也會從核心的視野裡消失。輸出 (b) 證明的恰恰相反：每個 PCIe 功能都帶著一組 Vendor:Device ID 與一個已綁定的驅動出現，而那是核心<em>讀組態空間</em>取得的，DT 裡什麼都沒有。兩個世界，同一套核心裝置模型。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章回顧</div>
+        <p>匯流排分成兩個世界。<strong>可列舉的</strong>匯流排——PCIe（組態空間、BDF、BAR、<code>lspci -tv</code>）與 USB（描述符、動態位址、<code>lsusb -t</code>）——讓核心自行發現並辨識裝置，再以 Vendor/Device ID 綁定。<strong>沉默的</strong>匯流排——I²C（7 位元位址、112 個可用）、SPI（晶片選擇）、SDIO、CAN——不承載任何身分，所以每個裝置都必須<strong>在裝置樹裡宣告</strong>：一個帶著 <code>compatible</code>、<code>reg</code>、<code>status&nbsp;=&nbsp;"okay"</code> 與 pinmux 的節點，並透過疊加層乾淨地打上補丁（Jetson 上是 <code>jetson-io</code>）。在 Orin USV 上，PCIe NVMe/WiFi 會自動列舉，而一顆 SDIO WiFi 模組則必須被宣告。而你挑的匯流排也限定了吞吐量——讓它匹配負載。下一章：放大看一條沉默的匯流排與它的核心管線——串列與 TTY 層。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+<script src="../../assets/io-sim.js"></script>
+<script>EM.ioDemo.busBandwidth("sim-bus");</script>
+</body>
+</html>

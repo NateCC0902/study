@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>裝置即檔案：/dev 與 sysfs — 機器人的 Linux I/O</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="02-devices-sysfs">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · 第 02 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · 第 02 章 · 基礎</div>
+        <h1>裝置即檔案：<code>/dev</code> 與 sysfs</h1>
+        <p>上一章「一切皆檔案」還只是個口號。現在我們把它具體化：<code>/dev</code> 裡的一個節點，不過是一個名字，背後扛著兩個整數，把每一次 <code>read()</code> 都導向某個特定的驅動程式（driver）。接著我們走進 <code>/sys</code>——核心對板子上每一個裝置所維護的即時、可瀏覽地圖——並學會只用 <code>cat</code> 和 <code>echo</code> 就讀出連線速率、切換一支 GPIO。</p>
+        <div class="meta"><span>⏱ 約 35 分鐘</span><span>🧠 裝置模型</span><span>⚡ sysfs 動手做</span><span>∑ dev_t 位元欄位</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="device-files"><span class="sec-no">1</span>裝置檔案：一個指向驅動程式的名字</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先把畫面建起來</small></div>
+      <p><code>/dev</code> 裡的一個裝置檔案其實不是檔案。它有名字、住在某個目錄裡，但它在磁碟上不存任何位元組——它全部的內容只有「哪個驅動程式、哪個實例」。當你 <code>open("/dev/ttyTHS0")</code> 時，核心並不會去檔案系統取資料；它查出掛在那個 inode 上的兩個數字，把你的檔案描述子（file descriptor）交給為這兩個數字註冊的驅動程式。從那之後，每一次 <code>read()</code> 和 <code>write()</code> 都是透過那個驅動程式的 <code>file_operations</code> 直通硬體的專線。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 裝置節點是一組電話號碼，不是儲物箱</div>
+        <p><code>/dev/ttyUSB0</code> 的 inode 不存任何資料——只有一個<em>類型</em>（字元或區塊）和一對整數（主編號、次編號），告訴你「撥這個驅動程式、轉接到那個實例」。檔案 API 是撥號音；驅動程式才是接電話的人。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 兩種類型 <small>字元 vs 區塊</small></div>
+      <p>裝置檔案剛好只有兩種，而它們的差別在於<em>核心如何存取硬體</em>，不在於誰比較快：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>類型</th><th><code>ls -l</code> 第一個字元</th><th>存取模式</th><th>是否經過頁快取？</th><th>Orin 上的例子</th></tr></thead>
+        <tbody>
+          <tr><td><strong>字元（character）</strong></td><td><code>c</code></td><td>位元組串流、循序、無固定大小的隨機定位</td><td>否——驅動程式看到每一個位元組</td><td><code>ttyTHS0</code>（UART）、<code>i2c-1</code>、<code>gpiochip0</code>、<code>video0</code></td></tr>
+          <tr><td><strong>區塊（block）</strong></td><td><code>b</code></td><td>固定大小的區塊（512 B / 4 KiB）、可隨機存取、有快取</td><td>是——核心會緩衝並重排</td><td><code>mmcblk0</code>（eMMC）、<code>nvme0n1</code>（NVMe SSD）、<code>sda</code></td></tr>
+        </tbody>
+      </table></div>
+
+      <p>跑一下 <code>ls -l /dev</code>，開頭那個字母就告訴你一切。<code>c</code> 代表原始位元組串流直達驅動程式——你的序列感測器、你的相機、你的 GPIO 排。<code>b</code> 代表中間隔著一層區塊層（block layer），它加上了頁快取（page cache）、I/O 排程器與預讀（readahead）——你的開機媒體與紀錄儲存。感測器幾乎都是字元裝置；儲存則永遠是區塊裝置。</p>
+
+      <div class="codeblock">
+        <div class="code-head">shell — 讀那個類型欄 <span class="lang">bash</span></div>
+<pre><code class="language-bash">$ ls -l /dev/ttyTHS0 /dev/mmcblk0 /dev/gpiochip0
+crw-rw---- 1 root dialout 238,  0 Jun 14 09:02 /dev/ttyTHS0
+brw-rw---- 1 root disk    179,  0 Jun 14 09:02 /dev/mmcblk0
+crw------- 1 root root    254,  0 Jun 14 09:02 /dev/gpiochip0
+#^                        ^^^   ^
+#type=c/b                 major minor</code></pre>
+      </div>
+
+      <p>注意：一般檔案會出現的大小欄，這裡換成了 <code>238, 0</code>——也就是<strong>主編號（major）</strong>與<strong>次編號（minor）</strong>。這一對<em>就是</em>裝置本身。下一節：這些數字代表什麼，又是怎麼被打包的。</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="major-minor"><span class="sec-no">2</span>主編號、次編號，與 <code>dev_t</code> 位元欄位</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>兩個數字、兩件工作</small></div>
+      <p><strong>主編號</strong>選的是<em>驅動程式</em>——「所有主編號 238 的字元裝置都屬於 Tegra HS-UART 驅動程式」。<strong>次編號</strong>選的是該驅動程式所擁有的那個<em>實例</em>——UART 0 對 UART 1、磁碟 0 對磁碟 1。一個驅動程式註冊一個主編號，然後依自己喜好把次編號的空間切分給它管的各個裝置。所以 <code>(major, minor)</code> 是一個兩層位址：先是哪個驅動程式，再是它控制的哪個東西。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>這一對是怎麼打包的</small></div>
+      <p>核心並不會把兩個整數到處傳——它把它們打包成單一個不透明型別 <code>dev_t</code>。在內部，核心採用 32 位元的配置：高位放 <strong>12 位元的主編號</strong>，低位放 <strong>20 位元的次編號</strong>。</p>
+
+      <div class="math-box">$$ \texttt{dev\_t} = (\text{major} \ll 20)\ \mathbin{|}\ \text{minor} $$</div>
+
+      <p>反過來解開它，只是遮罩（mask）與位移（shift）而已：</p>
+      <div class="math-box">$$ \text{major} = \texttt{dev} \gg 20, \qquad \text{minor} = \texttt{dev}\ \&\ \texttt{0xFFFFF} $$</div>
+
+      <p>欄位寬度直接設定了上限：$2^{12} = 4096$ 個可能的主編號，以及每個主編號 $2^{20} = 1{,}048{,}576$ 個次編號。正因為次編號空間如此寬裕，單一個磁碟驅動程式（SCSI/SATA 用主編號 8）才能定址好幾百顆磁碟與它們的分割區而永遠用不完。</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 範例演算——打包與解包</div>
+        <p>取主編號 179（SD/MMC 驅動程式）、次編號 0。打包：$179 \times 2^{20} = 179 \times 1{,}048{,}576 = 187{,}695{,}104$。把一個原始 <code>dev_t</code> $0\texttt{x0B300000} = 187{,}695{,}104$ 解開：右移 20 得到 $0\texttt{x0B3} = 179$；遮罩低 20 位元得到 0。來回都對得上。</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 使用者空間用的是<em>不同的</em>打包方式——別手算它</div>
+        <p>透過 <code>stat()</code> 暴露出來的 glibc <code>dev_t</code> 是 64 位元，而且為了歷史相容性，把欄位切得很彆扭（次編號的低 8 位元，接著主編號的位元，再接其餘部分）。<code>ls</code> 印出的數字是對的，但在 C 裡千萬別用天真的位移去重建那個整數——請 <code>#include &lt;sys/sysmacros.h&gt;</code> 並使用 <code>major()</code>、<code>minor()</code> 和 <code>makedev()</code>。它們會替你把配置差異藏好。</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>那些巨集，用 C 寫</small></div>
+      <div class="codeblock">
+        <div class="code-head">devnum.c — 解碼一個裝置檔案的編號 <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;stdio.h&gt;
+#include &lt;sys/stat.h&gt;
+#include &lt;sys/sysmacros.h&gt;   /* major(), minor(), makedev() */
+
+int main(int argc, char **argv) {
+    struct stat st;
+    if (stat(argv[1], &amp;st) != 0) { perror("stat"); return 1; }
+
+    /* st_rdev holds the device number for a device file */
+    unsigned maj = major(st.st_rdev);
+    unsigned min = minor(st.st_rdev);
+    char type = S_ISCHR(st.st_mode) ? 'c'
+              : S_ISBLK(st.st_mode) ? 'b' : '?';
+
+    printf("%s: type=%c major=%u minor=%u\n", argv[1], type, maj, min);
+    return 0;   /* ./a.out /dev/mmcblk0  ->  type=b major=179 minor=0 */
+}</code></pre>
+      </div>
+      <p>這裡有兩個 <code>stat</code> 欄位很要緊：<code>st_mode</code> 帶有類型位元（<code>S_ISCHR</code> / <code>S_ISBLK</code>），而 <code>st_rdev</code> 帶有打包好的裝置編號——它跟 <code>st_dev</code> 不一樣，後者是這個檔案<em>所在的</em>那個裝置。把這兩者搞混是個經典 bug。</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="devtmpfs"><span class="sec-no">3</span><code>/dev</code> 是怎麼被填出來的：devtmpfs</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>是誰建立這些節點？</small></div>
+      <p>幾十年前，你要跑 <code>MAKEDEV</code>，在一個真的存在磁碟上的 <code>/dev</code> 裡手動建出好幾百個過時節點。今天 <code>/dev</code> 是一個由 RAM 撐起來的虛擬檔案系統——<strong>devtmpfs</strong>——核心會在早期開機時把它掛載起來。某個驅動程式一註冊裝置，核心就會自動在 devtmpfs 裡建出對應的節點，附上正確的類型與正確的主／次編號。把裝置拔掉，驅動程式取消註冊，節點隨之消失。什麼都不會被保存；它每次開機都從即時硬體重新建構。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> devtmpfs 是核心的草稿；udev 是編輯</div>
+        <p>核心用一些樸素、可預測的名字（<code>ttyUSB0</code>、<code>video1</code>）來填 devtmpfs。它<em>不會</em>設定友善的權限、群組所有權或穩定的符號連結。那些潤飾是 <strong>udev</strong> 的工作（第 03 章），它在使用者空間（user space）裡對核心發出的「uevent」做出反應。devtmpfs 保證節點很早就存在；udev 讓它變得好用。</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    HW["裝置出現<br/>(開機或熱插)"] --> DRV["驅動程式註冊<br/>device_create()"]
+    DRV --> DT["devtmpfs 建出<br/>/dev/ttyUSB0<br/>(類型 + 主/次編號)"]
+    DRV --> UE["核心發出<br/>uevent (netlink)"]
+    UE --> UDEV["使用者空間的 udevd"]
+    UDEV --> SYM["權限 · 群組 ·<br/>/dev/serial/by-id/…"]
+</div>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>Jetson AGX Orin USV</small></div>
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 為什麼你的 GPS 有時候會變成 ttyUSB1</div>
+        <p>devtmpfs 是按列舉（enumeration）順序命名的，不是按身分。你把 Orin 開機時，GPS 和 IMU 都接在 USB 序列轉接器上，核心就會把 USB 主機<em>先列舉到</em>的那個抓成 <code>ttyUSB0</code>。重開機，或以不同順序熱插它們，它們就可能互換。節點永遠是<em>正確的</em>（對的驅動程式、對的次編號）——只是不<em>穩定</em>。那種不穩定正是下一章 udev 規則要解決的問題；現在只要知道名字是 devtmpfs 按列舉順序給的就好。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="sys-tour"><span class="sec-no">4</span><code>/sys</code> 巡禮：即時的裝置地圖</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>/dev 是門，/sys 是藍圖</small></div>
+      <p>如果說 <code>/dev</code> 是你打開來<em>跟</em>裝置講話的那一扇扇門，那 <code>/sys</code>（掛載在 <code>/sys</code> 的 <strong>sysfs</strong> 虛擬檔案系統）就是那張描述<em>每個裝置是什麼、怎麼接線、目前處於什麼狀態</em>的藍圖。它是直接望進核心記憶體中裝置物件的一扇窗。<code>/sys</code> 底下每一個檔案都是一個<strong>屬性（attribute）</strong>：<code>cat</code> 它就讀出核心狀態，對於可寫的那些，<code>echo</code> 進去就能改變硬體。不必特殊工具、不必學什麼系統呼叫（syscall）——全都是 VFS。</p>
+
+      <p>sysfs 透過好幾種視角呈現同一組裝置物件。你最常待著的三個：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>頂層目錄</th><th>視角</th><th>你來這裡是為了…</th></tr></thead>
+        <tbody>
+          <tr><td><code>/sys/devices/</code></td><td>正規樹——每個裝置依其實體血緣排列（匯流排（bus） → 控制器 → 裝置）</td><td>看到真正的階層；其他一切都符號連結到這裡</td></tr>
+          <tr><td><code>/sys/class/</code></td><td>依<em>功能</em>：<code>net/</code>、<code>tty/</code>、<code>gpio/</code>、<code>block/</code>、<code>thermal/</code>、<code>hwmon/</code></td><td>「所有網路介面」、「所有 TTY」——最友善的入口</td></tr>
+          <tr><td><code>/sys/bus/</code></td><td>依<em>匯流排</em>：<code>usb/</code>、<code>pci/</code>、<code>i2c/</code>、<code>spi/</code>，每個都有 <code>devices/</code> 和 <code>drivers/</code></td><td>看某條匯流排上有什麼、又是哪個驅動程式認領了它（綁定）</td></tr>
+        </tbody>
+      </table></div>
+
+      <p><code>class</code> 與 <code>bus</code> 大多是裝滿符號連結的目錄，這些連結都指回 <code>devices</code> 底下那唯一一棵真正的樹。用 <code>readlink -f</code> 跟著它們任何一個走下去，你都會落在同一條正規路徑上。這正是它的設計：一個物件，多種索引。</p>
+
+      <div class="codeblock">
+        <div class="code-head">shell — 同一張網卡的三種視角 <span class="lang">bash</span></div>
+<pre><code class="language-bash"># Functional view: every network interface the kernel knows
+$ ls /sys/class/net
+eth0  lo  wlan0
+
+# Follow the class symlink down to the real object
+$ readlink -f /sys/class/net/eth0
+/sys/devices/platform/bus@0/6800000.ethernet/net/eth0
+
+# Bus view: which PCI/USB/platform devices exist and who drives them
+$ ls /sys/bus/usb/devices
+1-0:1.0  1-1  1-1:1.0  1-2  1-2:1.0  usb1  usb2</code></pre>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="sysfs-attrs"><span class="sec-no">5</span>讀寫 sysfs 屬性</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>cat 來讀、echo 來動作</small></div>
+      <p>每個屬性檔都是一條通往核心、微小而有型別的通道。讀取很便宜、沒有副作用；你愛多常輪詢（polling）<code>speed</code> 或 <code>temp</code> 都可以。寫入才是有趣的部分——把一個字串寫進對的檔案會<em>立即改變硬體行為</em>，不必重開機、不必設定檔。核心會在驅動程式的 <code>store()</code> 回呼裡解析你的文字並據以動作。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>機器人上要緊的三個屬性</small></div>
+      <p><strong>(a) 連線速率</strong>——這條乙太網感測器真的跑在 gigabit 嗎，還是在一條品質勉強的線上協商降到了 100 Mb？</p>
+      <div class="codeblock">
+        <div class="code-head">shell — 讀出協商出來的乙太網速率（Mb/s） <span class="lang">bash</span></div>
+<pre><code class="language-bash">$ cat /sys/class/net/eth0/speed
+1000                       # gigabit — good
+$ cat /sys/class/net/eth0/duplex
+full
+$ cat /sys/class/net/eth0/operstate
+up                         # carrier present and admin-up</code></pre>
+      </div>
+
+      <p><strong>(b) FTDI <code>latency_timer</code></strong>——對低延遲 USB 序列感測器來說，這是最重要的單一數字。FTDI 晶片會緩衝收到的位元組，若緩衝區還沒填滿，就要等過了這麼多毫秒才把它們往上送。預設是 16 ms；對一個 100 Hz 的 IMU 而言這簡直是一輩子。把它降到 1 ms。</p>
+      <div class="codeblock">
+        <div class="code-head">shell — 把 USB 序列延遲砍到 1 ms <span class="lang">bash</span></div>
+<pre><code class="language-bash">$ DEV=/sys/bus/usb-serial/devices/ttyUSB0
+$ cat $DEV/latency_timer
+16
+$ echo 1 | sudo tee $DEV/latency_timer
+1
+$ cat $DEV/latency_timer
+1                          # bytes now flushed up to 16x sooner</code></pre>
+      </div>
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 為什麼用 <code>tee</code>，而不是重導向？</div>
+        <p><code>sudo echo 1 &gt; file</code> 會失敗：shell 是在 <code>sudo</code> 跑起來之前，就以<em>你的</em>使用者身分打開那個重導向。<code>echo 1 | sudo tee file</code> 則是把那個特權寫入跑在 <code>tee</code> 內部。另外：sysfs 的寫入不耐久——拔插／重開機就會重置，這正是你之後會把 <code>latency_timer</code> 烤進一條 udev 規則的原因（第 03 章）。</p>
+      </div>
+
+      <p><strong>(c) 透過老式 sysfs 介面操作一支 GPIO 的值。</strong>你用編號匯出（export）一支腳位，設定它的方向，再以單一字元讀或寫它的邏輯電位。（現代的路徑是 <code>/dev/gpiochip0</code> 上的 <code>libgpiod</code> 字元裝置——§7 會講——但要從 shell 快速示範，sysfs GPIO 仍是最快的東西。）</p>
+      <div class="codeblock">
+        <div class="code-head">shell — 透過 sysfs 把一支 GPIO 拉高 <span class="lang">bash</span></div>
+<pre><code class="language-bash"># Find the controller's base offset, then pick a line
+$ cat /sys/class/gpio/gpiochip300/label
+tegra234-gpio
+$ echo 316 | sudo tee /sys/class/gpio/export        # claim line 316
+$ cd /sys/class/gpio/gpio316
+$ echo out | sudo tee direction                     # make it an output
+$ echo 1   | sudo tee value                          # drive it HIGH (3.3 V)
+$ cat value
+1
+$ echo 0   | sudo tee value                          # back to LOW
+$ echo 316 | sudo tee /sys/class/gpio/unexport       # release the line</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 屬性的讀取可能會騙人</div>
+        <p>一個 sysfs 屬性反映的是驅動程式<em>當下對狀態的認知</em>，而這可能是被快取的。當連線斷掉（沒發生協商）時，<code>eth0/speed</code> 會讀到 <code>-1</code>。而老式 GPIO sysfs 介面已被棄用，且在較新的核心裡被移除，正是因為匯出的腳位會在行程之間外洩——拿來快速切一下還行，用在正式環境就是錯的。用它來學；上線時請用 <code>libgpiod</code>。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="device-model"><span class="sec-no">6</span>統一裝置模型：匯流排 ↔ 驅動程式 ↔ 裝置</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>配對</small></div>
+      <p><code>/sys</code> 底下的一切，都是一個核心內資料結構的投影：<strong>裝置模型（device model）</strong>。三種物件——<strong>匯流排（bus）</strong>、<strong>裝置（device）</strong>、<strong>驅動程式（driver）</strong>——以及一個把它們綁在一起的關係：<strong>綁定（binding）</strong>。裝置出現在某條匯流排上。驅動程式帶著一張它能處理的 ID 表，向那條匯流排註冊。匯流排的 <code>match()</code> 函式拿每個裝置去跟每個驅動程式比對；一命中，驅動程式的 <code>probe()</code> 就跑起來，裝置就被<em>綁定</em>了。正是這份綁定，把「有顆晶片在那裡」變成「一個可用的 <code>/dev</code> 節點」。</p>
+
+      <div class="mermaid">
+flowchart TD
+    BUS["bus_type<br/>(usb / pci / i2c / platform)"]
+    DEV["device<br/>(出現的那顆晶片)"]
+    DRV["device_driver<br/>(程式碼 + id_table)"]
+    DEV -->|"註冊於"| BUS
+    DRV -->|"註冊於"| BUS
+    BUS -->|"match() 比對<br/>裝置 id vs id_table"| M{"id 相符?"}
+    M -->|是| PROBE["driver->probe(dev)<br/>= 已綁定"]
+    M -->|否| WAIT["裝置維持<br/>未綁定"]
+    PROBE --> NODE["devtmpfs 節點 +<br/>/sys class 條目"]
+</div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>從 shell 檢視並強制綁定</small></div>
+      <p>綁定是可瀏覽的，需要時也能用腳本操作。在 <code>/sys/bus/&lt;bus&gt;/</code> 底下，你會有一個 <code>devices/</code> 目錄和一個 <code>drivers/</code> 目錄；每個驅動程式都有可寫入裝置 ID 的 <code>bind</code> 與 <code>unbind</code> 屬性。</p>
+      <div class="codeblock">
+        <div class="code-head">shell — 看誰被綁定了，然後重新綁定 <span class="lang">bash</span></div>
+<pre><code class="language-bash"># Which driver claimed this I2C device? Follow the 'driver' symlink.
+$ readlink /sys/bus/i2c/devices/1-0068/driver
+../../../../bus/i2c/drivers/mpu6050      # the IMU bound to mpu6050
+
+# Force-detach a device from its driver, then re-attach it
+$ echo 1-0068 | sudo tee /sys/bus/i2c/drivers/mpu6050/unbind
+$ echo 1-0068 | sudo tee /sys/bus/i2c/drivers/mpu6050/bind
+
+# List every device a driver currently owns
+$ ls -l /sys/bus/usb/drivers/usb-storage/</code></pre>
+      </div>
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 當「感測器明明在那，卻沒有 /dev 節點」</div>
+        <p>在 Orin 上，這是<em>綁定</em>失敗的經典徵兆，不是接線失敗。裝置出現在 <code>/sys/bus/i2c/devices/</code> 底下（核心看得到那顆晶片），卻沒有 <code>driver</code> 符號連結（沒人認領它）。成因：模組沒載入、裝置樹（device tree）裡的 <code>compatible</code> 字串寫錯，或某個 <code>probe()</code> 出錯了——查 <code>dmesg</code>。裝置模型把「存在」和「被驅動」分開，而那道分隔正是你的第一道診斷線索。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="ioctl"><span class="sec-no">7</span><code>ioctl</code>：字元裝置的逃生口</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>當 read/write 不夠用時</small></div>
+      <p><code>read()</code> 和 <code>write()</code> 搬的是位元組串流。但一個序列埠需要<em>設定它的鮑率（baud rate）</em>；一個 CAN 介面需要它的<em>位元速率（bitrate）</em>；一支 GPIO 線需要<em>「設定為輸出，然後在下降緣給我一個事件」</em>。這些都不是位元組串流。<strong><code>ioctl</code></strong>（I/O control）就是那個包山包海的系統呼叫，專門處理塞不進 read/write 的、特定於裝置的命令。你傳入一個打開的 fd、一個數字命令碼，以及一個指向某個驅動程式看得懂的結構的指標。</p>
+
+      <div class="math-box">$$ \texttt{ioctl}(\text{fd},\ \text{request},\ \text{arg}) \;\longrightarrow\; \text{driver's } \texttt{.unlocked\_ioctl()} $$</div>
+
+      <p>那個 <code>request</code> 碼並非隨意——它透過 <code>_IOR</code>／<code>_IOW</code>／<code>_IOWR</code> 巨集，把方向（讀／寫／兩者）、一個辨識驅動程式家族的「魔術」型別位元組、一個命令編號，以及 <code>arg</code> 的大小都編碼進去。那份編碼讓核心能在驅動程式看到這個呼叫之前，先做合理性檢查。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>用現代 API 讀 GPIO 線資訊</small></div>
+      <p>這是取代已棄用 sysfs GPIO 的 <code>libgpiod</code> 風格 v2 字元裝置呼叫——對 <code>/dev/gpiochip0</code> 下一個 <code>ioctl</code>，取回某一條線的資訊：</p>
+      <div class="codeblock">
+        <div class="code-head">gpioinfo.c — 透過 ioctl 取一條線的資訊 <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;fcntl.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;sys/ioctl.h&gt;
+#include &lt;linux/gpio.h&gt;     /* GPIO_V2_GET_LINEINFO_IOCTL, struct gpio_v2_line_info */
+
+int main(void) {
+    int fd = open("/dev/gpiochip0", O_RDWR | O_CLOEXEC);
+    if (fd &lt; 0) { perror("open"); return 1; }
+
+    struct gpio_v2_line_info info = { .offset = 12 };   /* ask about line 12 */
+    if (ioctl(fd, GPIO_V2_GET_LINEINFO_IOCTL, &amp;info) &lt; 0) {
+        perror("ioctl");                  /* errno tells you WHY it failed */
+        return 1;
+    }
+    printf("line %u: name=\"%s\" flags=0x%llx\n",
+           info.offset, info.name, (unsigned long long)info.flags);
+    return 0;
+}</code></pre>
+      </div>
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> ioctl 是逐驅動程式的——讀那個標頭檔</div>
+        <p>沒有通用的 <code>ioctl</code> 參考；有效的 request 碼與結構都住在驅動程式的 UAPI 標頭裡——<code>&lt;linux/gpio.h&gt;</code>、<code>&lt;linux/i2c-dev.h&gt;</code>、序列用的 <code>&lt;asm/termbits.h&gt;</code>、<code>&lt;linux/can.h&gt;</code>。模式永遠一樣：<code>open</code> 那個字元裝置、填好一個結構、發出對的 <code>_IOWR</code> 碼、檢查回傳是否為 <code>-1</code> 並讀 <code>errno</code>。像 <code>gpiodetect</code>、<code>i2cset</code> 和 <code>ip link set</code> 這些工具，都只是這些呼叫的一層薄包裝。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>換你了</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io02-char-vs-block">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">你跑了 <code>ls -l /dev/ttyTHS0</code>，看到那一行以 <code>c</code> 開頭。這告訴你核心將如何把資料搬進、搬出這個裝置？</div>
+        <ul class="ex-options">
+          <li data-correct="false">它是一個區塊裝置，所以讀寫會以固定大小的區塊被快取，而且可以隨機定位。</li>
+          <li data-correct="true">它是一個字元裝置：一條未經緩衝、直接交給驅動程式的位元組串流，中間沒有區塊層也沒有頁快取。</li>
+          <li data-correct="false"><code>c</code> 代表「可設定（configurable）」——你要先用 <code>ioctl</code> 設定區塊大小再讀。</li>
+          <li data-correct="false">它表示這個檔案被壓縮過，讀取時會透明地解壓縮。</li>
+        </ul>
+        <div class="ex-explain">開頭的 <code>c</code> 是字元裝置——一條繞過區塊層的循序位元組串流，所以驅動程式看得到你寫的每一個位元組。UART、I²C、GPIO 和相機都是字元裝置。開頭的 <code>b</code>（區塊）是給儲存用的，那裡核心會加上快取、重排與固定大小的隨機存取——<code>mmcblk0</code>、<code>nvme0n1</code>、<code>sda</code>。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io02-devnum" data-answer="8388981" data-tol="0">
+        <div class="ex-head"><span class="badge">Q2</span> 算一算</div>
+        <div class="ex-q">用核心的 32 位元 <code>dev_t</code> 配置——主編號在高 12 位元、次編號在低 20 位元，也就是 $\texttt{dev} = (\text{major} \ll 20)\,|\,\text{minor}$——主編號 <strong>8</strong>（SCSI/SATA 磁碟）、次編號 <strong>373</strong> 打包出來的裝置編號是多少？給出十進位整數。</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">dec</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$8 \ll 20 = 8 \times 2^{20} = 8 \times 1{,}048{,}576 = 8{,}388{,}608$。加上次編號：$8{,}388{,}608 + 373 = 8{,}388{,}981$。反推：$8{,}388{,}981 \gg 20 = 8$（主編號），且 $8{,}388{,}981 \,\&\, \texttt{0xFFFFF} = 373$（次編號）。在 C 裡你絕不會自己做這個算術——用 <code>makedev(8, 373)</code>——因為 glibc 的 64 位元配置跟這個核心配置不一樣。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io02-sysfs-toggle">
+        <div class="ex-head"><span class="badge">Q3</span> 動手做——檢視一個裝置、讀它的連線速率、切換一支 GPIO</div>
+        <div class="ex-q">在 Orin 上，你需要一個一次性腳本：(1) 找出 <code>eth0</code> 背後的正規 <code>/sys</code> 路徑、(2) 印出它協商出來的連線速率與雙工模式（duplex）、(3) 把 GPIO 線 316 拉高一秒再放低，並把自己清理乾淨。把指令寫出來。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">用 <code>readlink -f</code> 解開 class 符號連結。連線速率與雙工模式都是 <code>/sys/class/net/eth0/</code> 底下的純屬性檔。GPIO 的部分，老式順序是 <code>export → direction → value → unexport</code>，而且記得特權寫入要用 <code>sudo tee</code>，不是 <code>&gt;</code>。</div></details>
+        <details class="ex-acc"><summary>看一個解答</summary><div class="acc-body">
+          <div class="codeblock"><div class="code-head">probe_and_pulse.sh <span class="lang">bash</span></div>
+<pre><code class="language-bash">#!/usr/bin/env bash
+set -euo pipefail
+
+# (1) Canonical sysfs path behind the friendly class name
+echo "eth0 -&gt; $(readlink -f /sys/class/net/eth0)"
+
+# (2) Read negotiated link state (speed is -1 when the link is down)
+echo "speed:  $(cat /sys/class/net/eth0/speed) Mb/s"
+echo "duplex: $(cat /sys/class/net/eth0/duplex)"
+echo "state:  $(cat /sys/class/net/eth0/operstate)"
+
+# (3) Pulse GPIO line 316 high for 1 s, then release the line
+LINE=316
+echo "$LINE" | sudo tee /sys/class/gpio/export &gt; /dev/null
+echo out | sudo tee /sys/class/gpio/gpio$LINE/direction &gt; /dev/null
+echo 1   | sudo tee /sys/class/gpio/gpio$LINE/value &gt; /dev/null
+sleep 1
+echo 0   | sudo tee /sys/class/gpio/gpio$LINE/value &gt; /dev/null
+echo "$LINE" | sudo tee /sys/class/gpio/unexport &gt; /dev/null
+</code></pre></div>
+          <p>同樣的切換在正式環境裡會改用 <code>libgpiod</code> 的 <code>gpioset gpiochip0 316=1</code>——底層就是對 <code>/dev/gpiochip0</code> 的一個 <code>ioctl</code>——它會在行程結束時自動釋放那條線，所以不會像 sysfs export 那樣外洩。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章回顧</div>
+        <p>一個裝置檔案是一個名字，扛著一個類型（字元 vs 區塊）和一對 <code>(major, minor)</code>；主編號挑驅動程式，次編號挑實例，在核心裡打包成 <code>dev_t = (major&lt;&lt;20) | minor</code>。<strong>devtmpfs</strong> 在註冊當下從即時硬體自動建出那些節點；<strong>udev</strong>（下一章）讓它們穩定又好用。<code>/sys</code> 透過三種視角暴露核心的裝置模型——<code>devices/</code>（真相）、<code>class/</code>（依功能）、<code>bus/</code>（依匯流排＋綁定）——其中每個檔案都是一個可讀、有時可寫的屬性：連線速率、FTDI <code>latency_timer</code>、一個 GPIO 值。綁定（<code>bus.match()</code> → <code>driver.probe()</code>）正是把一顆存在的晶片變成一個可用節點的關鍵，而它的缺席就是你的第一道診斷線索。當 read/write 表達不了某個命令時，<strong><code>ioctl</code></strong> 就是那個逃生口。下一章：為什麼 <code>ttyUSB0</code> 不會一直是 <code>ttyUSB0</code>，以及 udev 如何把名字釘死。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

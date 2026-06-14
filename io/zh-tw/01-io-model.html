@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Linux I/O 模型 — 機器人的 Linux I/O</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="01-io-model">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · 第 01 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · 第 01 章 · 基礎</div>
+        <h1>Linux I/O 模型：位元組究竟如何跨越那道邊界</h1>
+        <p>你機器人上的每一筆感測讀數——每一個 IMU 取樣、每一次 GPS 定位、每一個 LiDAR 封包——都是一串位元組，它們必須從裝置出發，穿過核心（kernel），最後進到你的行程（process）裡。在你能除錯一筆掉落的取樣、或一個卡頓的控制迴圈之前，你得先對這趟跨越建立正確的心智模型：一個檔案描述子（file descriptor）<em>究竟是什麼</em>、<code>read()</code> 實際上承諾了什麼，以及為什麼一個看似人畜無害的呼叫，會悄悄花掉你沒編進預算的那一微秒。</p>
+        <div class="meta"><span>⏱ 約 35 分鐘</span><span>🧠 系統呼叫與 fd</span><span>⚡ 穩健讀取迴圈</span><span>∑ 吞吐量 vs 開銷</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="why-io-is-hard"><span class="sec-no">1</span>為什麼 I/O 才是機器人最難的部分</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先把畫面建起來</small></div>
+      <p>機器人裡那些有趣的程式碼——EKF、路徑規劃器、PID 迴圈——是人人都在談的部分，卻很少是凌晨兩點在水上出包的那部分。會壞的是 I/O：一個只回傳了半截訊息的串列埠（serial port）、一個在你拔掉<em>別的</em>東西時就消失的感測器、一次趁 SD 卡做垃圾回收時把控制執行緒卡了 40 ms 的日誌寫入。演算法是確定性的數學；I/O 才是你乾淨的程式碼撞上一個實體、非同步、會出錯的真實世界的地方——而那道邊界，正是埋屍體的所在。</p>
+      <p>這門課之所以存在，就是為了修正一個讓人不舒服的真相：<strong>I/O 不是一次函式庫呼叫，它是一場跟核心的談判。</strong>當你呼叫 <code>read()</code>，你不是在「拿資料」——你是在請求另一個有特權的軟體替你做一件事，再告訴你結果如何。把它當成一個會回傳值的函式，你會一直沒事，直到它回傳<em>比你要求的還少</em>的資料那一天——然後你的程式毀掉一個封包，你花一整週去怪那個感測器。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章的核心論點</div>
+        <p><code>read()</code> 與 <code>write()</code> 回傳的是一個<strong>計數（count）</strong>，不是「成功」。短讀（short return）是正常現象，不是錯誤。幾乎每一個穩健 I/O 的 bug，都源自沒把這一句話當回事。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="user-vs-kernel"><span class="sec-no">2</span>使用者空間、核心空間，與系統呼叫邊界</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>兩個世界，一扇門</small></div>
+      <p>你的行程跑在<strong>使用者空間（user space）</strong>裡：一個沙箱，它能做算術、能碰自己的記憶體，但不能跟硬體說話、不能讀另一個行程的記憶體，也不能做任何會讓一支有 bug 的程式把整台機器拖垮的事。<strong>核心空間（kernel space）</strong>裡的核心則跑在一個有特權的 CPU 模式下，它<em>能</em>做上面那一切。兩者被一道由 CPU 強制執行的硬體高牆隔開。穿過那道牆唯一被許可的門，就是<strong>系統呼叫（syscall）</strong>。</p>
+      <p>系統呼叫不是一般的函式呼叫。一般呼叫跳到你自己程式碼裡的某個位址；系統呼叫則執行一道特殊指令（Jetson 的 AArch64 上是 <code>svc</code>、x86-64 上是 <code>syscall</code>），陷入（trap）核心：CPU 切到特權模式、存下你的暫存器，然後跳到一個由你放進暫存器的編號所選定的固定核心進入點。核心做完事，把回傳值放回某個暫存器，再把 CPU 切回使用者模式。這一趟來回就是一次<strong>模式切換（mode switch）</strong>，而它不是免費的——在現代硬體上，即使核心幾乎什麼都沒做，通常也要花上幾百奈秒。</p>
+
+      <div class="layer"><span class="step">②</span> 程式碼 <small>你看不見的那個呼叫</small></div>
+      <p>你幾乎從不直接發出系統呼叫。你呼叫的是 <strong>libc</strong> 裡的 <code>read()</code>（glibc，或 Jetson L4T 使用者空間部分元件裡的 bionic），而 libc 就是那層薄薄的轉接：它載入系統呼叫編號、執行陷入指令，再把核心的錯誤慣例（像 $-\texttt{EINTR}$ 這樣的負值回傳）翻譯成你在 C 裡熟悉的「回傳 $-1$ 並設定 <code>errno</code>」。所以每一個位元組真正走的路，是四層深的：</p>
+
+      <div class="mermaid">
+flowchart LR
+    A["你的應用<br/>read(fd,buf,n)"] --> B["libc<br/>系統呼叫轉接"]
+    B -->|"svc 陷入<br/>（模式切換）"| C["核心<br/>VFS 派發"]
+    C --> D["驅動程式<br/>tty / spi / net"]
+    D --> E["裝置<br/>UART · IMU · NIC"]
+    E -.->|"位元組回傳"| D
+    D -.-> C
+    C -.->|"回傳計數<br/>（模式切換）"| B
+    B -.-> A
+</div>
+
+      <p>你可以親眼看著這件事發生。<code>strace</code> 攔截一個行程發出的每一個系統呼叫；<code>perf trace</code> 替它們計時。拿它們去跑任何一支碰感測器的程式，你看到的就是你 I/O 的真實成本，而不是你演算法的成本。</p>
+
+      <div class="codeblock">
+        <div class="code-head">追蹤一支程式真正發出的系統呼叫 <span class="lang">bash</span></div>
+<pre><code class="language-bash"># Show every read/write a program does, with byte counts and timing
+strace -T -e trace=read,write,openat,close ./read_imu
+
+# Aggregate: which syscalls dominate, total time, call count
+strace -c ./read_imu
+
+# Per-CPU view of mode switches under load (needs perf installed)
+perf trace -s ./read_imu</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 成本是按呼叫算，不是按位元組算</div>
+        <p>不管 <code>read()</code> 回傳 1 個位元組還是 64 KB，一次模式切換的成本大致相同。光這一個事實就驅動了 §7 的吞吐量數學，也正是為什麼一次只讀一個位元組的天真迴圈，在一台繁忙的機器人上會是災難。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="file-descriptors"><span class="sec-no">3</span>檔案描述子與 fd 表</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>一個把手，不是那個東西本身</small></div>
+      <p>一個<strong>檔案描述子（file descriptor，fd）</strong>不過是一個小的非負整數。它是你的行程握住的把手，指向核心替你維護的一個<em>開啟檔案描述（open file description）</em>——一個存著目前偏移量（offset）、存取模式（讀／寫／非阻塞旗標）、以及一個指向真正物件（一個 tty、一個 socket、一個一般檔案）的指標的結構。你從來看不到那個結構；你只握著那個整數——它是你行程<strong>fd 表（fd table）</strong>的索引——然後你把這個整數傳給每一個 I/O 系統呼叫。</p>
+      <p>在你的 <code>main()</code> 開跑之前，依慣例就已經有三個 fd 從 shell 繼承下來開著了：<code>0</code> = stdin、<code>1</code> = stdout、<code>2</code> = stderr。這就是為什麼 <code>printf</code> 走到 fd 1、而當機日誌走到 fd 2——也是為什麼 shell 裡的 <code>2&gt;&amp;1</code> 意思是「讓 fd 2 指向 fd 1 所指的那個東西」。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 最小可用 fd 規則</div>
+        <p><code>open()</code> 永遠回傳<strong>當下未被使用的編號最小的 fd</strong>。這是一個保證，不是一個提示。這正是那個經典重導向技巧能成立的原因：<code>close(1)</code> 之後再 <code>open("/var/log/mission.log")</code>，會重用 fd 1，於是所有原本寫到 stdout 的東西現在都落進那個檔案裡。第一次看到很驚訝，之後永遠可靠。</p>
+      </div>
+
+      <p>你可以從 <code>/proc</code> 檢視任何行程當下的 fd 表——不需要除錯器。每一筆都是一個指向它所參照物件的符號連結（symlink）。</p>
+
+      <div class="codeblock">
+        <div class="code-head">檢視一個執行中行程開著的 fd <span class="lang">bash</span></div>
+<pre><code class="language-bash"># Every fd of process &lt;PID&gt;, shown as symlinks to the underlying object
+ls -l /proc/&lt;PID&gt;/fd
+# lrwx------ 1 root root 0 -&gt; /dev/pts/0
+# lrwx------ 1 root root 1 -&gt; /dev/pts/0
+# lrwx------ 1 root root 2 -&gt; /dev/pts/0
+# lrwx------ 1 root root 3 -&gt; /dev/ttyTHS1      # the IMU's serial port
+
+# How many fds can this process open at once? (default soft limit)
+ulimit -n            # e.g. 1024 — matters once you run epoll on many sensors</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 洩漏的 fd 安靜無聲——直到它不再安靜</div>
+        <p>在一個重連迴圈裡忘了 <code>close()</code>，你每重試一次就洩漏一個 fd。什麼都不會壞——直到你撞上 <code>ulimit -n</code> 的天花板，下一次 <code>open()</code> 回傳 <code>-1</code> 並帶著 <code>errno = EMFILE</code>，而且通常就在任務進行到一半時。用 <code>ls /proc/&lt;PID&gt;/fd | wc -l</code> 看著那個數字往上爬。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="core-syscalls"><span class="sec-no">4</span>核心系統呼叫與短讀的真相</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>那些契約</small></div>
+      <p>整套「一切皆檔案」的 API 就是六個系統呼叫。要學的是它們的<em>回傳契約</em>，不只是名字——bug 就住在契約裡。</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>系統呼叫</th><th>簽章（簡化）</th><th>回傳</th></tr></thead>
+        <tbody>
+          <tr><td><code>open</code></td><td><code>open(path, flags, mode)</code></td><td>新 fd（最小可用），或 −1 + errno</td></tr>
+          <tr><td><code>read</code></td><td><code>read(fd, buf, count)</code></td><td><strong>讀到的位元組數</strong>（0…count）；0 = EOF；−1 + errno</td></tr>
+          <tr><td><code>write</code></td><td><code>write(fd, buf, count)</code></td><td><strong>寫出的位元組數</strong>（0…count）；−1 + errno</td></tr>
+          <tr><td><code>close</code></td><td><code>close(fd)</code></td><td>0，或 −1 + errno（無論如何那個 fd 都沒了）</td></tr>
+          <tr><td><code>lseek</code></td><td><code>lseek(fd, off, whence)</code></td><td>新的絕對偏移量；−1 + errno（在 pipe／socket 上會失敗）</td></tr>
+          <tr><td><code>ioctl</code></td><td><code>ioctl(fd, request, arg)</code></td><td>裝置專屬；那個「其他一切」的逃生口</td></tr>
+        </tbody>
+      </table></div>
+
+      <p>毀掉職業生涯的那兩個回傳值，落在 <code>read</code> 與 <code>write</code> 上：<strong>它們回傳一個計數，而這個計數可能比你要求的少。</strong>一次 <code>read(fd, buf, 64)</code> 合法地回傳 17 是完全可能的。這不是毀損、也不是錯誤——這是核心在說「這是當下能拿給你的」。在串列 fd 上這事不斷發生，因為位元組是按鮑率（baud rate）抵達的（115200 baud 下大約每 $\sim$87 µs 一個位元組），核心在你開口的那一刻把 tty 緩衝區裡有的東西交給你。一個 40 位元組的 IMU 訊框，非常常見地是先以一次 31 位元組的讀取、再以一次 9 位元組的讀取送到。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 短讀 bug，一行就說完</div>
+        <p><code>read(fd, frame, 40);  // assumes 40</code>——這是機器人領域裡單一最常見的串列 bug。修法絕對不是「一直讀到我心安為止」；而是一個迴圈，累積到湊滿一整個訊框為止，並明確處理 <code>0</code>（EOF）與 <code>-1</code>（錯誤／<code>EINTR</code>）。我們在 §8 的練習裡就會建出這個迴圈。</p>
+      </div>
+
+      <p>有兩個錯誤碼你必須當成<em>重試，而非失敗</em>：<code>EINTR</code> 表示有個訊號（signal）在任何資料移動之前打斷了這次呼叫——再呼叫一次就好。<code>EAGAIN</code>／<code>EWOULDBLOCK</code> 表示一個非阻塞（non-blocking）fd 當下沒東西可給——晚點再回來（這是第 08 章 <code>epoll</code> 的根基）。其餘一切都是真正的錯誤。</p>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="everything-is-a-file"><span class="sec-no">5</span>「一切皆檔案」與 VFS</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>一套 API，許多物件</small></div>
+      <p>同樣那六個系統呼叫之所以能在一個文字檔、一個串列埠、一個網路連線、與一個硬體感測器上都管用，靠的是<strong>虛擬檔案系統（Virtual File System，VFS）</strong>。VFS 是核心內部的一個抽象層：每一個開啟的物件都暴露一張函式指標表（<code>read</code>、<code>write</code>、<code>llseek</code>、<code>poll</code>、…），當你呼叫 <code>read(fd, …)</code>，VFS 查出那個 fd 背後的物件，再派發（dispatch）到<em>它的</em> read。你的程式碼一模一樣；是核心把它路由到 tty 驅動程式、socket 層、或檔案系統。</p>
+      <p>「一切皆檔案」真正的意思是「一切都呈現出檔案介面」。但 fd 背後的物件確實各不相同，而這些差異會從哪些系統呼叫會成功、以及資料如何表現中滲漏出來。在後面各章你都會碰到它們；現在先認識這份卡司：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>類型</th><th>ls 旗標</th><th>Jetson USV 上的例子</th><th>能 lseek？</th></tr></thead>
+        <tbody>
+          <tr><td>一般檔案</td><td><code>-</code></td><td><code>/var/log/mission.log</code></td><td>能——有真正的偏移量</td></tr>
+          <tr><td>目錄</td><td><code>d</code></td><td><code>/dev</code></td><td>不能——透過 <code>getdents</code> 讀</td></tr>
+          <tr><td>字元裝置</td><td><code>c</code></td><td><code>/dev/ttyTHS1</code>（IMU UART）</td><td>不能——是一條位元組<em>串流</em></td></tr>
+          <tr><td>區塊裝置</td><td><code>b</code></td><td><code>/dev/mmcblk0</code>（eMMC）</td><td>能——隨機存取</td></tr>
+          <tr><td>管線 / FIFO</td><td><code>p</code></td><td>shell 的 <code>|</code>、具名 FIFO</td><td>不能</td></tr>
+          <tr><td>Socket</td><td><code>s</code></td><td>LiDAR 的 UDP 端點</td><td>不能</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——IMU 是個字元裝置</div>
+        <p>在 AGX Orin USV 上，IMU 掛在一個以 <code>/dev/ttyTHS1</code> 暴露出來的 UART 上（Tegra 高速串列驅動程式）。它 <code>ls -l</code> 旗標裡的那個 <code>c</code> 告訴你一切：它是一條<strong>位元組串流</strong>，不是一個檔案。沒有偏移量、<code>lseek()</code> 會帶著 <code>ESPIPE</code> 失敗，而你沒讀走的位元組由 tty 層緩衝著，直到它溢位、然後被無聲地丟棄。那個串流對比檔案的區別，正是為什麼在這裡短讀是常態、而非例外。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="buffered-vs-raw"><span class="sec-no">6</span>緩衝 stdio vs 原生 fd——以及為什麼混用會咬人</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>兩個層，一個裝置</small></div>
+      <p>讀同一個 fd 有兩種方式，把它們搞混是真正的痛苦來源。原生（raw）的方式是系統呼叫層：一個 <code>int</code> fd 加上直接的 <code>read</code>／<code>write</code>。方便的方式是<strong>緩衝 stdio（buffered stdio）</strong>：一個來自 <code>fopen</code> 的 <code>FILE*</code>，配上 <code>fread</code>／<code>fgets</code>／<code>fscanf</code>。那個 <code>FILE*</code> 包住一個 fd <em>外加</em>一個使用者空間的緩衝區（通常 4 KB）。當你跟 <code>fgets</code> 要一行時，stdio 可能在你背後做一次 4 KB 的大 <code>read()</code>，然後從那個緩衝區裡一行一行地交給你，不再多做任何系統呼叫。更少的模式切換——對日誌檔來說很棒，正是 §7 在談的事。</p>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>它在哪裡咬人</small></div>
+      <p>陷阱在於 stdio 的緩衝區是看不見的。用 <code>fopen</code> 開 <code>/dev/ttyTHS1</code>、做一次 <code>fgetc</code>，stdio 可能已經把 4 KB 從核心拉進它私有的緩衝區了。現在你決定你要低延遲，於是對同一個底層 fd 呼叫原生 <code>read()</code>：<strong>stdio 緩衝起來的那些位元組已經從核心裡不見了，你的 <code>read</code> 看不到它們。</strong>你讀到的是過期或缺漏的資料，於是斷定這個感測器很不穩。底下那條規則是絕對的。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 永遠別在同一個 fd 上混用 <code>FILE*</code> 與原生 <code>read()</code>／<code>write()</code></div>
+        <p>每個 fd 只選一個層。對一條即時的感測器串流，用<strong>原生 fd</strong>——你需要精確掌控你何時讀、讀多少，而你承擔不起一個隱藏的 4 KB 緩衝區去增添延遲或吃掉位元組。把 <code>FILE*</code> 留給以行為單位的設定檔與日誌檔。也別忘了 stdio 的<em>寫入</em>緩衝：<code>printf</code> 到一條管線時是行緩衝（line-buffered），但到一個檔案時是全緩衝（fully buffered），所以輸出可能就停在那兒未被沖出（flush），直到 <code>fflush</code> 或 <code>exit</code>——你當機前的最後一行日誌，也許永遠沒能落到磁碟上。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="throughput-vs-overhead"><span class="sec-no">7</span>吞吐量 vs 系統呼叫開銷：攤提的數學</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>推導有效速率</small></div>
+      <p>現在把成本講具體。假設每次 <code>read()</code> 都有一個固定開銷 $t_o$（模式切換加核心的記帳工作），無論大小都一樣，再加上一個每位元組的傳輸成本 $t_b$。要把總共 $N$ 個位元組以每塊 $B$ 大小搬完，你會做 $N/B$ 次呼叫，所以總時間是：</p>
+
+      <div class="math-box">$$ t_\text{total} = \frac{N}{B}\,t_o + N\,t_b $$</div>
+
+      <p><strong>有效吞吐量（effective throughput）</strong>——每秒實際工作搬動的位元組數——是 $N / t_\text{total}$，化簡後是一個關於緩衝大小 $B$ 的乾淨表達式：</p>
+
+      <div class="math-box">$$ R_\text{eff}(B) = \frac{N}{t_\text{total}} = \frac{1}{\dfrac{t_o}{B} + t_b} $$</div>
+
+      <p>照它想被讀的方式去讀它。當 $B$ 變大，$t_o/B$ 這一項朝零縮小，$R_\text{eff}$ 朝硬體上限 $1/t_b$ 上升。開銷被<strong>攤提（amortize）</strong>到每次呼叫更多的位元組上。緩衝區一小，$t_o/B$ 這一項就主導一切，你幾乎把所有時間都花在跨越邊界、而不是搬資料上。具體地，取 $t_o = 0.5\ \mu\text{s}$ 每次呼叫：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>緩衝 $B$</th><th>搬 1 MB 的呼叫次數</th><th>開銷時間</th><th>受開銷限制的速率 $\approx B/t_o$</th></tr></thead>
+        <tbody>
+          <tr><td>1 位元組</td><td>1,048,576</td><td>524 ms</td><td>2 MB/s</td></tr>
+          <tr><td>64 位元組</td><td>16,384</td><td>8.2 ms</td><td>128 MB/s</td></tr>
+          <tr><td>4 KB</td><td>256</td><td>128 µs</td><td>8 GB/s</td></tr>
+          <tr><td>64 KB</td><td>16</td><td>8 µs</td><td>128 GB/s</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 為什麼曲線會變平</div>
+        <p>從 1 位元組 → 4 KB 的增益巨大；從 4 KB → 64 KB 卻幾乎沒有，因為到了 4 KB，每位元組成本 $t_b$ 早已主導，已經沒剩多少開銷可供攤提。這就是邊際效益遞減法則被化成算術：挑一個夠大、讓 $t_o/B \ll t_b$ 的緩衝區，然後就停。超過那個點的更大緩衝區，只是浪費記憶體、徒增延遲——而在一個即時迴圈上，延遲本身就是一種成本。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="robust-read-loop"><span class="sec-no">8</span>穩健讀取迴圈：C 與 Python 版</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>每一行都讀</small></div>
+      <p>這是一個到這門課結束時應該變成反射動作的函式：<em>剛好</em>讀 <code>n</code> 個位元組，迴圈處理掉短讀、在 <code>EINTR</code> 時重試、並誠實回報 EOF。這就是從一個串列 fd 拉一個固定大小訊框下來的正確方式。</p>
+
+      <div class="codeblock">
+        <div class="code-head">read_full.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;unistd.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;stddef.h&gt;
+
+// Read exactly n bytes into buf. Returns n on success, a smaller
+// count on EOF before n, or -1 on a real error (errno set).
+ssize_t read_full(int fd, void *buf, size_t n) {
+    size_t got = 0;
+    char  *p   = buf;
+    while (got &lt; n) {
+        ssize_t r = read(fd, p + got, n - got);
+        if (r &lt; 0) {
+            if (errno == EINTR) continue;   // signal: just retry
+            return -1;                       // genuine error
+        }
+        if (r == 0) break;                   // EOF: peer closed / stream ended
+        got += (size_t)r;                    // accumulate the partial read
+    }
+    return (ssize_t)got;
+}</code></pre>
+      </div>
+
+      <p>那三個分支就是全部的重點。<code>r &lt; 0</code> 且 <code>EINTR</code> 不是錯誤——有訊號落下，重試。<code>r == 0</code> 是 EOF——另一端不在了，停。<code>r &gt; 0</code> 但少於要求的，就是短讀——累積後繼續迴圈。漏掉任何一個，你就有一個只在負載下才現形的 bug——也就是說，在水上才現形。</p>
+
+      <p>Python 透過 <code>os.read</code> 給你同一個原生層，它是系統呼叫上薄薄的一層包裝，並遵守完全相同的計數契約。基於 §6 的理由，別在一個現役感測器上用緩衝的 <code>open()</code>／<code>file.read()</code>。</p>
+
+      <div class="codeblock">
+        <div class="code-head">read_full.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import os, errno
+
+def read_full(fd: int, n: int) -&gt; bytes:
+    """Read exactly n bytes from a raw fd, handling partial reads + EINTR."""
+    chunks, got = [], 0
+    while got &lt; n:
+        try:
+            data = os.read(fd, n - got)      # raw syscall, returns a COUNT
+        except InterruptedError:             # == EINTR; retry
+            continue
+        if not data:                         # b'' means EOF
+            break
+        chunks.append(data)
+        got += len(data)
+    return b"".join(chunks)
+
+# Open the IMU UART as a raw fd — no FILE*, no hidden buffer
+fd = os.open("/dev/ttyTHS1", os.O_RDONLY | os.O_NOCTTY)
+frame = read_full(fd, 40)                     # exactly one 40-byte IMU frame</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 還有一層在後頭</div>
+        <p>從 Python 3.5 起，<code>os.read</code> 已經在內部自動重試 <code>EINTR</code>（PEP 475），所以上面那個 <code>except</code> 分支是雙保險——但親手寫出來能讓契約變得明確，而在 C 裡你非自己做不可。訊框<em>邊界</em>問題（一個 IMU 訊息在哪結束、下一個從哪開始？）是更上面一層：那是剖析（parsing），它疊在這個迴圈之上。先把位元組弄對。</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="real-imu-200hz"><span class="sec-no">9</span>真實案例：串列上 200 Hz 的 IMU</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>這跑在 USV 上</small></div>
+      <p>AGX Orin USV 的控制迴圈需要 200 Hz 的姿態（attitude）。IMU 以 921600 baud 在 <code>/dev/ttyTHS1</code> 上串流 40 位元組的訊框。我們來核一核數字，因為它們決定了你整套 I/O 策略。</p>
+      <p>酬載速率：$200\ \text{Hz} \times 40\ \text{bytes} = 8000$ 位元組/s。在 8N1 訊框格式下每個位元組在線上是 10 個位元，所以這條線承載 $80\,000$ bits/s——對 921600 baud 的鏈路來說只是個捨入誤差。<strong>頻寬從來不是這裡的問題。</strong>問題在於<em>節奏與開銷</em>。每 5 ms 就有一個新訊框完整地上線。如果你天真地一次 <code>read()</code> 一個位元組，你一秒做 $8000$ 次系統呼叫；在 $t_o = 0.5\ \mu\text{s}$ 下那是每秒 4 ms 的純模式切換稅——數字不大，卻是純浪費，而且一旦你把 GPS、LiDAR、CAN 都加進同一個迴圈，它會惡化得很難看。</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——一個訊框的讀取預算</div>
+        <p>用 <code>read_full(fd, 40)</code> 以訊框大小的塊去讀，並預期它每個訊框會迴圈個兩三次，因為位元組是按鮑率一點一點滴進來的（921600 下約 11 µs/位元組）。控制迴圈每個週期呼叫一次 <code>read_full</code>；如果一整個訊框還沒到，它就拿到一次短讀，然後要嘛在 <code>poll()</code>（第 08 章）上等待、要嘛沿用上一次的估計。tty 驅動程式會緩衝進來的位元組，所以一次 5 ms 的控制抖動絕不會丟資料——但這只是因為你照著裝置去設計這個迴圈，而不是反過來。<em>等待</em>位元組（而不是逐位元組輪詢（polling））的正確做法，是第 06 章的 termios <code>VMIN</code>／<code>VTIME</code> 設定；就現在而言，要記住的是：對齊訊框去切塊，永遠別對齊位元組。</p>
+      </div>
+
+      <!-- ============================================================ §10 -->
+      <h2 id="your-turn"><span class="sec-no">10</span>換你了</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io01-short-read">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">你在一個串列 fd 上呼叫 <code>read(fd, buf, 64)</code>，它回傳了 <code>17</code>。這代表什麼？</div>
+        <ul class="ex-options">
+          <li data-correct="false">發生了錯誤；你該檢查 <code>errno</code> 並中止。</li>
+          <li data-correct="false">裝置壞了——它應該永遠回傳 64。</li>
+          <li data-correct="true">當下有 17 個位元組可取並已複製進你的緩衝區；這是一次正常的短讀，所以迴圈把剩下的取回來。</li>
+          <li data-correct="false">在 17 個位元組之後到達了檔案結尾。</li>
+        </ul>
+        <div class="ex-explain"><code>read</code> 回傳的是實際搬動的位元組<strong>計數</strong>，範圍從 0 到你要求的大小。一個小於要求的正值就是短讀——在串列埠、socket 這類串流上完全正常，因為位元組是按線速抵達的。只有 <code>0</code> 才代表 EOF，只有 <code>-1</code> 才代表錯誤。正確的反應是累積後再呼叫一次 <code>read</code>（並處理 <code>EINTR</code>），就跟 <code>read_full</code> 做的一模一樣。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io01-effective-rate" data-answer="500" data-tol="5">
+        <div class="ex-head"><span class="badge">Q2</span> 算一算</div>
+        <div class="ex-q">每次 <code>read()</code> 有固定開銷 $t_o = 1\ \mu\text{s}$，而每位元組成本可忽略。你以<strong>每次呼叫 500 位元組</strong>（緩衝大小 $B = 500$ 位元組）讀 1,000,000 個位元組。在受開銷限制的區間 $R_\text{eff} \approx B/t_o$ 下，有效吞吐量是多少 <strong>MB/s</strong>（取 1 MB $= 10^6$ 位元組）？</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">MB/s</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">在每次呼叫 $B = 500$ 位元組、$t_o = 1\ \mu\text{s}$ 下：$R_\text{eff} = B/t_o = 500\ \text{bytes} / 10^{-6}\ \text{s} = 5\times10^8$ bytes/s $= 500$ MB/s。對照之下，每次呼叫只讀<strong>一</strong>個位元組會得到 $R_\text{eff} = 1 / 10^{-6} = 10^6$ bytes/s $= 1$ MB/s——慢了五百倍。教訓在於那個<em>斜率</em>：你把緩衝放大幾倍，受開銷限制的速率就乘上同樣的倍數，直到 $t_b$ 接手為止。（答案：$B=500$ 時為 500 MB/s。）</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io01-read-all-loop">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰——一個穩健的全部讀取迴圈</div>
+        <div class="ex-q">寫一個 C 函式 <code>read_full(int fd, void *buf, size_t n)</code>，它<strong>剛好</strong>讀 <code>n</code> 個位元組，並正確處理 (a) 短讀、(b) <code>EINTR</code>、(c) 在湊滿 <code>n</code> 個位元組前的 EOF。說明 <code>read</code> 三種回傳情況各自的意義，以及你的程式碼如何反應。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body"><code>read</code> 可能回傳三種值：<code>r &gt; 0</code>（拿到一些位元組——也許比要求的少）、<code>r == 0</code>（EOF）、<code>r &lt; 0</code>（錯誤；檢查 <code>errno == EINTR</code> 來判斷「重試」）。維護一個累計的 <code>got</code> 計數器，把緩衝指標按 <code>got</code> 往前推，並在 <code>got &lt; n</code> 時繼續迴圈。</div></details>
+        <details class="ex-acc"><summary>看一個解答</summary><div class="acc-body">
+          <div class="codeblock"><div class="code-head">read_full.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;unistd.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;stddef.h&gt;
+
+ssize_t read_full(int fd, void *buf, size_t n) {
+    size_t got = 0;
+    char  *p   = buf;
+    while (got &lt; n) {
+        ssize_t r = read(fd, p + got, n - got);
+        if (r &lt; 0) {
+            if (errno == EINTR) continue;   // (b) signal hit us; retry, no data lost
+            return -1;                       //     real error: propagate, errno set
+        }
+        if (r == 0) break;                   // (c) EOF before n bytes; return short
+        got += (size_t)r;                    // (a) partial read; accumulate and loop
+    }
+    return (ssize_t)got;                      // == n on full success, &lt; n on EOF
+}</code></pre></div>
+          <p><strong>那三種情況：</strong><code>r &gt; 0</code> 是短讀——複製你拿到的、往前推進、繼續走，直到湊齊全部 <code>n</code> 個。<code>r == 0</code> 是 EOF——串流結束了（對端關閉、USB 被拔掉），所以回傳那個偏短的計數，讓呼叫者決定。<code>r &lt; 0</code> 且 <code>errno == EINTR</code> 是一次良性的中斷（一個訊號在任何位元組移動前被送達）——重試就好；任何其他 <code>errno</code> 都是真正的失敗。呼叫者檢查回傳值：<code>== n</code> 代表一個完整訊框、<code>&lt; n</code> 代表 EOF、<code>-1</code> 代表錯誤。對一個非阻塞 fd，你還會額外把 <code>EAGAIN</code> 當成「現在沒東西可給」，並返回到事件迴圈——這就是通往第 08 章的路。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章回顧</div>
+        <p>I/O 是一場橫跨系統呼叫邊界、跟核心的談判：應用 → libc → 陷入（模式切換） → VFS → 驅動程式 → 裝置。一個檔案描述子是進到你行程 fd 表的一個小整數把手；0/1/2 是 stdin/out/err，而 <code>open()</code> 交回最小可用的 fd。核心那六個是 <code>open/read/write/close/lseek/ioctl</code>，而那個承重的事實是 <code>read</code>／<code>write</code> 回傳一個<strong>計數</strong>——短讀是正常的、EOF 是 0、錯誤是 −1、<code>EINTR</code> 代表重試。VFS 讓一套 API 在檔案、tty、socket、裝置上都管用，但永遠別在同一條串流上混用緩衝 <code>FILE*</code> 與原生 fd。每次系統呼叫都帶有固定開銷 $t_o$，所以有效速率 $R_\text{eff} = 1/(t_o/B + t_b)$ 會獎勵更大的緩衝區，直到 $t_b$ 主導——對齊訊框去切塊，永遠別對齊位元組。下一章：這些裝置一開始究竟是怎麼透過 <code>/dev</code> 與 sysfs 以檔案的形式現身的。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

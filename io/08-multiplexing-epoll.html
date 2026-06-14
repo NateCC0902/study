@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Multiplexing I/O: poll, epoll &amp; io_uring — Linux I/O for Robotics</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="08-multiplexing-epoll">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · Ch 08</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · Chapter 08 · Concurrency</div>
+        <h1>Multiplexing I/O: how one thread watches every sensor</h1>
+        <p>A robot's brain reads GPS, IMU, LiDAR and CAN at the same time — four file descriptors, four data rates, all live at once. The naive answer is "one thread per device." It works on a laptop and quietly falls apart at scale. This chapter is the kernel machinery that lets a <em>single</em> thread wait on hundreds of fds and wake only for the ones with data: <code>select</code>, <code>poll</code>, <code>epoll</code>, and <code>io_uring</code>.</p>
+        <div class="meta"><span>⏱ ~40 min</span><span>🧠 readiness model</span><span>⚡ event loop</span><span>∑ O(n) vs O(ready)</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="blocking-nonblocking"><span class="sec-no">1</span>Blocking, non-blocking, and the wait problem</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Every <code>read()</code> you've written so far <strong>blocks</strong>: if the GPS hasn't sent its next NMEA line yet, the calling thread goes to sleep inside the kernel until bytes arrive. That's perfect when you have exactly one thing to watch. The instant you have <em>two</em>, blocking traps you — while you sleep on the GPS, the LiDAR's socket buffer overflows and you drop a scan. You can only block on one fd at a time, but a robot has many.</p>
+
+      <p>The first escape is <strong>non-blocking mode</strong>. Open the fd with the <code>O_NONBLOCK</code> flag (or set it later with <code>fcntl</code>), and a <code>read()</code> that has no data returns immediately with <code>-1</code> and <code>errno == EAGAIN</code> (identical to <code>EWOULDBLOCK</code> on Linux) instead of sleeping. Now you <em>can</em> visit every fd in a loop without getting stuck on one — but watch what that costs.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Busy-polling burns a whole core</div>
+        <p>A bare <code>while(1)</code> that <code>read()</code>s every non-blocking fd and ignores <code>EAGAIN</code> never sleeps. It spins at 100% CPU asking "anything yet? anything yet?" millions of times a second. <code>EAGAIN</code> is not an error — it means "nothing right now, ask later." The whole game of multiplexing is: <em>who tells us when to ask, so we can sleep until then?</em></p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>why a busy loop is hopeless</small></div>
+      <p>Say your control loop runs at 20 Hz, so you only <em>need</em> fresh data every $50\ \text{ms}$. A busy poll loop doing nothing but <code>read()</code>+<code>EAGAIN</code> at, say, $2\times10^{6}$ iterations per second does almost nothing useful:</p>
+      <div class="math-box">$$ \eta = \frac{f_{\text{useful}}}{f_{\text{poll}}} \approx \frac{80\ \text{reads with data/s}}{2\times10^{6}\ \text{reads/s}} \approx 0.004\% $$</div>
+      <p>Every one of those checks is a syscall (user→kernel→user). We are paying for two million crossings to catch eighty payloads. We need a primitive that <em>blocks until at least one fd is ready</em>, then hands us the ready set. That primitive is I/O multiplexing.</p>
+
+      <div class="codeblock">
+        <div class="code-head">nonblock.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;fcntl.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;unistd.h&gt;
+
+int set_nonblocking(int fd) {
+    int fl = fcntl(fd, F_GETFL, 0);             /* read current flags */
+    if (fl == -1) return -1;
+    return fcntl(fd, F_SETFL, fl | O_NONBLOCK); /* add O_NONBLOCK     */
+}
+
+/* a read that tolerates "no data yet" */
+ssize_t try_read(int fd, void *buf, size_t n) {
+    ssize_t r = read(fd, buf, n);
+    if (r &lt; 0 &amp;&amp; (errno == EAGAIN || errno == EWOULDBLOCK))
+        return 0;            /* not an error: ask again later */
+    return r;                /* &gt;0 bytes, 0 = EOF, &lt;0 real error */
+}
+</code></pre>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="thread-per-fd"><span class="sec-no">2</span>Thread-per-fd and why it doesn't scale</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the obvious answer</small></div>
+      <p>"Blocking is fine if each fd gets its own thread." Spin up one thread per device, let each block on its own <code>read()</code>, done. This is genuinely the right call for a handful of fds — for a robot with four sensors it's a perfectly reasonable architecture. The trouble is it doesn't <em>generalize</em>, and understanding exactly where it breaks is what motivates everything else.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>two costs that grow with N</small></div>
+      <p><strong>Memory.</strong> Each pthread reserves a stack — the Linux default is $8\ \text{MiB}$ of virtual address space (<code>ulimit -s</code> shows it in KiB). It's lazily faulted in, so it doesn't all become RAM, but the virtual reservation plus the per-thread kernel <code>task_struct</code> (a few KiB of real RAM each) are unavoidable. For $N$ threads:</p>
+      <div class="math-box">$$ M_{\text{vm}} = N \cdot S_{\text{stack}} = N \cdot 8\ \text{MiB} \qquad\Rightarrow\qquad N=10{,}000 \;\Rightarrow\; \approx 78\ \text{GiB of VM} $$</div>
+      <p><strong>Scheduler cost.</strong> Worse than memory is the context-switch tax. When one thread blocks and another wakes, the kernel saves and restores registers, swaps the page-table root, and — the expensive part — pollutes the L1/L2 cache and TLB so the new thread runs cold. A context switch is roughly $1$–$5\ \mu s$ of direct cost plus cache-miss aftershock. With $N$ threads each waking on its own traffic, switch rate scales with $N$:</p>
+      <div class="math-box">$$ C_{\text{cpu}} \approx N \cdot f_{\text{events}} \cdot t_{\text{switch}} $$</div>
+      <p>This is the famous <strong>C10k problem</strong>: a server that wanted to handle 10,000 concurrent connections couldn't, because thread-per-connection drowned the scheduler long before it ran out of RAM. The fix wasn't more threads — it was <em>one</em> thread that the kernel could tell which fds are ready.</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — the AGX Orin USV has a dozen fds, so why care?</div>
+        <p>Our USV has maybe a dozen I/O sources, so thread-per-fd <em>would</em> run. But the same scaling logic shows up in miniature: each blocking-read thread that wakes 200×/s for the IMU is a context switch that evicts the cache lines your 20 Hz PID loop just warmed. Twelve such threads turn a deterministic control loop into a jittery one. The event-loop pattern below lets the control thread own its cache and wake only when real data lands.</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    subgraph TPF["thread-per-fd"]
+      T1["thread<br/>GPS"] --> K1["kernel"]
+      T2["thread<br/>IMU"] --> K1
+      T3["thread<br/>LiDAR"] --> K1
+      T4["thread<br/>CAN"] --> K1
+      K1 -->|"N context<br/>switches"| CPU1["CPU"]
+    end
+    subgraph EL["epoll event loop"]
+      G["GPS"] --> EP["one thread<br/>epoll_wait"]
+      I["IMU"] --> EP
+      LD["LiDAR"] --> EP
+      C["CAN"] --> EP
+      EP -->|"O(ready)"| CPU2["CPU"]
+    end
+</div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="select-poll"><span class="sec-no">3</span>select &amp; poll: the O(n) ancestors</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>hand the kernel the whole list</small></div>
+      <p>The first multiplexers solved the wait problem with one idea: hand the kernel your entire set of fds and say "sleep until any of these is readable/writable, or a timeout fires." When it returns, you scan the set to see which ones woke. That's <code>select(2)</code> (1983, fixed-size bitmap capped at <code>FD_SETSIZE</code> = 1024) and its cleaner successor <code>poll(2)</code> (an array of <code>struct pollfd</code>, no hard limit).</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>where the cost hides</small></div>
+      <p>Both share a fatal property: the interest set lives in <em>userspace</em> and is rebuilt every call. So each invocation does $O(n)$ work twice over — the kernel copies and scans all $n$ descriptors on entry, and you scan all $n$ again on return to find the ready ones, even if only one fd actually fired:</p>
+      <div class="math-box">$$ T_{\text{select}} = \underbrace{O(n)}_{\text{copy in}} + \underbrace{O(n)}_{\text{kernel scan}} + \underbrace{O(n)}_{\text{user scan}} = O(n)\ \text{per call} $$</div>
+      <p>With $n=10{,}000$ fds where only $1$ is ready, you do $\sim10{,}000$ units of work to deliver $1$ event — a $0.01\%$ payoff that repeats on <em>every</em> loop iteration. The cost is tied to the size of the watched set, not the amount of actual I/O. That is precisely backwards from what you want.</p>
+
+      <div class="codeblock">
+        <div class="code-head">poll_loop.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;poll.h&gt;
+
+struct pollfd pfds[4];
+pfds[0] = (struct pollfd){ .fd = gps_fd,   .events = POLLIN };
+pfds[1] = (struct pollfd){ .fd = imu_fd,   .events = POLLIN };
+pfds[2] = (struct pollfd){ .fd = lidar_fd, .events = POLLIN };
+pfds[3] = (struct pollfd){ .fd = can_fd,   .events = POLLIN };
+
+for (;;) {
+    int ready = poll(pfds, 4, 50 /* ms timeout */);
+    if (ready &lt; 0) { if (errno == EINTR) continue; break; }
+    if (ready == 0) { /* 50 ms passed: run the control tick */ continue; }
+    for (int i = 0; i &lt; 4; i++)                 /* O(n) rescan EVERY call */
+        if (pfds[i].revents &amp; POLLIN)
+            drain(pfds[i].fd);                  /* read until EAGAIN */
+}
+</code></pre>
+      </div>
+      <p>For four fds this is fine — at $n=4$ the $O(n)$ rescan is free, and <code>poll</code> is the right, portable tool. The lesson is about the asymptote, not this loop.</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="epoll"><span class="sec-no">4</span>epoll: the kernel keeps the set, O(ready)</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>stop re-handing the same list</small></div>
+      <p>The waste in <code>poll</code> is that you re-declare your interest set on every single call. Linux's <code>epoll</code> (2002) fixes that by making the interest set a <em>persistent kernel object</em>. You build it once with <code>epoll_ctl(... EPOLL_CTL_ADD ...)</code>; thereafter <code>epoll_wait()</code> returns <em>only the fds that are actually ready</em>. No userspace set to copy in, no full rescan. The kernel hooks each fd's wake-up path, so when data arrives it appends that fd to a ready-list internally.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>the cost moves to the work</small></div>
+      <p>Registration is amortized $O(1)$ per fd (the interest set is a red-black tree keyed by fd). The hot path — <code>epoll_wait</code> — costs only the number of <em>ready</em> fds, $r$, not the total $n$:</p>
+      <div class="math-box">$$ T_{\text{epoll\_wait}} = O(r),\qquad r = \#\{\text{ready fds}\} \;\le\; n $$</div>
+      <p>When $1$ of $10{,}000$ fds is ready, <code>epoll_wait</code> does $O(1)$ work and returns one event — versus <code>poll</code>'s $O(10{,}000)$. The cost finally scales with the I/O you actually have, which is the entire point. <strong>Pull the slider in the sim below to watch the red (thread-per-fd) and orange (epoll) curves diverge as $N$ grows.</strong></p>
+
+      <div class="sim"><div class="sim-title"><span>🔀</span> Thread-per-fd vs epoll as connections scale</div><canvas id="sim-mux"></canvas></div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What to notice</div>
+        <p>Push the fd count right and the <strong>red curve climbs</strong> — thread-per-fd memory (8 MiB stack each) and O(N) scheduler pressure grow linearly with every fd. The <strong>orange epoll curve tracks the <em>active</em> fraction</strong>, not the total: drop "% active" to 5% and epoll's work stays near the floor even at 50,000 fds, on a single thread with ~0.3 KB of kernel state per fd. The gap between the lines <em>is</em> the C10k problem, and epoll closing it is why every modern event loop is built on it.</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>build the interest set once</small></div>
+      <div class="codeblock">
+        <div class="code-head">epoll_setup.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;sys/epoll.h&gt;
+
+int ep = epoll_create1(EPOLL_CLOEXEC);     /* the kernel-side interest set */
+
+struct epoll_event ev = { .events = EPOLLIN, .data.fd = gps_fd };
+epoll_ctl(ep, EPOLL_CTL_ADD, gps_fd, &amp;ev); /* register ONCE, not per loop */
+
+/* later, the wait returns only ready fds */
+struct epoll_event events[64];
+int n = epoll_wait(ep, events, 64, 50 /* ms */);
+for (int i = 0; i &lt; n; i++)                 /* i runs over READY fds only   */
+    drain(events[i].data.fd);
+</code></pre>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="edge-level"><span class="sec-no">5</span>Level vs edge trigger: the bug everyone hits</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>a state vs a transition</small></div>
+      <p>epoll has two notification modes, and choosing wrong is the single most common epoll bug. <strong>Level-triggered (LT)</strong> — the default — reports an fd ready as long as data <em>is</em> buffered, like a level sensor: every <code>epoll_wait</code> keeps telling you "still readable" until you drain it. <strong>Edge-triggered (ET)</strong>, set with the <code>EPOLLET</code> flag, fires only on the <em>transition</em> from not-ready to ready — once per arrival. If you don't drain the whole buffer on an ET notification, the leftover bytes sit there and <code>epoll_wait</code> never mentions that fd again until <em>new</em> data arrives. You hang holding unread data.</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> The ET rule: always drain to EAGAIN</div>
+        <p>With <code>EPOLLET</code>, the fd <strong>must</strong> be non-blocking, and on every wake you must <code>read()</code> in a loop until it returns <code>EAGAIN</code>. That <code>EAGAIN</code> is the signal "buffer empty, you've consumed the whole edge." Skip it and you'll silently drop data. Edge mode trades one syscall-per-event efficiency for that strict drain discipline.</p>
+      </div>
+
+      <p>Why bother with ET? Fewer wakeups. Under LT, a fast LiDAR that delivers a 4 KB scan in chunks can wake <code>epoll_wait</code> several times for one logical message; ET wakes you once and you drain it all. For most robotics nodes LT is simpler and plenty fast — reach for ET only when wakeup overhead is measurably hurting you.</p>
+
+      <div class="codeblock">
+        <div class="code-head">edge_drain.c <span class="lang">C</span></div>
+<pre><code class="language-c">/* EPOLLET requires O_NONBLOCK fds + drain-to-EAGAIN */
+struct epoll_event ev = { .events = EPOLLIN | EPOLLET, .data.fd = lidar_fd };
+epoll_ctl(ep, EPOLL_CTL_ADD, lidar_fd, &amp;ev);
+
+/* on a ready event, loop until the kernel says "empty" */
+for (;;) {
+    ssize_t r = read(lidar_fd, buf, sizeof buf);
+    if (r &gt; 0)            { handle(buf, r); continue; }   /* keep draining */
+    if (r == 0)           { close_peer(lidar_fd); break; } /* EOF          */
+    if (errno == EAGAIN)  { break; }                       /* edge consumed */
+    if (errno == EINTR)   { continue; }                    /* retry        */
+    perror("read"); break;
+}
+</code></pre>
+      </div>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th></th><th>Level-triggered (default)</th><th>Edge-triggered (EPOLLET)</th></tr></thead>
+        <tbody>
+          <tr><td>Fires when</td><td>data <em>is</em> buffered (a state)</td><td>data <em>arrives</em> (a transition)</td></tr>
+          <tr><td>Re-notifies if not drained?</td><td>yes, every wait</td><td>no — only on new data</td></tr>
+          <tr><td>Must drain to EAGAIN?</td><td>no (partial reads are safe)</td><td>yes, mandatory</td></tr>
+          <tr><td>fd must be non-blocking?</td><td>recommended</td><td>required</td></tr>
+          <tr><td>Wakeups per message</td><td>can be several</td><td>one</td></tr>
+        </tbody>
+      </table></div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="io-uring"><span class="sec-no">6</span>io_uring: from readiness to true async</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>tell me when it's done, not when it's ready</small></div>
+      <p>epoll is a <em>readiness</em> interface: it tells you "this fd can be read now," and you still issue the <code>read()</code> yourself (another syscall). <code>io_uring</code> (Linux 5.1+) flips the model to <em>completion</em>: you submit the actual operation — "read 4 KB from this fd into this buffer" — and the kernel tells you when the <strong>data is already there</strong>. The work happens asynchronously; no separate read syscall per event.</p>
+
+      <p>The mechanism is two shared ring buffers in memory mapped between your process and the kernel — a <strong>submission queue (SQ)</strong> you push requests into and a <strong>completion queue (CQ)</strong> the kernel pushes results into. Because both rings are shared memory, you can batch many operations and submit them with <em>one</em> <code>io_uring_enter()</code> syscall — or, with SQ-polling enabled, zero syscalls in steady state.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>amortizing the syscall</small></div>
+      <p>If a syscall costs $t_{\text{sc}}$ and you batch $b$ operations per <code>io_uring_enter</code>, the per-operation syscall overhead collapses:</p>
+      <div class="math-box">$$ t_{\text{per-op}} = \frac{t_{\text{sc}}}{b} \;\xrightarrow[\;b\to\infty\;]{}\; 0 \qquad\text{vs. epoll's } 2\,t_{\text{sc}}\text{ per event (wait + read)} $$</div>
+      <p>For our control loop the wins are modest — we're not syscall-bound at a dozen fds — but io_uring is the direction the kernel is moving, and it shines for disk-heavy mission logging where epoll has historically had no good answer (regular files are always "ready," so epoll can't async them; io_uring can).</p>
+
+      <div class="mermaid">
+flowchart LR
+    APP["app"] -->|"push SQE"| SQ["submission<br/>ring (SQ)"]
+    SQ -->|"io_uring_enter()<br/>batched"| KERN["kernel<br/>does the I/O"]
+    KERN -->|"push CQE"| CQ["completion<br/>ring (CQ)"]
+    CQ -->|"reap results"| APP
+</div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Three generations, one trend</div>
+        <p><code>poll</code>: you own the set, kernel rescans it — $O(n)$. <code>epoll</code>: kernel owns the set, returns ready fds — $O(r)$, but still readiness (you do the read). <code>io_uring</code>: kernel owns the set <em>and</em> does the I/O, returns completions in shared-memory rings — batched, true async. Each step moves work from your loop into the kernel and shrinks the syscall count.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="event-loop"><span class="sec-no">7</span>The event-loop pattern in a ROS2-style node</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>one thread, four sensors, on the AGX Orin</small></div>
+      <p>Here is the shape every reactor — libev, libuv, the ROS 2 executor, an nginx worker — boils down to: register all your fds, then loop on <code>epoll_wait</code> dispatching ready ones to handlers, using the timeout as your periodic tick. On the USV this one thread owns the GPS (<code>/dev/serial/by-id/...</code>), the IMU (another tty), the LiDAR (a UDP socket), and the CAN bus (a SocketCAN fd via <code>AF_CAN</code>) — all multiplexed, all cache-warm, no thread thrash.</p>
+
+      <div class="codeblock">
+        <div class="code-head">sensor_loop.c <span class="lang">C</span></div>
+<pre><code class="language-c">int ep = epoll_create1(EPOLL_CLOEXEC);
+
+/* every fd is non-blocking; register each with its handler tag */
+add_fd(ep, gps_fd,   EPOLLIN);   /* NMEA over /dev/serial/by-id/... */
+add_fd(ep, imu_fd,   EPOLLIN);   /* 200 Hz binary over ttyTHS       */
+add_fd(ep, lidar_fd, EPOLLIN);   /* UDP scans                       */
+add_fd(ep, can_fd,   EPOLLIN);   /* SocketCAN AF_CAN                */
+
+struct epoll_event evs[16];
+const int TICK_MS = 50;                 /* 20 Hz control deadline */
+
+for (;;) {
+    int n = epoll_wait(ep, evs, 16, TICK_MS);
+    if (n &lt; 0 &amp;&amp; errno == EINTR) continue;   /* signal: just retry */
+
+    for (int i = 0; i &lt; n; i++) {            /* O(ready) dispatch  */
+        int fd = evs[i].data.fd;
+        if (evs[i].events &amp; (EPOLLERR | EPOLLHUP)) { reopen(fd); continue; }
+        if (fd == gps_fd)        drain_nmea(fd);
+        else if (fd == imu_fd)   drain_imu(fd);
+        else if (fd == lidar_fd) drain_lidar(fd);
+        else if (fd == can_fd)   drain_can(fd);
+    }
+
+    run_control_tick();   /* fires on every wake OR the 50 ms timeout */
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> One slow handler stalls everyone</div>
+        <p>A single-thread event loop is cooperative: if <code>drain_lidar</code> blocks for 30 ms parsing a giant scan, the GPS, IMU and CAN all wait, and your 50 ms control tick slips. Handlers must be quick and non-blocking. Heavy CPU work (point-cloud processing, SLAM) belongs on a <em>separate</em> thread fed by a queue — keep the I/O loop lean so the control deadline is sacred.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io08-edge-vs-level">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You register an fd with <code>EPOLLIN | EPOLLET</code>. A 4 KB message arrives; your handler reads only the first 1 KB, then returns to <code>epoll_wait</code>. No new data ever arrives on that fd. What happens to the remaining 3 KB?</div>
+        <ul class="ex-options">
+          <li data-correct="false">The next <code>epoll_wait</code> reports the fd readable again, so you get the rest.</li>
+          <li data-correct="true">It sits unread — edge mode already fired for the arrival, so <code>epoll_wait</code> stays silent until <em>new</em> data comes in. You should have drained to <code>EAGAIN</code>.</li>
+          <li data-correct="false">The kernel discards it after the timeout.</li>
+          <li data-correct="false">epoll automatically retries the read for you.</li>
+        </ul>
+        <div class="ex-explain">Edge-triggered notification fires on the <em>transition</em> to ready, once. The 3 KB are still in the socket buffer, but because there's no new transition, <code>epoll_wait</code> won't mention the fd again. The ET contract is: read in a loop until <code>EAGAIN</code> on every wake. Level-triggered mode would have re-reported it, which is why LT is the safer default.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io08-scan-cost" data-answer="9999" data-tol="1">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">You watch $n = 10{,}000$ fds, of which exactly $r = 1$ is ready on a given wake. A <code>poll</code> call does $O(n)$ work; an <code>epoll_wait</code> call does $O(r)$ work. Counting one "unit" per fd examined, how many <strong>more</strong> units does <code>poll</code> do than <code>epoll_wait</code> for this single wake? (Compute $n - r$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">units</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$n - r = 10{,}000 - 1 = 9{,}999$. <code>poll</code> scans all 10,000 descriptors to find the one that's ready; <code>epoll_wait</code> returns just that one and examines 1. The $\sim$10,000× gap repeats on every loop iteration — that's the asymptotic difference between $O(n)$ and $O(r)$, and the whole reason epoll exists.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io08-epoll-skeleton">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — an epoll event-loop skeleton</div>
+        <div class="ex-q">Write a minimal level-triggered epoll loop in C: create the instance, register a single non-blocking <code>fd</code> for read events, then wait with a 100 ms timeout and drain the fd when it's ready. Handle <code>EINTR</code> and a zero-return timeout. (Assume <code>set_nonblocking</code> and <code>handle</code> exist.)</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Three syscalls do all the work: <code>epoll_create1</code> makes the instance, <code>epoll_ctl(... EPOLL_CTL_ADD ...)</code> registers the fd once, and <code>epoll_wait</code> blocks for ready events. A return of <code>0</code> means the timeout elapsed; a return of <code>-1</code> with <code>errno == EINTR</code> means a signal interrupted it — just loop again.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <div class="codeblock"><div class="code-head">loop.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;sys/epoll.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;unistd.h&gt;
+
+int run_loop(int fd) {
+    set_nonblocking(fd);
+
+    int ep = epoll_create1(EPOLL_CLOEXEC);
+    if (ep &lt; 0) return -1;
+
+    struct epoll_event ev = { .events = EPOLLIN, .data.fd = fd };
+    if (epoll_ctl(ep, EPOLL_CTL_ADD, fd, &amp;ev) &lt; 0) { close(ep); return -1; }
+
+    struct epoll_event out[8];
+    for (;;) {
+        int n = epoll_wait(ep, out, 8, 100 /* ms */);
+        if (n &lt; 0) {
+            if (errno == EINTR) continue;   /* signal: retry */
+            break;                          /* real error    */
+        }
+        if (n == 0) { periodic_tick(); continue; } /* timeout */
+
+        for (int i = 0; i &lt; n; i++) {
+            if (out[i].events &amp; EPOLLIN) {
+                char buf[1024]; ssize_t r;
+                /* LT: a single read is safe, but draining is fine too */
+                while ((r = read(out[i].data.fd, buf, sizeof buf)) &gt; 0)
+                    handle(buf, r);
+                /* r &lt; 0 with EAGAIN => buffer empty, normal */
+            }
+        }
+    }
+    close(ep);
+    return 0;
+}
+</code></pre></div>
+          <p>Under level-triggered mode the inner drain loop is optional — even if you read just once, the next <code>epoll_wait</code> will re-report the fd while data remains. Under <code>EPOLLET</code> that drain-to-<code>EAGAIN</code> loop becomes mandatory.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>Blocking traps one thread on one fd; <code>O_NONBLOCK</code> returns <code>EAGAIN</code> instead of sleeping but busy-polling burns a core. Thread-per-fd is fine for a few fds but doesn't scale — 8 MiB stacks and $O(N)$ context switches sink it (the C10k problem). <code>select</code>/<code>poll</code> re-scan the whole set every call ($O(n)$); <code>epoll</code> keeps the interest set in the kernel and returns only ready fds ($O(r)$), with level- vs edge-trigger (<code>EPOLLET</code> drains to <code>EAGAIN</code>) as the key choice. <code>io_uring</code> goes further — completion not readiness, batched syscalls over shared SQ/CQ rings. The payoff is the event-loop pattern: one cache-warm thread multiplexing GPS+IMU+LiDAR+CAN while the 20 Hz control deadline stays sacred. Next: the packet path from NIC to socket.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+<script src="../assets/io-sim.js"></script>
+<script>EM.ioDemo.ioMultiplex("sim-mux");</script>
+</body>
+</html>

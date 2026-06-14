@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>The Linux I/O Model — Linux I/O for Robotics</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="01-io-model">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · Ch 01</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · Chapter 01 · Foundations</div>
+        <h1>The Linux I/O Model: how bytes actually cross the boundary</h1>
+        <p>Every sensor reading on your robot — every IMU sample, every GPS fix, every LiDAR packet — is a sequence of bytes that had to cross from a device, through the kernel, into your process. Before you can debug a dropped sample or a stuttering control loop, you need a correct mental model of that crossing: what a file descriptor <em>is</em>, what <code>read()</code> actually promises, and why a single innocent-looking call can quietly cost you a microsecond you didn't budget for.</p>
+        <div class="meta"><span>⏱ ~35 min</span><span>🧠 syscalls &amp; fds</span><span>⚡ robust read loop</span><span>∑ throughput vs overhead</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="why-io-is-hard"><span class="sec-no">1</span>Why I/O is the hard part of robotics</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>The interesting code in a robot — the EKF, the path planner, the PID loop — is the part everyone talks about, but it is rarely the part that breaks at 2 a.m. on the water. What breaks is I/O: a serial port that returns half a message, a sensor that vanishes when you unplug a different one, a logging write that blocks the control thread for 40 ms while an SD card does garbage collection. The algorithm is deterministic math. I/O is where your clean code meets a physical, asynchronous, fallible world, and that boundary is where the bodies are buried.</p>
+      <p>Here is the uncomfortable truth this whole course exists to fix: <strong>I/O is not a library call, it is a negotiation with the kernel.</strong> When you call <code>read()</code>, you are not "getting data" — you are asking a different, privileged piece of software to do something on your behalf and tell you how it went. Treat it like a function that returns a value and you'll be fine until the day it returns <em>less</em> data than you asked for, and then your code corrupts a packet and you spend a week blaming the sensor.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The thesis of this chapter</div>
+        <p><code>read()</code> and <code>write()</code> return a <strong>count</strong>, not "success." A short return is normal, not an error. Almost every robust-I/O bug is a failure to take that one sentence seriously.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="user-vs-kernel"><span class="sec-no">2</span>User space, kernel space &amp; the syscall boundary</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>two worlds, one door</small></div>
+      <p>Your process runs in <strong>user space</strong>: a sandbox where it can do arithmetic and touch its own memory but cannot talk to hardware, cannot read another process's memory, and cannot do anything that would let a buggy program take down the machine. The <strong>kernel</strong> runs in a privileged CPU mode where it <em>can</em> do all of that. The two are separated by a hardware wall the CPU enforces. The only sanctioned door through that wall is the <strong>system call</strong> (syscall).</p>
+      <p>A syscall is not a normal function call. A normal call jumps to an address in your own code. A syscall executes a special instruction (<code>svc</code> on the AArch64 of a Jetson, <code>syscall</code> on x86-64) that traps into the kernel: the CPU switches to privileged mode, saves your registers, and jumps to a fixed kernel entry point selected by a number you placed in a register. The kernel does the work, puts a return value back in a register, and switches the CPU back to user mode. That round trip is a <strong>mode switch</strong>, and it is not free — typically a few hundred nanoseconds on modern hardware even when the kernel does almost nothing.</p>
+
+      <div class="layer"><span class="step">②</span> Code <small>the call you don't see</small></div>
+      <p>You almost never invoke a syscall directly. You call <code>read()</code> in <strong>libc</strong> (glibc, or bionic in parts of the Jetson L4T userland), and libc is the thin shim that loads the syscall number, executes the trap instruction, and translates the kernel's error convention (a negative return like $-\texttt{EINTR}$) into the familiar "return $-1$ and set <code>errno</code>" you see in C. So the real path for every byte is four layers deep:</p>
+
+      <div class="mermaid">
+flowchart LR
+    A["Your app<br/>read(fd,buf,n)"] --> B["libc<br/>syscall shim"]
+    B -->|"svc trap<br/>(mode switch)"| C["Kernel<br/>VFS dispatch"]
+    C --> D["Driver<br/>tty / spi / net"]
+    D --> E["Device<br/>UART · IMU · NIC"]
+    E -.->|"bytes back"| D
+    D -.-> C
+    C -.->|"return count<br/>(mode switch)"| B
+    B -.-> A
+</div>
+
+      <p>You can watch this happen. <code>strace</code> intercepts every syscall a process makes; <code>perf trace</code> times them. Run them against any program touching a sensor and you see the true cost of your I/O, not the cost of your algorithm.</p>
+
+      <div class="codeblock">
+        <div class="code-head">trace the syscalls a program really makes <span class="lang">bash</span></div>
+<pre><code class="language-bash"># Show every read/write a program does, with byte counts and timing
+strace -T -e trace=read,write,openat,close ./read_imu
+
+# Aggregate: which syscalls dominate, total time, call count
+strace -c ./read_imu
+
+# Per-CPU view of mode switches under load (needs perf installed)
+perf trace -s ./read_imu</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> The cost is per-call, not per-byte</div>
+        <p>A mode switch costs roughly the same whether <code>read()</code> returns 1 byte or 64 KB. That single fact drives the throughput math in §7 and is the reason naive byte-at-a-time loops are catastrophic on a busy robot.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="file-descriptors"><span class="sec-no">3</span>File descriptors &amp; the fd table</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>a handle, not the thing</small></div>
+      <p>A <strong>file descriptor</strong> (fd) is just a small non-negative integer. It is your process's handle to an <em>open file description</em> the kernel maintains on your behalf — a structure holding the current offset, the access mode (read/write/nonblocking flags), and a pointer to the actual object (a tty, a socket, a regular file). You never see that structure; you only hold the integer index into your process's <strong>fd table</strong>, and you pass that integer to every I/O syscall.</p>
+      <p>Three fds are open before your <code>main()</code> runs, by convention inherited from the shell: <code>0</code> = stdin, <code>1</code> = stdout, <code>2</code> = stderr. That is why <code>printf</code> goes to fd 1 and a crash log goes to fd 2 — and why <code>2&gt;&amp;1</code> in the shell means "make fd 2 point at whatever fd 1 points at."</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The lowest-free-fd rule</div>
+        <p><code>open()</code> always returns the <strong>lowest-numbered fd not currently in use</strong>. This is a guarantee, not a hint. It is exactly why the classic redirection trick works: <code>close(1)</code> then <code>open("/var/log/mission.log")</code> reuses fd 1, so everything that writes to stdout now lands in the file. Surprising the first time, dependable forever after.</p>
+      </div>
+
+      <p>You can inspect any process's live fd table from <code>/proc</code> — no debugger needed. Each entry is a symlink to the object it refers to.</p>
+
+      <div class="codeblock">
+        <div class="code-head">inspect a running process's open fds <span class="lang">bash</span></div>
+<pre><code class="language-bash"># Every fd of process &lt;PID&gt;, shown as symlinks to the underlying object
+ls -l /proc/&lt;PID&gt;/fd
+# lrwx------ 1 root root 0 -&gt; /dev/pts/0
+# lrwx------ 1 root root 1 -&gt; /dev/pts/0
+# lrwx------ 1 root root 2 -&gt; /dev/pts/0
+# lrwx------ 1 root root 3 -&gt; /dev/ttyTHS1      # the IMU's serial port
+
+# How many fds can this process open at once? (default soft limit)
+ulimit -n            # e.g. 1024 — matters once you run epoll on many sensors</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Leaked fds are silent until they aren't</div>
+        <p>Forget to <code>close()</code> in a reconnection loop and you leak one fd per retry. Nothing fails — until you hit the <code>ulimit -n</code> ceiling and the next <code>open()</code> returns <code>-1</code> with <code>errno = EMFILE</code>, usually mid-mission. Watch the count grow with <code>ls /proc/&lt;PID&gt;/fd | wc -l</code>.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="core-syscalls"><span class="sec-no">4</span>The core syscalls &amp; the partial-read truth</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>the contracts</small></div>
+      <p>The whole everything-is-a-file API is six syscalls. Learn their <em>return contracts</em>, not just their names — the contract is where the bugs live.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Syscall</th><th>Signature (simplified)</th><th>Returns</th></tr></thead>
+        <tbody>
+          <tr><td><code>open</code></td><td><code>open(path, flags, mode)</code></td><td>new fd (lowest free), or −1 + errno</td></tr>
+          <tr><td><code>read</code></td><td><code>read(fd, buf, count)</code></td><td><strong>bytes read</strong> (0…count); 0 = EOF; −1 + errno</td></tr>
+          <tr><td><code>write</code></td><td><code>write(fd, buf, count)</code></td><td><strong>bytes written</strong> (0…count); −1 + errno</td></tr>
+          <tr><td><code>close</code></td><td><code>close(fd)</code></td><td>0, or −1 + errno (and the fd is gone either way)</td></tr>
+          <tr><td><code>lseek</code></td><td><code>lseek(fd, off, whence)</code></td><td>new absolute offset; −1 + errno (fails on pipes/sockets)</td></tr>
+          <tr><td><code>ioctl</code></td><td><code>ioctl(fd, request, arg)</code></td><td>device-specific; the "everything else" escape hatch</td></tr>
+        </tbody>
+      </table></div>
+
+      <p>The two return values that ruin careers are on <code>read</code> and <code>write</code>: <strong>they return a count, and the count can be less than you asked for.</strong> A <code>read(fd, buf, 64)</code> may legally return 17. This is not corruption and not an error — it is the kernel saying "here is what was available right now." On a serial fd it happens constantly, because bytes arrive at the baud rate (one byte every $\sim$87 µs at 115200 baud) and the kernel hands you whatever is in the tty buffer the moment you ask. A 40-byte IMU frame is very often delivered as a 31-byte read followed by a 9-byte read.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> The short-read bug, in one line</div>
+        <p><code>read(fd, frame, 40);  // assumes 40</code> — this is the single most common serial bug in robotics. The fix is never "read again until I feel better"; it is a loop that accumulates until it has a full frame, handling <code>0</code> (EOF) and <code>-1</code> (error/<code>EINTR</code>) explicitly. We build exactly that loop in the §8 exercise.</p>
+      </div>
+
+      <p>Two error codes you must treat as <em>retry, not failure</em>: <code>EINTR</code> means a signal interrupted the call before any data moved — just call again. <code>EAGAIN</code>/<code>EWOULDBLOCK</code> means a non-blocking fd had nothing ready — come back later (the foundation of <code>epoll</code> in Ch 08). Everything else is a real error.</p>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="everything-is-a-file"><span class="sec-no">5</span>"Everything is a file" &amp; the VFS</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>one API, many objects</small></div>
+      <p>The reason the same six syscalls work on a text file, a serial port, a network connection, and a hardware sensor is the <strong>Virtual File System</strong> (VFS). The VFS is a kernel-internal abstraction layer: every open object exposes a table of function pointers (<code>read</code>, <code>write</code>, <code>llseek</code>, <code>poll</code>, …), and when you call <code>read(fd, …)</code>, the VFS looks up the object behind that fd and dispatches to <em>its</em> read. Your code is identical; the kernel routes it to the tty driver, the socket layer, or the filesystem.</p>
+      <p>"Everything is a file" really means "everything presents the file interface." But the objects behind fds are genuinely different, and the differences leak through in which syscalls succeed and how data behaves. You will meet each of these in later chapters; know the cast now:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Type</th><th>ls flag</th><th>Example on a Jetson USV</th><th>lseek?</th></tr></thead>
+        <tbody>
+          <tr><td>Regular file</td><td><code>-</code></td><td><code>/var/log/mission.log</code></td><td>yes — has a real offset</td></tr>
+          <tr><td>Directory</td><td><code>d</code></td><td><code>/dev</code></td><td>no — read via <code>getdents</code></td></tr>
+          <tr><td>Character device</td><td><code>c</code></td><td><code>/dev/ttyTHS1</code> (IMU UART)</td><td>no — a byte <em>stream</em></td></tr>
+          <tr><td>Block device</td><td><code>b</code></td><td><code>/dev/mmcblk0</code> (eMMC)</td><td>yes — random access</td></tr>
+          <tr><td>Pipe / FIFO</td><td><code>p</code></td><td>shell <code>|</code>, named FIFOs</td><td>no</td></tr>
+          <tr><td>Socket</td><td><code>s</code></td><td>the LiDAR's UDP endpoint</td><td>no</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — the IMU is a character device</div>
+        <p>On the AGX Orin USV the IMU hangs off a UART exposed as <code>/dev/ttyTHS1</code> (the Tegra high-speed serial driver). The <code>c</code> in its <code>ls -l</code> flag tells you everything: it is a <strong>byte stream</strong>, not a file. There is no offset, <code>lseek()</code> fails with <code>ESPIPE</code>, and bytes you don't read are buffered by the tty layer until they overflow and get silently dropped. That stream-vs-file distinction is why partial reads are the norm here, not the exception.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="buffered-vs-raw"><span class="sec-no">6</span>Buffered stdio vs raw fds — and why mixing bites</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>two layers, one device</small></div>
+      <p>There are two ways to read the same fd, and confusing them is a real source of pain. The raw way is the syscall layer: an <code>int</code> fd and direct <code>read</code>/<code>write</code>. The convenient way is <strong>buffered stdio</strong>: a <code>FILE*</code> from <code>fopen</code>, with <code>fread</code>/<code>fgets</code>/<code>fscanf</code>. The <code>FILE*</code> wraps an fd <em>plus</em> a user-space buffer (typically 4 KB). When you ask <code>fgets</code> for one line, stdio may do a single big <code>read()</code> of 4 KB behind your back, then hand you lines out of that buffer with no further syscalls. Fewer mode switches — great for log files, exactly what §7 is about.</p>
+
+      <div class="layer"><span class="step">④</span> Real case <small>where it bites</small></div>
+      <p>The trap is that stdio's buffer is invisible. Open <code>/dev/ttyTHS1</code> with <code>fopen</code>, do one <code>fgetc</code>, and stdio may have already pulled 4 KB out of the kernel into its private buffer. Now you decide you want low latency and call raw <code>read()</code> on the same underlying fd: <strong>the bytes stdio buffered are gone from the kernel and invisible to your <code>read</code>.</strong> You read stale or missing data and conclude the sensor is flaky. The rule below is absolute.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Never mix <code>FILE*</code> and raw <code>read()</code>/<code>write()</code> on the same fd</div>
+        <p>Pick one layer per fd. For a real-time sensor stream, use <strong>raw fds</strong> — you need control over exactly when and how much you read, and you cannot afford a hidden 4 KB buffer adding latency or eating bytes. Reserve <code>FILE*</code> for line-oriented config and log files. And remember stdio's <em>write</em> buffer too: <code>printf</code> to a pipe is line-buffered, but to a file it is fully buffered, so output can sit unflushed until <code>fflush</code> or <code>exit</code> — your last log line before a crash may never hit disk.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="throughput-vs-overhead"><span class="sec-no">7</span>Throughput vs syscall overhead: the amortization math</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive the effective rate</small></div>
+      <p>Now make the cost concrete. Say each <code>read()</code> costs a fixed overhead $t_o$ (the mode switch plus kernel bookkeeping) regardless of size, plus a per-byte transfer cost $t_b$. To move a total of $N$ bytes in chunks of size $B$, you make $N/B$ calls, so total time is:</p>
+
+      <div class="math-box">$$ t_\text{total} = \frac{N}{B}\,t_o + N\,t_b $$</div>
+
+      <p>The <strong>effective throughput</strong> — bytes moved per second of real work — is $N / t_\text{total}$, which simplifies to a clean expression in the buffer size $B$:</p>
+
+      <div class="math-box">$$ R_\text{eff}(B) = \frac{N}{t_\text{total}} = \frac{1}{\dfrac{t_o}{B} + t_b} $$</div>
+
+      <p>Read it the way it wants to be read. As $B$ grows, the $t_o/B$ term shrinks toward zero and $R_\text{eff}$ rises toward the hardware ceiling $1/t_b$. The overhead is <strong>amortized</strong> over more bytes per call. With a tiny buffer the $t_o/B$ term dominates and you spend almost all your time crossing the boundary, not moving data. Concretely, take $t_o = 0.5\ \mu\text{s}$ per call:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Buffer $B$</th><th>Calls for 1 MB</th><th>Overhead time</th><th>Overhead-limited rate $\approx B/t_o$</th></tr></thead>
+        <tbody>
+          <tr><td>1 byte</td><td>1,048,576</td><td>524 ms</td><td>2 MB/s</td></tr>
+          <tr><td>64 bytes</td><td>16,384</td><td>8.2 ms</td><td>128 MB/s</td></tr>
+          <tr><td>4 KB</td><td>256</td><td>128 µs</td><td>8 GB/s</td></tr>
+          <tr><td>64 KB</td><td>16</td><td>8 µs</td><td>128 GB/s</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Why the curve flattens</div>
+        <p>The gain from 1 byte → 4 KB is enormous; from 4 KB → 64 KB it is nearly nothing, because by 4 KB the per-byte cost $t_b$ already dominates and there is no more overhead left to amortize. This is the law of diminishing returns made arithmetic: pick a buffer big enough that $t_o/B \ll t_b$, then stop. Bigger buffers past that point just waste memory and add latency — which on a real-time loop is a cost of its own.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="robust-read-loop"><span class="sec-no">8</span>The robust read loop, in C and Python</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>Here is the function that should be reflexive by the end of this course: read <em>exactly</em> <code>n</code> bytes, looping over partial reads, retrying on <code>EINTR</code>, and reporting EOF honestly. This is the correct way to pull a fixed-size frame off a serial fd.</p>
+
+      <div class="codeblock">
+        <div class="code-head">read_full.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;unistd.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;stddef.h&gt;
+
+// Read exactly n bytes into buf. Returns n on success, a smaller
+// count on EOF before n, or -1 on a real error (errno set).
+ssize_t read_full(int fd, void *buf, size_t n) {
+    size_t got = 0;
+    char  *p   = buf;
+    while (got &lt; n) {
+        ssize_t r = read(fd, p + got, n - got);
+        if (r &lt; 0) {
+            if (errno == EINTR) continue;   // signal: just retry
+            return -1;                       // genuine error
+        }
+        if (r == 0) break;                   // EOF: peer closed / stream ended
+        got += (size_t)r;                    // accumulate the partial read
+    }
+    return (ssize_t)got;
+}</code></pre>
+      </div>
+
+      <p>The three branches are the whole point. <code>r &lt; 0</code> with <code>EINTR</code> is not an error — a signal landed, retry. <code>r == 0</code> is EOF — the other end is gone, stop. <code>r &gt; 0</code> but less than requested is the partial read — accumulate and loop. Miss any one and you have a bug that only shows up under load, which is to say, on the water.</p>
+
+      <p>Python gives you the same raw layer through <code>os.read</code>, which is a thin wrapper over the syscall and obeys the identical count contract. Avoid the buffered <code>open()</code>/<code>file.read()</code> on a live sensor for the §6 reasons.</p>
+
+      <div class="codeblock">
+        <div class="code-head">read_full.py <span class="lang">Python</span></div>
+<pre><code class="language-python">import os, errno
+
+def read_full(fd: int, n: int) -&gt; bytes:
+    """Read exactly n bytes from a raw fd, handling partial reads + EINTR."""
+    chunks, got = [], 0
+    while got &lt; n:
+        try:
+            data = os.read(fd, n - got)      # raw syscall, returns a COUNT
+        except InterruptedError:             # == EINTR; retry
+            continue
+        if not data:                         # b'' means EOF
+            break
+        chunks.append(data)
+        got += len(data)
+    return b"".join(chunks)
+
+# Open the IMU UART as a raw fd — no FILE*, no hidden buffer
+fd = os.open("/dev/ttyTHS1", os.O_RDONLY | os.O_NOCTTY)
+frame = read_full(fd, 40)                     # exactly one 40-byte IMU frame</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> One more layer to come</div>
+        <p>Since Python 3.5, <code>os.read</code> already retries <code>EINTR</code> internally (PEP 475), so the <code>except</code> branch above is belt-and-suspenders — but writing it by hand makes the contract explicit, and in C you must do it yourself. The frame <em>boundary</em> problem (where does one IMU message end and the next begin?) is a layer up: that is parsing, which sits on top of this loop. Get the bytes right first.</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="real-imu-200hz"><span class="sec-no">9</span>Real case: an IMU at 200 Hz over serial</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>this runs on the USV</small></div>
+      <p>The AGX Orin USV needs attitude at 200 Hz for its control loop. The IMU streams 40-byte frames over <code>/dev/ttyTHS1</code> at 921600 baud. Let's check the numbers, because they decide your whole I/O strategy.</p>
+      <p>Payload rate: $200\ \text{Hz} \times 40\ \text{bytes} = 8000$ bytes/s. At 8N1 framing each byte is 10 bits on the wire, so the line carries $80\,000$ bits/s — a rounding error against the 921600 baud link. <strong>Bandwidth is never the problem here.</strong> The problem is <em>cadence and overhead</em>. A new frame is fully on the wire every 5 ms. If you naively <code>read()</code> one byte at a time you make $8000$ syscalls/s; at $t_o = 0.5\ \mu\text{s}$ that is 4 ms/s of pure mode-switch tax — small, but pure waste, and it scales badly once you add GPS, LiDAR, and CAN to the same loop.</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — the read budget for one frame</div>
+        <p>Read in frame-sized chunks with <code>read_full(fd, 40)</code>, and expect it to loop two or three times per frame because bytes dribble in at the baud rate (≈11 µs/byte at 921600). The control loop calls <code>read_full</code> once per cycle; if a full frame isn't there yet it gets a short return and either waits on <code>poll()</code> (Ch 08) or uses the previous estimate. The tty driver buffers incoming bytes, so a 5 ms control jitter never loses data — but only because you sized the loop to the device, not the other way around. The right way to <em>wait</em> for bytes (instead of byte-by-byte polling) is the termios <code>VMIN</code>/<code>VTIME</code> settings in Ch 06; for now, the takeaway is: chunk to the frame, never to the byte.</p>
+      </div>
+
+      <!-- ============================================================ §10 -->
+      <h2 id="your-turn"><span class="sec-no">10</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io01-short-read">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You call <code>read(fd, buf, 64)</code> on a serial fd and it returns <code>17</code>. What does that mean?</div>
+        <ul class="ex-options">
+          <li data-correct="false">An error occurred; you should check <code>errno</code> and abort.</li>
+          <li data-correct="false">The device is broken — it should always return 64.</li>
+          <li data-correct="true">17 bytes were available and copied to your buffer right now; this is a normal partial read, so loop to get the rest.</li>
+          <li data-correct="false">End of file was reached after 17 bytes.</li>
+        </ul>
+        <div class="ex-explain"><code>read</code> returns a <strong>count</strong> of bytes actually moved, anywhere from 0 to the requested size. A positive value less than requested is a partial read — completely normal on streams like serial ports and sockets, where bytes arrive at the line rate. Only <code>0</code> means EOF and only <code>-1</code> means error. The correct response is to accumulate and call <code>read</code> again (handling <code>EINTR</code>), exactly as <code>read_full</code> does.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io01-effective-rate" data-answer="500" data-tol="5">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">Each <code>read()</code> costs a fixed overhead $t_o = 1\ \mu\text{s}$ and moves data with negligible per-byte cost. You read 1,000,000 bytes <strong>500 bytes per call</strong> (buffer size $B = 500$ bytes). In the overhead-limited regime $R_\text{eff} \approx B/t_o$, what is the effective throughput in <strong>MB/s</strong> (use 1 MB $= 10^6$ bytes)?</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">MB/s</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">With $B = 500$ bytes per call and $t_o = 1\ \mu\text{s}$: $R_\text{eff} = B/t_o = 500\ \text{bytes} / 10^{-6}\ \text{s} = 5\times10^8$ bytes/s $= 500$ MB/s. For contrast, reading <strong>one</strong> byte per call gives $R_\text{eff} = 1 / 10^{-6} = 10^6$ bytes/s $= 1$ MB/s — five hundred times slower. The lesson is the <em>slope</em>: every factor you grow the buffer multiplies the overhead-limited rate by the same factor, until $t_b$ takes over. (Answer: 500 MB/s at $B=500$.)</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io01-read-all-loop">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — a robust read-all loop</div>
+        <div class="ex-q">Write a C function <code>read_full(int fd, void *buf, size_t n)</code> that reads <strong>exactly</strong> <code>n</code> bytes, correctly handling (a) partial reads, (b) <code>EINTR</code>, and (c) EOF before <code>n</code> bytes arrive. State what each of the three <code>read</code> return cases means and how your code reacts.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body"><code>read</code> can return three kinds of value: <code>r &gt; 0</code> (some bytes — maybe fewer than asked), <code>r == 0</code> (EOF), <code>r &lt; 0</code> (error; check <code>errno == EINTR</code> for "retry"). Keep a running <code>got</code> counter, advance the buffer pointer by <code>got</code>, and loop while <code>got &lt; n</code>.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <div class="codeblock"><div class="code-head">read_full.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;unistd.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;stddef.h&gt;
+
+ssize_t read_full(int fd, void *buf, size_t n) {
+    size_t got = 0;
+    char  *p   = buf;
+    while (got &lt; n) {
+        ssize_t r = read(fd, p + got, n - got);
+        if (r &lt; 0) {
+            if (errno == EINTR) continue;   // (b) signal hit us; retry, no data lost
+            return -1;                       //     real error: propagate, errno set
+        }
+        if (r == 0) break;                   // (c) EOF before n bytes; return short
+        got += (size_t)r;                    // (a) partial read; accumulate and loop
+    }
+    return (ssize_t)got;                      // == n on full success, &lt; n on EOF
+}</code></pre></div>
+          <p><strong>The three cases:</strong> <code>r &gt; 0</code> is the partial read — copy what you got, advance, and keep going until you have all <code>n</code>. <code>r == 0</code> is EOF — the stream ended (peer closed, USB unplugged), so return the short count and let the caller decide. <code>r &lt; 0</code> with <code>errno == EINTR</code> is a benign interruption (a signal delivered before any byte moved) — just retry; any other <code>errno</code> is a genuine failure. The caller checks the return: <code>== n</code> means a complete frame, <code>&lt; n</code> means EOF, <code>-1</code> means error. For a non-blocking fd you would additionally treat <code>EAGAIN</code> as "nothing ready right now" and return up to the event loop — the path into Ch 08.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>I/O is a negotiation with the kernel across the syscall boundary: app → libc → trap (mode switch) → VFS → driver → device. A file descriptor is a small integer handle into your process's fd table; 0/1/2 are stdin/out/err and <code>open()</code> hands back the lowest free fd. The core six are <code>open/read/write/close/lseek/ioctl</code>, and the load-bearing fact is that <code>read</code>/<code>write</code> return a <strong>count</strong> — partial reads are normal, EOF is 0, errors are −1, and <code>EINTR</code> means retry. The VFS makes one API work on files, ttys, sockets, and devices, but never mix buffered <code>FILE*</code> with raw fds on the same stream. Each syscall carries fixed overhead $t_o$, so effective rate $R_\text{eff} = 1/(t_o/B + t_b)$ rewards bigger buffers until $t_b$ dominates — chunk to the frame, never to the byte. Next: how those devices show up as files in the first place, through <code>/dev</code> and sysfs.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

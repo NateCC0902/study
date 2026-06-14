@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>驅動程式、模組與韌體 — 機器人的 Linux I/O</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="04-drivers-modules-firmware">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · 第 04 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · 第 04 章 · 驅動程式</div>
+        <h1>驅動程式、模組與韌體：擁有硬體的那段程式碼</h1>
+        <p>在第 02 章，一個裝置以檔案的樣子出現；在第 03 章，udev 給了它一個穩定的名字。但<em>是誰</em>把對暫存器的戳弄變成一顆能用的感測器？是驅動程式（driver）。本章談的是驅動程式碼住在哪裡、它怎麼被載入、為什麼它有時載入了卻苦苦哀求一個它找不到的韌體（firmware）二進位檔，以及為什麼昨天還能用的廠商模組在核心（kernel）升級後就拒絕載入。讀完之後，你會像讀堆疊追蹤（stack trace）一樣讀懂 <code>dmesg</code> 裡的一次綁定（bind）。</p>
+        <div class="meta"><span>⏱ 約 40 分鐘</span><span>🧠 核心模組</span><span>⚡ modprobe</span><span>∑ kABI 耦合</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="kernel-vs-userspace"><span class="sec-no">1</span>驅動程式能住的兩個地方</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先把畫面建起來</small></div>
+      <p>驅動程式不過就是懂某一個硬體私有語言的那段程式碼——哪一個暫存器代表「開始一次轉換」、哪一個位元代表「資料就緒」、一個中斷（interrupt）如何對應到位元組。真正唯一的問題是：<em>這段程式碼跑在系統呼叫（syscall）邊界的哪一側。</em></p>
+      <p><strong>核心驅動程式（kernel driver）</strong>跑在核心裡，在 ring 0。它能碰實體記憶體、接收中斷、直接設定 DMA。當它出錯時，可以把整台機器拖垮。<strong>使用者空間驅動程式（userspace driver）</strong>則是一支普通程式，透過一層薄薄的通用核心墊片（<code>spidev</code>、<code>i2c-dev</code>、<code>libusb</code>、UIO/VFIO）去戳硬體。它弄不掛核心，你可以用 <code>gdb</code> 接上去除錯，而且不必重新編譯任何東西就能出貨——但每一次暫存器存取都是一個系統呼叫，所以它比較慢，也無法在下半部（bottom half）服務硬中斷。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 唯一的那個決定</div>
+        <p>需要原始速度、真正的中斷、或 DMA？用核心驅動程式。想快速迭代、在使用者空間（user space）除錯、而且絕不為了一顆跑 100 Hz 的感測器去冒核心恐慌（kernel panic）的風險？用走 <code>i2c-dev</code>/<code>spidev</code>/<code>libusb</code> 的使用者空間驅動程式。大多數機器人感測器在使用者空間都過得很愉快；網路卡和 IMU 的 DMA 引擎可不是。</p>
+      </div>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th></th><th>核心驅動程式</th><th>使用者空間驅動程式</th></tr></thead>
+        <tbody>
+          <tr><td>跑在</td><td>ring 0，核心位址空間</td><td>ring 3，普通行程</td></tr>
+          <tr><td>硬體存取</td><td>直接 MMIO、IRQ、DMA</td><td>透過 <code>spidev</code>/<code>i2c-dev</code>/<code>libusb</code>/VFIO</td></tr>
+          <tr><td>一個 bug 意味著</td><td>核心恐慌 / oops</td><td>你能除錯的 segfault</td></tr>
+          <tr><td>延遲下限</td><td>奈秒級（無系統呼叫）</td><td>每次存取約 1–5 µs（系統呼叫）</td></tr>
+          <tr><td>出貨方式</td><td>對著核心編譯</td><td>出一個二進位檔</td></tr>
+          <tr><td>例子</td><td>網卡、NVMe、IMU 的 SPI 控制器</td><td>RealSense、I²C 氣壓計、USB GPS</td></tr>
+        </tbody>
+      </table></div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="module-lifecycle"><span class="sec-no">2</span>模組的一生：init、exit，與兩者之間的縫隙</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>把生命週期看成狀態機</small></div>
+      <p>核心模組（一個 <code>.ko</code> 檔——「kernel object」）是你可以在執行期載入、卸載的驅動程式碼，而不必把它烤進核心映像裡。每個模組都剛好有兩個儀式函式：一個在載入時跑，一個在卸載時跑。其餘一切都掛在它們身上。</p>
+
+      <div class="codeblock">
+        <div class="code-head">usv_baro.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;linux/module.h&gt;
+#include &lt;linux/init.h&gt;
+
+static int __init baro_init(void)
+{
+    pr_info("usv_baro: loaded, registering driver\n");  /* lands in dmesg */
+    return 0;            /* return &lt; 0 to ABORT the load (e.g. -ENODEV) */
+}
+
+static void __exit baro_exit(void)
+{
+    pr_info("usv_baro: unloaded\n");
+}
+
+module_init(baro_init);      /* called by insmod / modprobe       */
+module_exit(baro_exit);      /* called by rmmod  / modprobe -r    */
+
+MODULE_LICENSE("GPL");                 /* non-GPL taints the kernel */
+MODULE_AUTHOR("USV team");
+MODULE_DESCRIPTION("Example barometer driver");
+MODULE_VERSION("1.0");
+</code></pre>
+      </div>
+
+      <p>細微之處在於：<code>module_init</code> <strong>不</strong>代表「現在就跟我的裝置講話」。對一個匯流排（bus）驅動程式來說，init 只是把驅動程式向某條匯流排（PCI、USB、I²C…）<em>註冊</em>進去。之後核心會再呼叫你的 <code>.probe()</code>——對該匯流排列舉（enumeration）出的每一個相符裝置各呼叫一次。Init 可以成功而 probe 卻從不觸發——模組載入了，卻沒綁定到任何東西。那個區別正是 §6 的全部重點。</p>
+
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> 已載入: insmod / modprobe
+    已載入 --> 已註冊: module_init() 回傳 0
+    已註冊 --> 已綁定: 匯流排匹配到裝置<br/>probe() 成功
+    已綁定 --> 已註冊: 裝置被移除<br/>remove() 執行
+    已註冊 --> [*]: module_exit() (rmmod)
+    已載入 --> [*]: init 回傳 &lt;0<br/>載入中止
+</div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 四個動詞</div>
+        <p><code>lsmod</code> 列出已載入的模組及其<em>使用計數（use count）</em>（你不能對 refcount &gt; 0 的模組做 <code>rmmod</code>）。<code>modinfo foo.ko</code> 傾印它的中介資料（metadata）——授權、參數、相依性，以及 <code>vermagic</code> 字串。<code>insmod</code> 載入一個確切的檔案。<code>modprobe foo</code> 則依名稱、從系統模組樹中載入 <code>foo</code> <em>以及它所相依的一切</em>。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="insmod-vs-modprobe"><span class="sec-no">3</span>insmod 對 modprobe：相依性解析</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>看相依圖被解開</small></div>
+      <p>模組之間會呼叫彼此匯出的符號（symbol），於是它們構成一張相依圖。<code>insmod /path/to/foo.ko</code> <em>只</em>依絕對路徑載入那一個檔案——如果 <code>foo</code> 需要 <code>bar</code> 的符號而 <code>bar</code> 還沒載入，<code>insmod</code> 就會以 <code>Unknown symbol in module</code> 失敗。它不做搜尋、也不做解析。它是那把鈍器。</p>
+      <p><code>modprobe foo</code> 才是文明的工具。它會在 <code>/lib/modules/$(uname -r)/modules.dep</code> 裡查 <code>foo</code>、走過整條相依鏈，並以正確順序——由底層往上——把一切載入。那張相依映射表由 <code>depmod</code> 產生，它會掃描目前核心模組目錄底下的每一個 <code>.ko</code>，記錄誰匯出、誰需要每一個符號。</p>
+
+      <div class="codeblock">
+        <div class="code-head">解析一個廠商 WiFi 模組 <span class="lang">bash</span></div>
+<pre><code class="language-bash"># After dropping new .ko files into /lib/modules/$(uname -r)/extra/,
+# rebuild the dependency + alias maps for THIS kernel:
+sudo depmod -a
+
+# modprobe now knows moal depends on mlan and loads both, in order:
+sudo modprobe moal mod_para=nxp/wifi_mod_para.conf
+
+# What insmod would have forced you to do by hand, in order:
+sudo insmod /lib/modules/$(uname -r)/extra/mlan.ko
+sudo insmod /lib/modules/$(uname -r)/extra/moal.ko mod_para=nxp/wifi_mod_para.conf
+
+# Inspect before loading — never trust a blob you didn't build:
+modinfo moal | grep -E '^(filename|version|vermagic|depends|parm):'
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 忘了 depmod，弄壞 modprobe</div>
+        <p>如果你把一個新鮮的 <code>.ko</code> 複製進模組樹卻略過 <code>depmod -a</code>，<code>modprobe</code> 會說 <code>FATAL: Module foo not found</code>——就算那個檔案就擺在那兒。<code>modprobe</code> 讀的是 <code>modules.dep</code>，不是目錄。沒有 <code>depmod</code>，就沒有索引，就找不到。</p>
+      </div>
+
+      <p>兩個工具最終都會呼叫同一個系統呼叫——<code>finit_module(2)</code>（或較舊的 <code>init_module(2)</code>）——把 <code>.ko</code> 的一個檔案描述子（file descriptor）交給核心並觸發 <code>module_init</code>。<code>modprobe</code> 不過就是 <code>insmod</code> 再加上一次圖的走訪與一次別名（alias）查找。</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="params-and-config"><span class="sec-no">4</span>模組參數與 /etc/modprobe.d</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>不重新編譯就能設定</small></div>
+      <p>模組以<strong>參數（parameter）</strong>的形式對外露出可調項，在 C 裡用 <code>module_param()</code> 宣告。你可以在載入時於命令列設定它們、在執行期從 <code>/sys/module/&lt;name&gt;/parameters/</code> 底下讀它們，而對於那些可寫的參數——透過寫入那個 sysfs 檔案來即時改動它們。</p>
+
+      <div class="codeblock">
+        <div class="code-head">C 裡的模組參數 <span class="lang">C</span></div>
+<pre><code class="language-c">static int sample_rate_hz = 100;
+module_param(sample_rate_hz, int, 0644);   /* 0644 =&gt; appears in sysfs, root-writable */
+MODULE_PARM_DESC(sample_rate_hz, "barometer sample rate in Hz");
+/* modprobe usv_baro sample_rate_hz=200
+ * cat /sys/module/usv_baro/parameters/sample_rate_hz   -&gt; 200            */
+</code></pre>
+      </div>
+
+      <p>每次開機都手動打參數，正是你會忘掉它們的原因。把它們持久化在 <code>/etc/modprobe.d/*.conf</code>。四個指示詞最要緊：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>指示詞</th><th>作用</th></tr></thead>
+        <tbody>
+          <tr><td><code>options moal mod_para=…</code></td><td>模組每次載入時的預設參數</td></tr>
+          <tr><td><code>blacklist nouveau</code></td><td>別自動載入這個模組（不會被 udev 挑中）</td></tr>
+          <tr><td><code>alias usb:v1286p… moal</code></td><td>把一個硬體 ID／別名對應到一個模組名稱</td></tr>
+          <tr><td><code>install foo /bin/false</code></td><td>執行一個命令來取代載入（一個硬性封鎖）</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="codeblock">
+        <div class="code-head">/etc/modprobe.d/usv-wifi.conf <span class="lang">bash</span></div>
+<pre><code class="language-bash"># Vendor params persist across reboots, and udev picks them up on hotplug.
+options moal mod_para=nxp/wifi_mod_para.conf
+# Keep the in-tree mwifiex out of the way so our out-of-tree moal binds instead:
+blacklist mwifiex
+blacklist mwifiex_pcie
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> blacklist 不是一個總開關</div>
+        <p><code>blacklist</code> 只擋下透過別名解析的<em>自動</em>載入。一個直接的 <code>modprobe mwifiex</code>，或另一個模組的相依性，仍然會把它拉進來。要真正禁止載入，用 <code>install mwifiex /bin/true</code>。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="firmware-loader"><span class="sec-no">5</span>韌體載入器與錯誤 -2</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>驅動程式是大腦，韌體是性格</small></div>
+      <p>不少裝置出廠時就是一顆裡頭沒裝任何程式的笨微控制器。Linux 驅動程式知道怎麼<em>跟</em>這顆晶片講話，但晶片本身需要一段二進位資料（blob）——它的韌體——在 probe 時被推進去，它才會做任何有用的事。WiFi 無線電、某些相機、GPU，以及許多 SoC 周邊都正是這樣運作。驅動程式請求那個二進位檔；核心的韌體載入器（firmware loader）在磁碟上找到那個檔案並把它遞過去。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>載入器去哪裡找</small></div>
+      <p>驅動程式呼叫 <code>request_firmware(&amp;fw, "nxp/sd8997_uapsta.bin", dev)</code>。核心會依固定順序搜尋一組路徑，去找那個相對名稱——第一個命中者勝出，而 <code>updates/</code> 那幾棵樹排在裸的發行版樹<em>之前</em>，正是為了讓它們能蓋過後者：</p>
+      <div class="math-box">$$ \underbrace{\texttt{firmware\_class.path}}_{\text{optional, custom}} \;\to\; \texttt{/lib/firmware/updates/}\langle\texttt{uname -r}\rangle\texttt{/} \;\to\; \texttt{/lib/firmware/updates/} \;\to\; \texttt{/lib/firmware/}\langle\texttt{uname -r}\rangle\texttt{/} \;\to\; \underbrace{\texttt{/lib/firmware/}}_{\text{distro default, last}} $$</div>
+      <p>如果檔案被找到，呼叫回傳 0，而 <code>fw-&gt;data</code> / <code>fw-&gt;size</code> 就指向那些位元組。如果它不見了，呼叫回傳一個負的 <code>errno</code>，而驅動程式通常會記下那條如今惡名昭彰的訊息。那個 <code>-2</code> 不是隨機的：它是 <code>-ENOENT</code>，「No such file or directory」——跟 <code>open()</code> 對一個不存在的路徑回傳的，是完全相同的 errno。</p>
+
+      <div class="codeblock">
+        <div class="code-head">dmesg——那個經典畫面 <span class="lang">bash</span></div>
+<pre><code class="language-bash">$ dmesg | grep -i firmware
+moal: Direct firmware load for nxp/sd8997_uapsta.bin failed with error -2
+moal: firmware: failed to load nxp/sd8997_uapsta.bin (-2)
+moal: WLAN FW download failed
+
+# Fix: the file just isn't in the search path. Put it there:
+$ ls /lib/firmware/nxp/sd8997_uapsta.bin        # -&gt; No such file
+$ sudo install -D -m644 sd8997_uapsta.bin /lib/firmware/nxp/sd8997_uapsta.bin
+$ sudo rmmod moal mlan &amp;&amp; sudo modprobe moal   # re-probe, re-request firmware
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——AGX Orin 上的 USV WiFi</div>
+        <p>在 Jetson AGX Orin 上，WiFi M.2 卡跑的是 NXP 的 <code>mlan</code>/<code>moal</code> 樹外（out-of-tree）堆疊。模組乾淨地載入了（init 成功），SDIO/PCIe 裝置被列舉，probe 開始——接著 <code>moal</code> 為 <code>nxp/sd8997_uapsta.bin</code> 呼叫 <code>request_firmware()</code>。如果你在燒錄映像時忘了把那個二進位檔備妥到 <code>/lib/firmware/nxp/</code>，你就會得到<strong>一個出現了（<code>ip link</code> 會顯示 <code>mlan0</code>）卻永遠不會關聯（associate）的網路介面</strong>——日誌裡是錯誤 -2。驅動程式匹配上了；裝置只是沒裝進大腦。這是每一顆嗜韌體周邊的<em>通用</em>模式，而不是一個一次性的 bug。</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    BUS["匯流排列舉<br/>裝置（SDIO/PCIe）"] --> MATCH{"驅動程式匹配？<br/>（id 表 / 別名）"}
+    MATCH -- 否 --> NOBIND["沒有驅動程式被綁定"]
+    MATCH -- 是 --> PROBE["驅動程式 .probe()"]
+    PROBE --> FW["request_firmware()<br/>/lib/firmware/…"]
+    FW -- 找到 --> READY["裝置就緒<br/>（netdev / chardev）"]
+    FW -- "不見了 (-2)" --> FAIL["probe 失敗<br/>沒有可用裝置"]
+</div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="in-tree-out-of-tree"><span class="sec-no">6</span>樹內、樹外、kABI 與 DKMS</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>為什麼一次核心升級就弄壞你的驅動程式</small></div>
+      <p>一個<strong>樹內（in-tree）</strong>驅動程式住在核心原始碼裡，是<em>跟著</em>核心一起被建置與版本化的——升級核心，驅動程式就一起來，永遠匹配。一個<strong>樹外（out-of-tree）</strong>驅動程式（像 <code>moal</code> 這種廠商二進位檔）則是對著<em>某一個特定核心建置</em>分開編譯的，而那正是所有痛苦的源頭。</p>
+      <p>核心並不對模組承諾一個穩定的二進位介面。每個 <code>.ko</code> 都帶著一個 <code>vermagic</code> 字串，以及它所用核心符號的 CRC 校驗和——兩者合起來就是 <strong>kABI</strong>（核心應用程式二進位介面，kernel Application Binary Interface）。在載入時核心會檢查它們。如果執行中核心的符號 CRC 跟模組當初對著建置的那一份不符，載入就會被拒絕：</p>
+
+      <div class="math-box">$$ \texttt{load ok} \iff \texttt{vermagic}_{module} = \texttt{vermagic}_{kernel} \;\;\wedge\;\; \forall s \in \text{symbols}:\; \mathrm{CRC}_{module}(s) = \mathrm{CRC}_{kernel}(s) $$</div>
+
+      <p><code>vermagic</code> 字串把核心版本、SMP/preempt 旗標，以及編譯器細節綑在一起，例如 <code>5.15.148-tegra SMP preempt mod_unload aarch64</code>。改動其中<em>任何一項</em>——哪怕只是從 <code>5.15.148</code> 到 <code>5.15.149</code> 的修補版號跳動——字串就不同了，於是模組會被拒絕，並附上：</p>
+
+      <div class="codeblock">
+        <div class="code-head">核心升級造成的失敗 <span class="lang">bash</span></div>
+<pre><code class="language-bash">$ sudo modprobe moal
+modprobe: ERROR: could not insert 'moal': Exec format error
+$ dmesg | tail -2
+moal: version magic '5.15.148-tegra SMP preempt mod_unload aarch64'
+      should be '5.15.149-tegra SMP preempt mod_unload aarch64'
+# The module was built for the OLD kernel. It must be REBUILT for the new one.
+</code></pre>
+      </div>
+
+      <p>能擴展的修法是 <strong>DKMS</strong>（動態核心模組支援，Dynamic Kernel Module Support）。你用一個 <code>dkms.conf</code> 把驅動程式的原始碼註冊一次；此後，每當有新核心被安裝，DKMS 就會自動對著新的標頭檔重新編譯模組並安裝它。沒有 DKMS 意味著：每一次核心升級都會悄悄地讓你落得一台沒有 WiFi 的機器人，直到有人手動把模組重建起來。</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 一口氣講完 DKMS</div>
+        <p><code>dkms add -m moal -v 1.0</code> 註冊原始碼樹，<code>dkms build</code> 對著 <code>/lib/modules/$(uname -r)/build</code> 編譯，<code>dkms install</code> 放下 <code>.ko</code> 並執行 <code>depmod</code>。之後，核心套件升級就會替你觸發重建。用 <code>dkms status</code> 確認。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="userspace-drivers"><span class="sec-no">7</span>使用者空間驅動程式：spidev、i2c-dev、libusb、UIO/VFIO</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>從一支普通行程驅動硬體</small></div>
+      <p>你不見得每次都要寫核心 C。核心隨附了通用的墊片驅動程式，把一條匯流排以字元裝置（char device）的形式露給使用者空間，而你的程式就透過 <code>ioctl</code>/<code>read</code>/<code>write</code> 去跑協定：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>墊片</th><th>露出</th><th>你使用</th><th>適合</th></tr></thead>
+        <tbody>
+          <tr><td><code>i2c-dev</code></td><td><code>/dev/i2c-N</code></td><td><code>ioctl(I2C_RDWR)</code></td><td>I²C 氣壓計/IMU/RTC</td></tr>
+          <tr><td><code>spidev</code></td><td><code>/dev/spidevB.C</code></td><td><code>ioctl(SPI_IOC_MESSAGE)</code></td><td>SPI ADC、快速感測器</td></tr>
+          <tr><td><code>libusb</code></td><td>直接操作 USB 裝置</td><td>函式庫呼叫</td><td>USB GPS、RealSense</td></tr>
+          <tr><td>UIO</td><td><code>/dev/uioN</code> + sysfs</td><td><code>mmap</code> + 透過 <code>read</code> 收 IRQ</td><td>簡單的 MMIO 周邊</td></tr>
+          <tr><td>VFIO</td><td><code>/dev/vfio/*</code></td><td>IOMMU 安全的 MMIO + DMA</td><td>高速率、DMA、直通</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="codeblock">
+        <div class="code-head">透過 i2c-dev 讀一個暫存器 <span class="lang">C</span></div>
+<pre><code class="language-c">int fd = open("/dev/i2c-1", O_RDWR);
+ioctl(fd, I2C_SLAVE, 0x77);                 /* 7-bit address of the baro */
+unsigned char reg = 0x00, val;              /* WHO_AM_I register         */
+write(fd, &amp;reg, 1);                         /* set the register pointer  */
+read(fd, &amp;val, 1);                          /* read it back              */
+/* No kernel module to compile. Just a process holding an fd.            */
+</code></pre>
+      </div>
+
+      <p>UIO 與 VFIO 走得更遠：它們讓使用者空間能 <code>mmap</code> 裝置的 MMIO 區域，甚至接收中斷（UIO 把一個 IRQ 變成一個可讀的 fd；VFIO 再加上 IOMMU 保護，讓使用者空間的 DMA 沒辦法亂塗核心記憶體）。DPDK 和許多相機/FPGA 堆疊就是這樣，以近乎核心的速度在使用者空間裡跑一個完整的驅動程式。§1 那個取捨依然成立——除非你 <code>mmap</code>，否則每次存取一個系統呼叫——但對一顆 100 Hz 的氣壓計來說，那個下限是看不見的。</p>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="reading-a-bind"><span class="sec-no">8</span>在 dmesg 裡讀一次綁定</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>跟著這場握手走</small></div>
+      <p>當你懷疑有驅動程式問題時，<code>dmesg</code> 就是真相的來源——它是核心對列舉、匹配、probe 與韌體載入的即時旁白。由上往下讀，這次綁定自己會說出自己的故事：</p>
+
+      <div class="codeblock">
+        <div class="code-head">一次成功的綁定，附註解 <span class="lang">bash</span></div>
+<pre><code class="language-bash">$ sudo dmesg -w        # -w = follow, like tail -f, while you replug
+mmc1: new high speed SDIO card at address 0001          # 1. bus enumerated device
+moal: MOAL driver version 1.3.x, mlan version 1.3.x     # 2. module init / registered
+moal: SDIO: max_segs=128 max_seg_size=65535            #    driver bound to the device
+moal: wlan: Driver loading firmware nxp/sd8997_uapsta.bin  # 3. request_firmware()
+moal: WLAN FW is active                                 # 4. firmware accepted
+moal: version = SD8997-...                              # 5. device reports its identity
+mlan0: associated                                       # 6. usable netdev is up
+</code></pre>
+      </div>
+
+      <p>如果這條鏈在步驟 1 之後就停了，那是你的驅動程式沒匹配——檢查 id 表／別名（<code>modinfo</code>、<code>/etc/modprobe.d</code>）。如果它停在步驟 3 並帶著 <code>error -2</code>，那是韌體檔案不見了（§5）。如果是 <code>modprobe</code> 自己以 <code>Exec format error</code> 失敗，你根本沒走到步驟 2——那是 §6 的 kABI 不符。每一種失敗模式都住在一個特定的步驟上，而 <code>dmesg</code> 會告訴你是哪一個。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 三個命令對應三種失敗</div>
+        <p><code>lsmod</code>——它到底有沒有載入？<code>modinfo</code>——它想要什麼（參數、韌體、vermagic）？<code>dmesg</code>——綁定走到哪一步了？把這三個練熟，大多數「感測器沒出現」的工單都能在兩分鐘內解掉。</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>換你了</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io04-out-of-tree-bump">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">你那個樹外的 <code>moal</code> WiFi 模組本來運作得完美無瑕。在 <code>apt upgrade</code> 拉進一個新核心、你也重開機之後，<code>modprobe moal</code> 以 <code>Exec format error</code> 失敗。為什麼？</div>
+        <ul class="ex-options">
+          <li data-correct="false">韌體二進位檔 <code>sd8997_uapsta.bin</code> 在升級時被刪掉了。</li>
+          <li data-correct="true">模組是對著舊核心建置的；它的 <code>vermagic</code>／符號 CRC（kABI）不再與執行中的核心相符，所以載入被拒絕。</li>
+          <li data-correct="false">新核心為了安全，一律把樹外模組列入黑名單。</li>
+          <li data-correct="false">新核心隨附了一個樹內驅動程式，它把 <code>moal.ko</code> 實際移除了。</li>
+        </ul>
+        <div class="ex-explain">核心不對模組提供穩定的 kABI。<code>.ko</code> 內嵌一個 <code>vermagic</code> 字串，以及它所匯入符號的 CRC；載入時核心會把它們跟自己的比對。一次版本變動——哪怕只是修補版號跳動——就會改變 <code>vermagic</code>，於是載入以 <code>Exec format error</code> 被拒。修法是<strong>對著新核心重建</strong>；DKMS 正是在每次核心安裝時把這件事自動化。韌體（錯誤 -2）是另一種、發生得更晚的失敗。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io04-fw-stage-time" data-answer="14" data-tol="0.5">
+        <div class="ex-head"><span class="badge">Q2</span> 算一算</div>
+        <div class="ex-q">你必須在起飛前把韌體二進位檔備妥到 USV 的 eMMC 上。有 7 顆嗜韌體的周邊，每顆各需要一個平均 $2\ \text{MiB}$ 的二進位檔。你的 <code>install</code> 步驟以有效 $1\ \text{MiB/s}$ 寫入 eMMC。把所有二進位檔都備妥要花多少<strong>秒</strong>？（提示：總位元組數 ÷ 速率。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">s</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">總量 $= 7 \times 2 = 14\ \text{MiB}$。在 $1\ \text{MiB/s}$ 下，時間 $= 14 / 1 = 14\ \text{s}$。重點不在算術——而在韌體備妥是你映像建置裡一個真實、可量測的步驟，忘了它就會產生 §5 那個無聲的「介面出現了卻永遠不關聯」的錯誤 -2。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io04-modprobe-params">
+        <div class="ex-head"><span class="badge">Q3</span> 動手做——帶一個參數載入並驗證</div>
+        <div class="ex-q">以 <code>sample_rate_hz=200</code> 載入 <code>usv_baro</code> 模組，然後證明 (a) 它載入了、且 (b) 那個參數真的生效了。假設 <code>.ko</code> 已經在模組樹裡，但你才剛把它複製進去。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">一個剛複製進去的模組，需要先重建相依索引，<code>modprobe</code> 才找得到它。然後在 <code>lsmod</code> 裡查名稱，並從 <code>/sys/module/&lt;name&gt;/parameters/</code> 讀出即時值。<code>dmesg</code> 確認綁定。</div></details>
+        <details class="ex-acc"><summary>看一個解答</summary><div class="acc-body">
+          <div class="codeblock"><div class="code-head">載入 + 驗證 <span class="lang">bash</span></div>
+<pre><code class="language-bash"># Rebuild modules.dep so modprobe can resolve the freshly-copied .ko:
+sudo depmod -a
+
+# Load it (and any deps) with the parameter:
+sudo modprobe usv_baro sample_rate_hz=200
+
+# (a) Confirm it's loaded — name + nonzero size, used-by count:
+lsmod | grep usv_baro
+#   usv_baro    16384  0
+
+# (b) Confirm the parameter took — read it back from sysfs:
+cat /sys/module/usv_baro/parameters/sample_rate_hz
+#   200
+
+# Follow the bind in the log:
+dmesg | grep usv_baro
+#   usv_baro: loaded, registering driver
+</code></pre></div>
+          <p>這三項檢查對應到 §8 的三個命令：<code>lsmod</code> 證明它載入了，讀 <code>/sys/module/.../parameters/</code> 證明選項抵達了驅動程式，而 <code>dmesg</code> 證明生命週期跑過了。如果你略過了 <code>depmod -a</code>，第二步就會以 <code>FATAL: Module usv_baro not found</code> 失敗——即使檔案確實存在。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章回顧</div>
+        <p>驅動程式要嘛跑在核心裡（快、危險、直接 MMIO/IRQ/DMA），要嘛跑在使用者空間（安全、可除錯，透過 <code>i2c-dev</code>/<code>spidev</code>/<code>libusb</code>/UIO/VFIO）。核心模組有一個 init/exit 生命週期，但 <code>module_init</code> 只<em>註冊</em>——綁定發生在稍後的 <code>.probe()</code>。<code>modprobe</code> 勝過 <code>insmod</code>，是因為它從 <code>modules.dep</code>（由 <code>depmod</code> 重建）解析相依性；參數持久化在 <code>/etc/modprobe.d</code>，並出現在 <code>/sys/module</code> 底下。嗜韌體的晶片會呼叫 <code>request_firmware()</code>；少了二進位檔就是那個經典的 <code>error -2</code>（<code>-ENOENT</code>）。樹外驅動程式會在核心升級時壞掉，因為 kABI（<code>vermagic</code> + 符號 CRC）必須完全相符——DKMS 會自動把它們重建。要診斷以上任何一項，就在 <code>dmesg</code> 裡讀那次綁定：列舉 → 匹配 → probe → 韌體 → 就緒。下一章：這些驅動程式所綁定的裝置，匯流排是怎麼把它們列舉出來的。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

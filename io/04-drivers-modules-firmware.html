@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Drivers, Modules &amp; Firmware — Linux I/O for Robotics</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="04-drivers-modules-firmware">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · Ch 04</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · Chapter 04 · Drivers</div>
+        <h1>Drivers, Modules &amp; Firmware: the code that owns the hardware</h1>
+        <p>In Chapter 02 a device showed up as a file; in Chapter 03 udev gave it a stable name. But <em>who</em> turns register pokes into a working sensor? A driver. This chapter is about where driver code lives, how it gets loaded, why it sometimes loads but then begs for a firmware blob it can't find, and why the vendor module that worked yesterday refuses to load after a kernel upgrade. By the end you'll read a bind in <code>dmesg</code> the way you read a stack trace.</p>
+        <div class="meta"><span>⏱ ~40 min</span><span>🧠 kernel modules</span><span>⚡ modprobe</span><span>∑ kABI coupling</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="kernel-vs-userspace"><span class="sec-no">1</span>Two places a driver can live</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>A driver is just the code that knows the private language of one piece of hardware — which register means "start a conversion," which bit means "data ready," how an interrupt maps to bytes. The only real question is <em>which side of the syscall boundary that code runs on.</em></p>
+      <p>A <strong>kernel driver</strong> runs inside the kernel, in ring 0. It can touch physical memory, take interrupts, and program DMA directly. When it fails, it can take the whole machine down. A <strong>userspace driver</strong> is an ordinary program that pokes the hardware through a thin generic kernel shim (<code>spidev</code>, <code>i2c-dev</code>, <code>libusb</code>, UIO/VFIO). It can't crash the kernel, you can attach <code>gdb</code> to it, and you can ship it without recompiling anything — but every register access is a syscall, so it's slower and can't service hard interrupts in the bottom half.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one decision</div>
+        <p>Need raw speed, real interrupts, or DMA? Kernel driver. Want to iterate fast, debug in userspace, and never risk a kernel panic for a sensor that runs at 100 Hz? Userspace driver over <code>i2c-dev</code>/<code>spidev</code>/<code>libusb</code>. Most robot sensors are happy in userspace; the network card and the IMU's DMA engine are not.</p>
+      </div>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th></th><th>Kernel driver</th><th>Userspace driver</th></tr></thead>
+        <tbody>
+          <tr><td>Runs in</td><td>ring 0, kernel address space</td><td>ring 3, ordinary process</td></tr>
+          <tr><td>Hardware access</td><td>direct MMIO, IRQ, DMA</td><td>via <code>spidev</code>/<code>i2c-dev</code>/<code>libusb</code>/VFIO</td></tr>
+          <tr><td>A bug means</td><td>kernel panic / oops</td><td>segfault you can debug</td></tr>
+          <tr><td>Latency floor</td><td>nanoseconds (no syscall)</td><td>~1–5 µs per access (syscall)</td></tr>
+          <tr><td>Ship it by</td><td>compiling against the kernel</td><td>shipping a binary</td></tr>
+          <tr><td>Examples</td><td>NIC, NVMe, the IMU's SPI controller</td><td>RealSense, an I²C baro, a USB GPS</td></tr>
+        </tbody>
+      </table></div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="module-lifecycle"><span class="sec-no">2</span>A module's life: init, exit, and the gap between</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>the lifecycle as a state machine</small></div>
+      <p>A kernel module (a <code>.ko</code> file — "kernel object") is driver code you can load and unload at runtime instead of baking it into the kernel image. Every module has exactly two ceremony functions: one that runs at load, one at unload. Everything else hangs off them.</p>
+
+      <div class="codeblock">
+        <div class="code-head">usv_baro.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;linux/module.h&gt;
+#include &lt;linux/init.h&gt;
+
+static int __init baro_init(void)
+{
+    pr_info("usv_baro: loaded, registering driver\n");  /* lands in dmesg */
+    return 0;            /* return &lt; 0 to ABORT the load (e.g. -ENODEV) */
+}
+
+static void __exit baro_exit(void)
+{
+    pr_info("usv_baro: unloaded\n");
+}
+
+module_init(baro_init);      /* called by insmod / modprobe       */
+module_exit(baro_exit);      /* called by rmmod  / modprobe -r    */
+
+MODULE_LICENSE("GPL");                 /* non-GPL taints the kernel */
+MODULE_AUTHOR("USV team");
+MODULE_DESCRIPTION("Example barometer driver");
+MODULE_VERSION("1.0");
+</code></pre>
+      </div>
+
+      <p>The subtle part: <code>module_init</code> does <strong>not</strong> mean "talk to my device now." For a bus driver, init just <em>registers</em> the driver with a bus (PCI, USB, I²C…). The kernel then calls your <code>.probe()</code> later, once for every matching device the bus enumerates. Init can succeed while probe never fires — the module is loaded but bound to nothing. That distinction is the whole game in §6.</p>
+
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> Loaded: insmod / modprobe
+    Loaded --> Registered: module_init() returns 0
+    Registered --> Bound: bus matches device<br/>probe() succeeds
+    Bound --> Registered: device removed<br/>remove() runs
+    Registered --> [*]: module_exit() (rmmod)
+    Loaded --> [*]: init returned &lt;0<br/>load aborts
+</div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> The four verbs</div>
+        <p><code>lsmod</code> lists loaded modules and their <em>use count</em> (you can't <code>rmmod</code> a module with refcount &gt; 0). <code>modinfo foo.ko</code> dumps its metadata — license, parameters, dependencies, and the <code>vermagic</code> string. <code>insmod</code> loads one exact file. <code>modprobe foo</code> loads <code>foo</code> <em>and everything it depends on</em>, by name, from the system module tree.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="insmod-vs-modprobe"><span class="sec-no">3</span>insmod vs modprobe: dependency resolution</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>watch the dependency graph resolve</small></div>
+      <p>Modules call each other's exported symbols, so they form a dependency graph. <code>insmod /path/to/foo.ko</code> loads <em>only</em> that file by absolute path — if <code>foo</code> needs symbols from <code>bar</code> and <code>bar</code> isn't loaded yet, <code>insmod</code> fails with <code>Unknown symbol in module</code>. It does no searching and no resolution. It is the blunt instrument.</p>
+      <p><code>modprobe foo</code> is the civilized tool. It looks up <code>foo</code> in <code>/lib/modules/$(uname -r)/modules.dep</code>, walks the dependency chain, and loads everything in the right order — bottom-up. That dependency map is generated by <code>depmod</code>, which scans every <code>.ko</code> under the current kernel's module directory and records who exports and who needs each symbol.</p>
+
+      <div class="codeblock">
+        <div class="code-head">resolving a vendor WiFi module <span class="lang">bash</span></div>
+<pre><code class="language-bash"># After dropping new .ko files into /lib/modules/$(uname -r)/extra/,
+# rebuild the dependency + alias maps for THIS kernel:
+sudo depmod -a
+
+# modprobe now knows moal depends on mlan and loads both, in order:
+sudo modprobe moal mod_para=nxp/wifi_mod_para.conf
+
+# What insmod would have forced you to do by hand, in order:
+sudo insmod /lib/modules/$(uname -r)/extra/mlan.ko
+sudo insmod /lib/modules/$(uname -r)/extra/moal.ko mod_para=nxp/wifi_mod_para.conf
+
+# Inspect before loading — never trust a blob you didn't build:
+modinfo moal | grep -E '^(filename|version|vermagic|depends|parm):'
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Forgot depmod, broke modprobe</div>
+        <p>If you copy a fresh <code>.ko</code> into the module tree and skip <code>depmod -a</code>, <code>modprobe</code> says <code>FATAL: Module foo not found</code> even though the file is sitting right there. <code>modprobe</code> reads <code>modules.dep</code>, not the directory. No <code>depmod</code>, no index, no find.</p>
+      </div>
+
+      <p>Both tools ultimately call the same syscall — <code>finit_module(2)</code> (or the older <code>init_module(2)</code>) — to hand the kernel a file descriptor for the <code>.ko</code> and trigger <code>module_init</code>. <code>modprobe</code> is just <code>insmod</code> plus a graph walk and an alias lookup.</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="params-and-config"><span class="sec-no">4</span>Module parameters &amp; /etc/modprobe.d</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>configure without recompiling</small></div>
+      <p>Modules expose tunables as <strong>parameters</strong>, declared in C with <code>module_param()</code>. You can set them on the command line at load time, read them at runtime under <code>/sys/module/&lt;name&gt;/parameters/</code>, and — for the ones that are writable — change them live by writing that sysfs file.</p>
+
+      <div class="codeblock">
+        <div class="code-head">module parameter in C <span class="lang">C</span></div>
+<pre><code class="language-c">static int sample_rate_hz = 100;
+module_param(sample_rate_hz, int, 0644);   /* 0644 =&gt; appears in sysfs, root-writable */
+MODULE_PARM_DESC(sample_rate_hz, "barometer sample rate in Hz");
+/* modprobe usv_baro sample_rate_hz=200
+ * cat /sys/module/usv_baro/parameters/sample_rate_hz   -&gt; 200            */
+</code></pre>
+      </div>
+
+      <p>Typing parameters by hand every boot is how you forget them. Persist them in <code>/etc/modprobe.d/*.conf</code>. Four directives matter:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Directive</th><th>Does</th></tr></thead>
+        <tbody>
+          <tr><td><code>options moal mod_para=…</code></td><td>default parameters whenever the module loads</td></tr>
+          <tr><td><code>blacklist nouveau</code></td><td>don't auto-load this module (won't be picked by udev)</td></tr>
+          <tr><td><code>alias usb:v1286p… moal</code></td><td>map a hardware ID / alias to a module name</td></tr>
+          <tr><td><code>install foo /bin/false</code></td><td>run a command instead of loading (a hard block)</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="codeblock">
+        <div class="code-head">/etc/modprobe.d/usv-wifi.conf <span class="lang">bash</span></div>
+<pre><code class="language-bash"># Vendor params persist across reboots, and udev picks them up on hotplug.
+options moal mod_para=nxp/wifi_mod_para.conf
+# Keep the in-tree mwifiex out of the way so our out-of-tree moal binds instead:
+blacklist mwifiex
+blacklist mwifiex_pcie
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> blacklist is not a kill switch</div>
+        <p><code>blacklist</code> only stops <em>automatic</em> loading via alias resolution. A direct <code>modprobe mwifiex</code> or another module's dependency will still pull it in. To truly forbid loading, use <code>install mwifiex /bin/true</code>.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="firmware-loader"><span class="sec-no">5</span>The firmware loader and error -2</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the driver is the brain, firmware is the personality</small></div>
+      <p>Plenty of devices ship as a dumb microcontroller with no program in it. The Linux driver knows how to <em>talk</em> to the chip, but the chip itself needs a binary blob — its firmware — pushed into it at probe time before it does anything useful. WiFi radios, some cameras, GPUs, and many SoC peripherals work exactly this way. The driver requests the blob; the kernel's firmware loader finds the file on disk and hands it over.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>where the loader looks</small></div>
+      <p>A driver calls <code>request_firmware(&amp;fw, "nxp/sd8997_uapsta.bin", dev)</code>. The kernel searches a fixed set of paths, in order, for that relative name — first match wins, and the <code>updates/</code> trees come <em>before</em> the bare distro tree precisely so they can override it:</p>
+      <div class="math-box">$$ \underbrace{\texttt{firmware\_class.path}}_{\text{optional, custom}} \;\to\; \texttt{/lib/firmware/updates/}\langle\texttt{uname -r}\rangle\texttt{/} \;\to\; \texttt{/lib/firmware/updates/} \;\to\; \texttt{/lib/firmware/}\langle\texttt{uname -r}\rangle\texttt{/} \;\to\; \underbrace{\texttt{/lib/firmware/}}_{\text{distro default, last}} $$</div>
+      <p>If the file is found, the call returns 0 and <code>fw-&gt;data</code> / <code>fw-&gt;size</code> point at the bytes. If it is missing, the call returns a negative <code>errno</code>, and the driver typically logs the now-infamous line. That <code>-2</code> is not random: it's <code>-ENOENT</code>, "No such file or directory" — the exact same errno <code>open()</code> returns for a missing path.</p>
+
+      <div class="codeblock">
+        <div class="code-head">dmesg — the classic <span class="lang">bash</span></div>
+<pre><code class="language-bash">$ dmesg | grep -i firmware
+moal: Direct firmware load for nxp/sd8997_uapsta.bin failed with error -2
+moal: firmware: failed to load nxp/sd8997_uapsta.bin (-2)
+moal: WLAN FW download failed
+
+# Fix: the file just isn't in the search path. Put it there:
+$ ls /lib/firmware/nxp/sd8997_uapsta.bin        # -&gt; No such file
+$ sudo install -D -m644 sd8997_uapsta.bin /lib/firmware/nxp/sd8997_uapsta.bin
+$ sudo rmmod moal mlan &amp;&amp; sudo modprobe moal   # re-probe, re-request firmware
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — USV WiFi on the AGX Orin</div>
+        <p>On the Jetson AGX Orin, the WiFi M.2 card runs the NXP <code>mlan</code>/<code>moal</code> out-of-tree stack. The module loads cleanly (init succeeds), the SDIO/PCIe device is enumerated, probe starts — and then <code>moal</code> calls <code>request_firmware()</code> for <code>nxp/sd8997_uapsta.bin</code>. Forget to stage that blob into <code>/lib/firmware/nxp/</code> when you flash the image and you get <strong>a network interface that appears (<code>ip link</code> shows <code>mlan0</code>) but never associates</strong> — error -2 in the log. The driver matched; the device just has no brain loaded. This is the <em>general</em> pattern for every firmware-hungry peripheral, not a one-off bug.</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    BUS["bus enumerates<br/>device (SDIO/PCIe)"] --> MATCH{"driver match?<br/>(id table / alias)"}
+    MATCH -- no --> NOBIND["no driver bound"]
+    MATCH -- yes --> PROBE["driver .probe()"]
+    PROBE --> FW["request_firmware()<br/>/lib/firmware/…"]
+    FW -- found --> READY["device ready<br/>(netdev / chardev)"]
+    FW -- "missing (-2)" --> FAIL["probe fails<br/>no usable device"]
+</div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="in-tree-out-of-tree"><span class="sec-no">6</span>In-tree, out-of-tree, kABI &amp; DKMS</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>why a kernel bump breaks your driver</small></div>
+      <p>An <strong>in-tree</strong> driver lives in the kernel source and is built and versioned <em>with</em> the kernel — upgrade the kernel and the driver comes along, always matched. An <strong>out-of-tree</strong> driver (a vendor blob like <code>moal</code>) is compiled separately against <em>one specific kernel build</em>, and that is the source of all the pain.</p>
+      <p>The kernel does not promise a stable binary interface to modules. Every <code>.ko</code> carries a <code>vermagic</code> string and CRC checksums of the kernel symbols it uses — together the <strong>kABI</strong> (kernel Application Binary Interface). At load time the kernel checks them. If the running kernel's symbol CRCs don't match what the module was built against, the load is rejected:</p>
+
+      <div class="math-box">$$ \texttt{load ok} \iff \texttt{vermagic}_{module} = \texttt{vermagic}_{kernel} \;\;\wedge\;\; \forall s \in \text{symbols}:\; \mathrm{CRC}_{module}(s) = \mathrm{CRC}_{kernel}(s) $$</div>
+
+      <p>The <code>vermagic</code> string bundles the kernel version, SMP/preempt flags, and compiler details, e.g. <code>5.15.148-tegra SMP preempt mod_unload aarch64</code>. Change <em>any</em> of those — even a patch bump from <code>5.15.148</code> to <code>5.15.149</code> — and the string differs, so the module is refused with:</p>
+
+      <div class="codeblock">
+        <div class="code-head">the kernel-bump failure <span class="lang">bash</span></div>
+<pre><code class="language-bash">$ sudo modprobe moal
+modprobe: ERROR: could not insert 'moal': Exec format error
+$ dmesg | tail -2
+moal: version magic '5.15.148-tegra SMP preempt mod_unload aarch64'
+      should be '5.15.149-tegra SMP preempt mod_unload aarch64'
+# The module was built for the OLD kernel. It must be REBUILT for the new one.
+</code></pre>
+      </div>
+
+      <p>The fix that scales is <strong>DKMS</strong> (Dynamic Kernel Module Support). You register the driver's source once with a <code>dkms.conf</code>; thereafter, whenever a new kernel is installed, DKMS automatically recompiles the module against the new headers and installs it. No DKMS means: every kernel upgrade silently leaves you with a WiFi-less robot until someone rebuilds the module by hand.</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> DKMS in one breath</div>
+        <p><code>dkms add -m moal -v 1.0</code> registers the tree, <code>dkms build</code> compiles against <code>/lib/modules/$(uname -r)/build</code>, <code>dkms install</code> drops the <code>.ko</code> and runs <code>depmod</code>. After that, kernel package upgrades trigger the rebuild for you. Confirm with <code>dkms status</code>.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="userspace-drivers"><span class="sec-no">7</span>Userspace drivers: spidev, i2c-dev, libusb, UIO/VFIO</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>drive hardware from a normal process</small></div>
+      <p>You don't always need to write kernel C. The kernel ships generic shim drivers that expose a bus to userspace as a char device, and your program does the protocol over <code>ioctl</code>/<code>read</code>/<code>write</code>:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Shim</th><th>Exposes</th><th>You use</th><th>Good for</th></tr></thead>
+        <tbody>
+          <tr><td><code>i2c-dev</code></td><td><code>/dev/i2c-N</code></td><td><code>ioctl(I2C_RDWR)</code></td><td>I²C baro/IMU/RTC</td></tr>
+          <tr><td><code>spidev</code></td><td><code>/dev/spidevB.C</code></td><td><code>ioctl(SPI_IOC_MESSAGE)</code></td><td>SPI ADC, fast sensors</td></tr>
+          <tr><td><code>libusb</code></td><td>USB devices directly</td><td>library calls</td><td>USB GPS, RealSense</td></tr>
+          <tr><td>UIO</td><td><code>/dev/uioN</code> + sysfs</td><td><code>mmap</code> + IRQ via <code>read</code></td><td>simple MMIO peripherals</td></tr>
+          <tr><td>VFIO</td><td><code>/dev/vfio/*</code></td><td>IOMMU-safe MMIO + DMA</td><td>high-rate, DMA, passthrough</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="codeblock">
+        <div class="code-head">read a register over i2c-dev <span class="lang">C</span></div>
+<pre><code class="language-c">int fd = open("/dev/i2c-1", O_RDWR);
+ioctl(fd, I2C_SLAVE, 0x77);                 /* 7-bit address of the baro */
+unsigned char reg = 0x00, val;              /* WHO_AM_I register         */
+write(fd, &amp;reg, 1);                         /* set the register pointer  */
+read(fd, &amp;val, 1);                          /* read it back              */
+/* No kernel module to compile. Just a process holding an fd.            */
+</code></pre>
+      </div>
+
+      <p>UIO and VFIO go further: they let userspace <code>mmap</code> the device's MMIO region and even receive interrupts (UIO turns an IRQ into a readable fd; VFIO adds IOMMU protection so userspace DMA can't scribble over kernel memory). That's how DPDK and many camera/FPGA stacks run a full driver in userspace at near-kernel speed. The trade-off from §1 still holds — a syscall per access unless you <code>mmap</code> — but for a 100 Hz baro that floor is invisible.</p>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="reading-a-bind"><span class="sec-no">8</span>Reading a bind in dmesg</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>follow the handshake</small></div>
+      <p>When you suspect a driver problem, <code>dmesg</code> is the source of truth — it's the kernel's running narration of enumeration, matching, probing, and firmware loads. Read it top to bottom and the bind tells its own story:</p>
+
+      <div class="codeblock">
+        <div class="code-head">a successful bind, annotated <span class="lang">bash</span></div>
+<pre><code class="language-bash">$ sudo dmesg -w        # -w = follow, like tail -f, while you replug
+mmc1: new high speed SDIO card at address 0001          # 1. bus enumerated device
+moal: MOAL driver version 1.3.x, mlan version 1.3.x     # 2. module init / registered
+moal: SDIO: max_segs=128 max_seg_size=65535            #    driver bound to the device
+moal: wlan: Driver loading firmware nxp/sd8997_uapsta.bin  # 3. request_firmware()
+moal: WLAN FW is active                                 # 4. firmware accepted
+moal: version = SD8997-...                              # 5. device reports its identity
+mlan0: associated                                       # 6. usable netdev is up
+</code></pre>
+      </div>
+
+      <p>If the chain stops after step 1, your driver didn't match — check the id table / aliases (<code>modinfo</code>, <code>/etc/modprobe.d</code>). If it stops at step 3 with <code>error -2</code>, the firmware file is missing (§5). If <code>modprobe</code> itself failed with <code>Exec format error</code>, you never got to step 2 — that's the kABI mismatch from §6. Each failure mode lives at a specific step, and <code>dmesg</code> tells you which one.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Three commands for three failures</div>
+        <p><code>lsmod</code> — is it even loaded? <code>modinfo</code> — what does it want (params, firmware, vermagic)? <code>dmesg</code> — how far did the bind get? Master those three and most "the sensor isn't showing up" tickets resolve in two minutes.</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io04-out-of-tree-bump">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">Your out-of-tree <code>moal</code> WiFi module worked perfectly. After <code>apt upgrade</code> pulled a new kernel and you rebooted, <code>modprobe moal</code> fails with <code>Exec format error</code>. Why?</div>
+        <ul class="ex-options">
+          <li data-correct="false">The firmware blob <code>sd8997_uapsta.bin</code> was deleted by the upgrade.</li>
+          <li data-correct="true">The module was built against the old kernel; its <code>vermagic</code>/symbol-CRC (kABI) no longer matches the running kernel, so the load is rejected.</li>
+          <li data-correct="false">A new kernel always blacklists out-of-tree modules for security.</li>
+          <li data-correct="false">The new kernel ships an in-tree driver that physically removed <code>moal.ko</code>.</li>
+        </ul>
+        <div class="ex-explain">The kernel offers no stable kABI to modules. The <code>.ko</code> embeds a <code>vermagic</code> string and CRCs of the symbols it imports; at load the kernel compares them to its own. A version change — even a patch bump — changes <code>vermagic</code>, so the load is refused with <code>Exec format error</code>. The fix is to <strong>rebuild for the new kernel</strong>; DKMS automates exactly this on every kernel install. Firmware (error -2) is a different, later failure.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io04-fw-stage-time" data-answer="14" data-tol="0.5">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">You must stage firmware blobs onto the USV's eMMC before flight. There are 7 firmware-hungry peripherals, each needing one blob averaging $2\ \text{MiB}$. Your <code>install</code> step writes to eMMC at an effective $1\ \text{MiB/s}$. How many <strong>seconds</strong> does staging all the blobs take? (Hint: total bytes ÷ rate.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">s</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">Total $= 7 \times 2 = 14\ \text{MiB}$. At $1\ \text{MiB/s}$, time $= 14 / 1 = 14\ \text{s}$. The point isn't the arithmetic — it's that firmware staging is a real, measurable step in your image build, and forgetting it produces the silent "interface appears but never associates" error -2 from §5.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io04-modprobe-params">
+        <div class="ex-head"><span class="badge">Q3</span> Hands-on — load with a parameter and verify</div>
+        <div class="ex-q">Load the <code>usv_baro</code> module with <code>sample_rate_hz=200</code>, then prove (a) it's loaded and (b) the parameter actually took effect. Assume the <code>.ko</code> is already in the module tree but you just copied it in.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">A freshly copied module needs the dependency index rebuilt before <code>modprobe</code> can find it. Then check <code>lsmod</code> for the name and read the live value from <code>/sys/module/&lt;name&gt;/parameters/</code>. <code>dmesg</code> confirms the bind.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <div class="codeblock"><div class="code-head">load + verify <span class="lang">bash</span></div>
+<pre><code class="language-bash"># Rebuild modules.dep so modprobe can resolve the freshly-copied .ko:
+sudo depmod -a
+
+# Load it (and any deps) with the parameter:
+sudo modprobe usv_baro sample_rate_hz=200
+
+# (a) Confirm it's loaded — name + nonzero size, used-by count:
+lsmod | grep usv_baro
+#   usv_baro    16384  0
+
+# (b) Confirm the parameter took — read it back from sysfs:
+cat /sys/module/usv_baro/parameters/sample_rate_hz
+#   200
+
+# Follow the bind in the log:
+dmesg | grep usv_baro
+#   usv_baro: loaded, registering driver
+</code></pre></div>
+          <p>The three checks map to the three commands in §8: <code>lsmod</code> proves it loaded, the <code>/sys/module/.../parameters/</code> read proves the option reached the driver, and <code>dmesg</code> proves the lifecycle ran. If you'd skipped <code>depmod -a</code>, step two would have failed with <code>FATAL: Module usv_baro not found</code> even though the file exists.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>A driver runs either in the kernel (fast, dangerous, direct MMIO/IRQ/DMA) or in userspace (safe, debuggable, via <code>i2c-dev</code>/<code>spidev</code>/<code>libusb</code>/UIO/VFIO). Kernel modules have an init/exit lifecycle, but <code>module_init</code> only <em>registers</em> — binding happens later in <code>.probe()</code>. <code>modprobe</code> beats <code>insmod</code> because it resolves dependencies from <code>modules.dep</code> (rebuilt by <code>depmod</code>); parameters persist in <code>/etc/modprobe.d</code> and appear under <code>/sys/module</code>. Firmware-hungry chips call <code>request_firmware()</code>; a missing blob is the classic <code>error -2</code> (<code>-ENOENT</code>). Out-of-tree drivers break on kernel bumps because the kABI (<code>vermagic</code> + symbol CRCs) must match exactly — DKMS rebuilds them automatically. To diagnose any of this, read the bind in <code>dmesg</code>: enumerate → match → probe → firmware → ready. Next: how buses enumerate the devices these drivers bind to.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

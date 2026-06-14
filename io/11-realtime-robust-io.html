@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Real-Time &amp; Robust I/O — Linux I/O for Robotics</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="11-realtime-robust-io">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · Ch 11</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · Chapter 11 · Hardening</div>
+        <h1>Real-Time &amp; Robust I/O: never miss a deadline, never trust a wire</h1>
+        <p>Your 20 Hz heading controller has exactly 50 ms to read sensors, compute, and command the rudder — every cycle, forever, including the cycle where WiFi drops, the SD card stalls, and a page fault lands. This chapter is about making the loop that holds the boat <em>impossible to derail</em>: meet the worst-case deadline, and survive every I/O that goes wrong.</p>
+        <div class="meta"><span>⏱ ~40 min</span><span>🧠 deadlines</span><span>⚡ robust loops</span><span>∑ jitter budget</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="what-realtime-means"><span class="sec-no">1</span>What "real-time" actually means</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Real-time does <strong>not</strong> mean fast. It means <em>on time</em>. A system is real-time if it is guaranteed to finish each job before a known <strong>deadline</strong> — and the guarantee is about the <strong>worst case</strong>, not the average. A controller that averages 3 ms per cycle but spikes to 80 ms once a minute is, for a 50 ms loop, a <em>broken</em> controller. The boat doesn't care that 999 cycles were great; on the 1000th the rudder went stale and it broached.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one sentence to keep</div>
+        <p>Average latency is a benchmark number. <strong>Worst-case latency is a safety property.</strong> Real-time engineering is the discipline of shrinking and bounding the <em>tail</em>, not the mean.</p>
+      </div>
+
+      <p>There are three tiers. <strong>Hard real-time</strong>: a missed deadline is a system failure (an airbag, a motor commutation ISR). <strong>Firm real-time</strong>: a late result is useless and you'd rather drop it than use it (a stale sensor sample). <strong>Soft real-time</strong>: late degrades quality but is tolerable (video playback). A USV heading loop is firm-to-hard: a late rudder command is worse than no command, and enough of them in a row capsizes the mission.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>deadline, period, jitter</small></div>
+      <p>Run a periodic task at frequency $f$. Its <strong>period</strong> is $T = 1/f$ and your implicit deadline is "finish this cycle before the next one starts," i.e. one period. For the 20 Hz loop:</p>
+      <div class="math-box">$$ T = \frac{1}{f} = \frac{1}{20\ \text{Hz}} = 50\ \text{ms} \quad=\quad \text{deadline per cycle} $$</div>
+      <p>Two numbers describe how well you hit it. <strong>Latency</strong> $L$ is the delay from the scheduled wake-up to when your code actually runs. <strong>Jitter</strong> $J$ is the spread of that latency across cycles — what you measure as max minus min (or a high percentile minus the median):</p>
+      <div class="math-box">$$ J = L_{\max} - L_{\min}, \qquad L_{\max} \le T - C_{\text{worst}} $$</div>
+      <p>where $C_{\text{worst}}$ is your worst-case <em>compute</em> time. That second inequality is the whole game: <strong>scheduling latency plus worst-case compute must fit inside one period.</strong> If your wake-up can be late by up to $L_{\max}$ and your compute can take up to $C_{\text{worst}}$, you only stay inside the deadline when $L_{\max} + C_{\text{worst}} \le T$.</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — measuring the AGX Orin's tail</div>
+        <p>Before trusting the Jetson AGX Orin with a control loop, measure it. <code>cyclictest</code> (from <code>rt-tests</code>) wakes a thread every period and reports actual vs. expected wake-up. On a stock kernel you might see <code>Avg: 8us  Max: 4200us</code> — a 4.2&nbsp;ms tail from a 8&nbsp;µs average. That 4.2&nbsp;ms is what eats your budget, and it's invisible to any benchmark that reports means.</p>
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">measure worst-case scheduling latency <span class="lang">bash</span></div>
+<pre><code class="language-bash"># 20 Hz period = 50000 us, one thread, SCHED_FIFO prio 80, lock memory
+sudo cyclictest --mlockall --priority=80 --interval=50000 --threads=1 --histogram=10000
+
+# read it: Min/Avg are the easy numbers; MAX is the only one that matters.
+# T_min:       8  Act:    9  Avg:    8  Max:   4213    &lt;- 4.2 ms tail
+</code></pre>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="latency-sources"><span class="sec-no">2</span>Where the latency tail comes from</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>who steals your CPU</small></div>
+      <p>Your loop is late because, between the timer firing and your code running, the kernel did something else with the CPU. There are four big thieves, and you fix each one differently.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Source</th><th>What happens</th><th>Typical hit</th><th>Fix (later sections)</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Scheduler</strong></td><td>A lower-priority task is running and won't yield until a preemption point</td><td>1–100+ ms on non-RT</td><td>PREEMPT_RT + <code>SCHED_FIFO</code></td></tr>
+          <tr><td><strong>IRQ / softirq</strong></td><td>A device interrupt (NIC, USB) runs its handler on your CPU</td><td>10 µs – several ms</td><td>IRQ affinity, threaded IRQs</td></tr>
+          <tr><td><strong>Page faults</strong></td><td>Your code/stack/heap page isn't resident; kernel must fault it in</td><td>10 µs – ms (worse if swapped)</td><td><code>mlockall()</code></td></tr>
+          <tr><td><strong>CPU power states</strong></td><td>Core was in a deep C-state or low P-state; must wake/ramp up</td><td>10s of µs of exit latency</td><td>disable deep idle, pin frequency</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the first cycle is a lie</div>
+        <p>The page-fault thief loves the first iteration. Memory you <code>malloc()</code> isn't physically backed until you touch it (demand paging). Your warm-up cycle faults in every page and looks fine; the cycle that faults a <em>new</em> log buffer at minute 30 blows the deadline. This is exactly what <code>mlockall()</code> exists to kill.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>IRQ storms eat the budget</small></div>
+      <p>Interrupts are sneaky because their cost is a <em>rate</em> times a <em>per-event cost</em>. If a NIC under load fires interrupts at rate $\lambda$ and each handler steals $c$ of CPU time, the fraction of a core lost to it is:</p>
+      <div class="math-box">$$ \text{IRQ load} = \lambda \cdot c $$</div>
+      <p>A gigabit NIC with no coalescing can hit $\lambda = 80{,}000$ IRQ/s; at $c = 3\ \mu\text{s}$ that's $0.24$ — a quarter of a core gone, and every one of those handlers is a chance to preempt your control loop. Coalescing (Ch 07) and pinning that IRQ to a <em>different</em> core (next section) both shrink the damage your loop sees.</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="preempt-rt-priorities"><span class="sec-no">3</span>PREEMPT_RT, priorities &amp; locking memory</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>make the kernel yield</small></div>
+      <p>On a stock Linux kernel, a thread running in the kernel (a syscall, a driver) generally can't be preempted until it reaches a scheduling point. That's where multi-millisecond stalls hide. The <strong>PREEMPT_RT</strong> patch set (mainlined progressively, fully merged around the 6.12 kernel) makes nearly the entire kernel preemptible: spinlocks become sleeping mutexes, interrupt handlers run in threads you can prioritize, and a high-priority RT task can seize a CPU almost immediately.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> RT is a contract, not a speedup</div>
+        <p>PREEMPT_RT usually <em>lowers throughput</em> a little (all that preemptibility has overhead). What it buys you is a far smaller, more predictable <strong>tail</strong>. You trade peak speed for a bounded worst case — exactly the trade a control loop wants.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>priority &amp; the RT throttle</small></div>
+      <p>Two scheduling classes matter. <code>SCHED_FIFO</code> and <code>SCHED_RR</code> are <em>real-time</em> classes with priorities 1–99; any runnable RT thread preempts <em>all</em> normal (<code>SCHED_OTHER</code>) tasks. Higher number = higher priority. A <code>SCHED_FIFO</code> thread runs until it blocks or a higher-priority RT thread wakes — it is <strong>not</strong> time-sliced against equal priorities.</p>
+      <p>That last fact is a foot-gun: a <code>SCHED_FIFO</code> thread spinning in a bug can lock a core forever. Linux's safety valve is the RT throttle, which by default caps RT classes at $950000\ \mu\text{s}$ of CPU per $1000000\ \mu\text{s}$ window:</p>
+      <div class="math-box">$$ \text{RT budget} = \frac{950000}{1000000} = 95\% \ \text{of each core, per 1 s window} $$</div>
+      <p>For a real isolated control core you typically size your loop well under that and keep the throttle as a backstop.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>The recipe for a control thread is always the same three moves: <strong>lock memory, set RT priority, then loop</strong>. Locking comes first because faulting after you're RT is exactly the stall you're trying to prevent.</p>
+
+      <div class="codeblock">
+        <div class="code-head">rt_setup.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;sched.h&gt;
+#include &lt;sys/mman.h&gt;
+#include &lt;string.h&gt;
+#include &lt;stdio.h&gt;
+
+int make_realtime(int prio) {
+    /* 1. Pin ALL current + future pages to RAM: no demand paging,
+          no swap, no fault stalls inside the loop. */
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) != 0) {
+        perror("mlockall");        /* needs CAP_IPC_LOCK / root */
+        return -1;
+    }
+
+    /* 2. Become a SCHED_FIFO thread at the given RT priority. */
+    struct sched_param sp;
+    memset(&amp;sp, 0, sizeof(sp));
+    sp.sched_priority = prio;      /* 1..99; control loop ~ 80 */
+    if (sched_setscheduler(0, SCHED_FIFO, &amp;sp) != 0) {
+        perror("sched_setscheduler");
+        return -1;
+    }
+
+    /* 3. Pre-fault the stack so the FIRST cycle isn't special either. */
+    volatile char touch[512 * 1024];
+    memset((void *)touch, 0, sizeof(touch));
+    return 0;
+}
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Don't run your whole process RT</div>
+        <p>Make only the <em>control thread</em> <code>SCHED_FIFO</code>. Logging, telemetry, and housekeeping stay <code>SCHED_OTHER</code> so they can never starve the loop and can soak up the slack. One RT thread, many normal threads — that is the standard robot architecture.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="cpu-irq-isolation"><span class="sec-no">4</span>Isolating CPUs &amp; steering interrupts</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>give the loop its own room</small></div>
+      <p>The AGX Orin has 12 Arm cores. The cleanest real-time setup is to <strong>evict everything off one core</strong> and run only the control loop there. Two levers: <code>isolcpus</code> keeps the normal scheduler from placing tasks on a core, and <strong>IRQ affinity</strong> keeps device interrupts from landing there. Together they turn one core into a quiet room where the loop is almost never interrupted.</p>
+
+      <div class="layer"><span class="step">②</span> Code <small>kernel cmdline + /proc</small></div>
+      <p>Isolation starts at boot via the kernel command line (on Jetson, edited in <code>/boot/extlinux/extlinux.conf</code>). Reserve core 11 for the loop:</p>
+      <div class="codeblock">
+        <div class="code-head">kernel cmdline (extlinux.conf APPEND line) <span class="lang">bash</span></div>
+<pre><code class="language-bash"># isolate core 11 from the scheduler, RCU callbacks, and the tick
+isolcpus=11 nohz_full=11 rcu_nocbs=11
+# then pin your control thread to it from code or the shell:
+taskset -c 11 ./control_loop          # CPU affinity = core 11 only
+</code></pre>
+      </div>
+
+      <p>Now steer interrupts <em>away</em> from core 11. Each IRQ has a CPU affinity mask in <code>/proc/irq/&lt;N&gt;/smp_affinity_list</code>. Point the noisy ones (NIC, USB) at the housekeeping cores 0–10:</p>
+      <div class="codeblock">
+        <div class="code-head">irq_affinity.sh <span class="lang">bash</span></div>
+<pre><code class="language-bash"># find the NIC's IRQ number(s)
+grep eth0 /proc/interrupts        # column 1 is the IRQ number, e.g. 142
+
+# keep that IRQ off the isolated core (allow cores 0-10)
+echo 0-10 | sudo tee /proc/irq/142/smp_affinity_list
+
+# verify nothing is targeting core 11
+cat /proc/irq/142/smp_affinity_list
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — irqbalance fights you</div>
+        <p>The <code>irqbalance</code> daemon will happily re-spread interrupts back onto your isolated core. On an RT robot, <strong>disable it</strong> (<code>sudo systemctl disable --now irqbalance</code>) and pin affinities yourself. Also note some interrupts (timer, per-CPU IPIs) are managed by the kernel and won't move — that's fine; they're cheap and predictable.</p>
+      </div>
+
+      <p>One more knob for network-heavy boats: <strong>RPS (Receive Packet Steering)</strong> spreads softirq packet processing across cores in software, so a single-queue NIC doesn't dump all its receive work onto the one core its IRQ lands on. Set its mask in <code>/sys/class/net/&lt;iface&gt;/queues/rx-0/rps_cpus</code> — and, again, exclude the isolated core.</p>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="control-loop-architecture"><span class="sec-no">5</span>The architecture: hot loop vs. everything else</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>two worlds, one boat</small></div>
+      <p>The decision that makes or breaks a real-time robot is <strong>what runs on the hot path</strong>. The control thread does the absolute minimum: read fresh sensor values, compute, command the actuator. Everything that can block — logging to flash, telemetry over WiFi, recording a rosbag — runs on <em>other</em> threads and is fed by lock-free or bounded queues. The hot loop never waits on disk and never waits on a socket.</p>
+
+      <div class="mermaid">
+flowchart TB
+    subgraph RT["Core 11 · SCHED_FIFO · hot loop (50 ms)"]
+        S["read sensors<br/>(non-blocking)"] --> C["compute PID"]
+        C --> A["command rudder"]
+        A --> Q["push sample<br/>(lock-free ring)"]
+        Q --> S
+    end
+    subgraph NRT["Cores 0-10 · SCHED_OTHER · off the hot path"]
+        Q -. drains .-> L["log thread<br/>→ SD card"]
+        Q -. drains .-> T["telemetry thread<br/>→ WiFi/UDP"]
+    end
+    W["WiFi link"] -. may drop .-> T
+    L --> SD[("ring-buffer<br/>file / flash")]
+</div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What to notice</div>
+        <p>The ring between the hot loop and the workers is the firewall. The control thread only ever <em>pushes</em> (a bounded, non-blocking write); if a worker falls behind, the worst case is a dropped log sample — never a missed rudder command. <strong>Backpressure on telemetry must never reach the loop.</strong></p>
+      </div>
+
+      <div class="layer"><span class="step">④</span> Real case <small>why this matters</small></div>
+      <p>On the USV, the rosbag recorder and the WiFi telemetry both want to ship megabytes. Run either of them inline and a flash flush or a TCP retransmit will, sooner or later, blow the 50 ms budget. With the two-world architecture, the SD card can stall for 200 ms and the boat still steers — the log thread just catches up afterward from the ring.</p>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="robust-io-loop"><span class="sec-no">6</span>The robust I/O loop: handling every failure</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>read() lies to you</small></div>
+      <p>Even with perfect timing, the I/O itself fights you. A serial <code>read()</code> can return fewer bytes than you asked for, return <code>-1</code> with <code>errno = EINTR</code> because a signal arrived, or return <code>EAGAIN</code> on a non-blocking fd that has nothing ready. Treat any of these as a hard error and your loop dies on the first signal or partial frame. A robust loop expects all of them.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Symptom</th><th><code>errno</code> / return</th><th>Meaning</th><th>Correct response</th></tr></thead>
+        <tbody>
+          <tr><td>Interrupted</td><td><code>-1</code>, <code>EINTR</code></td><td>A signal hit mid-syscall</td><td>Retry the call</td></tr>
+          <tr><td>Would block</td><td><code>-1</code>, <code>EAGAIN</code>/<code>EWOULDBLOCK</code></td><td>Non-blocking fd, nothing ready</td><td>Go back to <code>epoll</code>/timeout</td></tr>
+          <tr><td>Partial</td><td><code>0 &lt; n &lt; count</code></td><td>Only part of the message arrived</td><td>Loop, read the remainder</td></tr>
+          <tr><td>Peer gone</td><td><code>0</code> (read) / <code>EPIPE</code> (write)</td><td>EOF / connection closed</td><td>Reconnect / reopen</td></tr>
+          <tr><td>Device unplugged</td><td><code>-1</code>, <code>EIO</code>/<code>ENXIO</code></td><td>The <code>ttyUSB</code> vanished</td><td>Failsafe + idempotent reopen</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="layer"><span class="step">②</span> Math <small>timeout budget</small></div>
+      <p>Reads must be <em>bounded</em>: a blocking read on a dead sensor will hang the loop forever. Give the read a timeout that fits the period with margin. If the loop period is $T$ and worst-case compute is $C_{\text{worst}}$, the slack available for waiting on I/O is:</p>
+      <div class="math-box">$$ t_{\text{timeout}} \le T - C_{\text{worst}} - L_{\max} $$</div>
+      <p>For $T = 50$ ms, $C_{\text{worst}} = 5$ ms, $L_{\max} = 4$ ms, you have $\le 41$ ms to wait — but you'd set the timeout well below that (say 20 ms) so a late or missing sample is detected and skipped with time to still command the actuator from the last good estimate.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>the read loop that survives</small></div>
+      <p>This is the single most important function in a robust driver: read <em>exactly</em> <code>count</code> bytes, or fail cleanly on timeout — handling <code>EINTR</code> and partials along the way. Read it line by line; it is the answer to the exercise below.</p>
+
+      <div class="codeblock">
+        <div class="code-head">robust_read.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;unistd.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;poll.h&gt;
+#include &lt;stdint.h&gt;
+#include &lt;time.h&gt;
+
+/* Milliseconds remaining until `end`, clamped to &gt;= 0. */
+static int ms_left(const struct timespec *end) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &amp;now);
+    long ms = (end-&gt;tv_sec  - now.tv_sec)  * 1000
+            + (end-&gt;tv_nsec - now.tv_nsec) / 1000000;
+    return ms &gt; 0 ? (int)ms : 0;
+}
+
+/* Read exactly n bytes into buf, or stop after deadline_ms total.
+   Returns bytes read (== n on success, &lt; n on timeout, -1 on hard error). */
+ssize_t read_n(int fd, void *buf, size_t n, int deadline_ms) {
+    uint8_t *p = (uint8_t *)buf;
+    size_t got = 0;
+    struct timespec end;                        /* absolute deadline */
+    clock_gettime(CLOCK_MONOTONIC, &amp;end);
+    end.tv_sec  += deadline_ms / 1000;
+    end.tv_nsec += (deadline_ms % 1000) * 1000000L;
+    if (end.tv_nsec &gt;= 1000000000L) { end.tv_sec++; end.tv_nsec -= 1000000000L; }
+    while (got &lt; n) {
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        int pr = poll(&amp;pfd, 1, ms_left(&amp;end)); /* wait only the time LEFT */
+        if (pr &lt; 0) {
+            if (errno == EINTR) continue;       /* signal: retry (clock keeps ticking) */
+            return -1;                          /* real poll error */
+        }
+        if (pr == 0) return (ssize_t)got;       /* TIMEOUT: partial/none */
+
+        ssize_t r = read(fd, p + got, n - got);
+        if (r &lt; 0) {
+            if (errno == EINTR) continue;        /* retry */
+            if (errno == EAGAIN) continue;       /* spurious: poll again */
+            return -1;                           /* EIO/ENXIO: device gone */
+        }
+        if (r == 0) return (ssize_t)got;         /* EOF: peer closed */
+        got += (size_t)r;                        /* PARTIAL: keep going */
+    }
+    return (ssize_t)got;                          /* got == n */
+}
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Writes need the same care</div>
+        <p>A <code>write()</code> can also be partial and can also return <code>EINTR</code>. The mirror loop advances an offset until all bytes are out, and on a stream socket you must handle <code>EPIPE</code> (peer gone) as a reconnect trigger, not a crash. Wrap both in helpers; never call bare <code>read()</code>/<code>write()</code> in production robot code.</p>
+      </div>
+
+      <div class="layer"><span class="step">④</span> Real case <small>idempotent reopen</small></div>
+      <p>When the GPS <code>ttyUSB0</code> browns out, the kernel may hand it back as <code>ttyUSB1</code> — which is exactly why Ch 03 had you pin a <code>/dev/gps</code> udev symlink. The reconnect routine must be <strong>idempotent</strong>: close the old fd if open, re-open <code>/dev/gps</code>, re-apply termios, and rebuild the parser state — safe to call on every failure without leaking fds. Until reopen succeeds, the loop runs on dead reckoning, not on stale GPS.</p>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="durable-logging"><span class="sec-no">7</span>Durable logging without blocking the loop</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>write() is fast, durable is slow</small></div>
+      <p>A normal <code>write()</code> to a file is fast because it only copies into the kernel's <strong>page cache</strong>; the actual flash write happens later, asynchronously. That's perfect for the hot path — but it means a crash or power loss can lose the last few seconds. <code>fsync()</code> forces the data all the way to stable storage and <em>blocks</em> until the device acknowledges. On an SD card that can be tens to hundreds of milliseconds. Never call it on the hot path.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Path</th><th>Durability</th><th>Latency</th><th>Use on hot loop?</th></tr></thead>
+        <tbody>
+          <tr><td><code>write()</code> → page cache</td><td>Lost on power-cut</td><td>~µs</td><td>Yes (via worker)</td></tr>
+          <tr><td><code>write()</code> + <code>fsync()</code></td><td>Durable</td><td>10–200 ms (SD)</td><td><strong>Never</strong></td></tr>
+          <tr><td><code>O_DIRECT</code> + <code>O_SYNC</code></td><td>Durable, bypass cache</td><td>High, alignment-bound</td><td>Never; for big sequential logs</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="layer"><span class="step">②</span> Math <small>SD-card write amplification &amp; wear</small></div>
+      <p>SD/eMMC flash erases in large <strong>blocks</strong> but writes in smaller <strong>pages</strong>. Updating one byte can force the controller to read-erase-rewrite a whole erase block — <strong>write amplification</strong>. Define it as:</p>
+      <div class="math-box">$$ \text{WA} = \frac{\text{bytes physically written to flash}}{\text{bytes your app wrote}} $$</div>
+      <p>Tiny <code>fsync</code>'d records give terrible WA: a 64 B telemetry record that triggers a 512 KB erase block rewrite is $\text{WA} = 8192$. Flash cells endure a finite number of program/erase cycles, so endurance in bytes is roughly:</p>
+      <div class="math-box">$$ \text{Bytes endurance} \approx \frac{\text{capacity} \times P\!/\!E\ \text{cycles}}{\text{WA}} $$</div>
+      <p>The fix is to make every write <strong>large, aligned, and sequential</strong>: batch records in a RAM buffer and flush in erase-block-sized chunks (e.g. 512 KB or 1 MB) from the log thread. Big sequential writes drive WA toward 1 and stretch card life by orders of magnitude.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>batched flush off the hot path</small></div>
+      <div class="codeblock">
+        <div class="code-head">log_writer.c <span class="lang">C</span></div>
+<pre><code class="language-c">#define FLUSH_BYTES (1u &lt;&lt; 20)   /* 1 MiB: big, aligned, sequential */
+static uint8_t batch[FLUSH_BYTES];
+static size_t  fill = 0;
+
+/* runs on the SCHED_OTHER log thread, draining the ring buffer */
+void log_record(int fd, const void *rec, size_t len) {
+    if (fill + len &gt; FLUSH_BYTES) {        /* batch full -&gt; one big write */
+        size_t off = 0;
+        while (off &lt; fill) {                /* handle partial writes */
+            ssize_t w = write(fd, batch + off, fill - off);
+            if (w &lt; 0) { if (errno == EINTR) continue; break; }
+            off += (size_t)w;
+        }
+        fill = 0;
+        /* fsync HERE, on the worker, never on the control thread.
+           Do it on a coarse schedule (e.g. every few MiB), not per record. */
+        fsync(fd);
+    }
+    memcpy(batch + fill, rec, len);
+    fill += len;
+}
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — the USV mission log</div>
+        <p>The Orin logs IMU + GPS + control state at 20 Hz. Per-record <code>fsync</code> to the SD card would both stall the loop and shred the card. Instead, samples go through the lock-free ring to a log thread that batches ~1 MiB and flushes sequentially, calling <code>fsync</code> only every few seconds. Result: the hot loop never touches flash, the card survives the mission, and on a power-cut you lose at most a couple of seconds of telemetry — an acceptable, bounded loss.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="watchdogs-failsafe"><span class="sec-no">8</span>Watchdogs &amp; the failsafe state</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>plan for your own death</small></div>
+      <p>Robust I/O assumes the software <em>will</em> hang. A <strong>hardware watchdog</strong> is a countdown timer in the SoC that resets the board if it isn't "petted" in time; your healthy control thread pets it every cycle. If the loop deadlocks, the watchdog reboots the Orin into a known state instead of letting the boat drive in circles. Linux exposes it as a character device: open <code>/dev/watchdog</code>, write to it (or <code>ioctl</code> with <code>WDIOC_KEEPALIVE</code>) periodically, and the kernel programs the timer.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — pet from the loop, not a timer</div>
+        <p>Pet the watchdog from inside the <em>control thread's</em> work, after a successful cycle — never from an independent timer thread. A timer that keeps petting while the control loop is wedged defeats the entire point: the board stays "alive" while the boat goes uncontrolled.</p>
+      </div>
+
+      <p>The second layer is the <strong>failsafe state</strong>: the safe thing to do when an input goes missing. For the USV, the canonical trigger is a <strong>WiFi drop</strong> (Ch 09's shared, jittery link). If no operator heartbeat arrives within a deadline, the boat must autonomously fall back — center the rudder, cut throttle, hold station or loiter — rather than continue the last command into a rock.</p>
+
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> Armed
+    Armed --> Active: heartbeat OK
+    Active --> Active: cmd within deadline
+    Active --> Failsafe: no heartbeat &gt; 1 s
+    Failsafe --> Active: heartbeat restored
+    Failsafe --> Failsafe: hold safe state<br/>(rudder centered,<br/>throttle cut)
+</div>
+
+      <div class="layer"><span class="step">③</span> Code <small>heartbeat-gated command</small></div>
+      <div class="codeblock">
+        <div class="code-head">failsafe.c <span class="lang">C</span></div>
+<pre><code class="language-c">#define HEARTBEAT_TIMEOUT_NS  1000000000LL   /* 1 s */
+
+/* called once per 50 ms control cycle, on the RT thread */
+void control_step(struct ctx *c, int64_t now_ns) {
+    int64_t age = now_ns - c-&gt;last_heartbeat_ns;
+
+    if (age &gt; HEARTBEAT_TIMEOUT_NS) {
+        /* WiFi/operator lost: known-safe outputs, NOT the stale command */
+        set_rudder(0.0);            /* center */
+        set_throttle(0.0);          /* cut */
+        c-&gt;state = FAILSAFE;
+    } else {
+        c-&gt;state = ACTIVE;
+        run_pid(c);                 /* normal heading control */
+    }
+    pet_watchdog(c-&gt;wd_fd);         /* only reached if the loop is alive */
+}
+</code></pre>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io11-avg-vs-worst">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">Your 20 Hz loop averages 2 ms per cycle but once a minute spikes to 70 ms because of an SD-card <code>fsync</code> on the hot path. For a real-time controller, is this acceptable?</div>
+        <ul class="ex-options">
+          <li data-correct="false">Yes — the average is far under the 50 ms period, so it's plenty fast.</li>
+          <li data-correct="true">No — real-time is about the worst case; the 70 ms spike misses the 50 ms deadline and a stale rudder command can capsize the boat.</li>
+          <li data-correct="false">Yes — one missed cycle a minute is statistically negligible.</li>
+          <li data-correct="false">No — but only because 2 ms is too slow; it should be in microseconds.</li>
+        </ul>
+        <div class="ex-explain">Real-time is a guarantee about the <strong>tail</strong>, not the mean. A 70 ms cycle in a 50 ms loop is a missed deadline — a safety failure, not a benchmark blemish. The fix is exactly this chapter: move <code>fsync</code> off the hot path onto a <code>SCHED_OTHER</code> log thread fed by a ring buffer.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io11-timeout-budget" data-answer="41" data-tol="0.5">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">A control loop runs at 20 Hz (period $T = 50$ ms). Worst-case compute is $C_{\text{worst}} = 5$ ms and measured worst-case scheduling latency is $L_{\max} = 4$ ms. What is the maximum I/O wait you can afford and still meet the deadline? (Use $t_{\text{timeout}} \le T - C_{\text{worst}} - L_{\max}$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">ms</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$t_{\text{timeout}} \le 50 - 5 - 4 = 41$ ms. That's the hard ceiling; in practice you'd set the read timeout well below it (e.g. 20 ms) so a missing sample is detected with enough slack left to still command the actuator from the last good estimate.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io11-robust-read">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — a read loop that survives</div>
+        <div class="ex-q">Write a function that reads exactly <code>n</code> bytes from a serial fd, but gives up after a total timeout. It must correctly handle <code>EINTR</code> (retry), partial reads (keep going), and the timeout (return what you have). What is the bug in calling bare <code>read(fd, buf, n)</code> once?</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Bare <code>read()</code> can (a) return <code>-1</code>/<code>EINTR</code> on a signal, (b) return fewer than <code>n</code> bytes even with data coming, and (c) block forever on a dead device. You need a bounded wait (<code>poll</code>) plus a loop that accumulates into an offset.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p>A single <code>read()</code> is wrong because it treats a partial return as the whole message, dies on the first <code>EINTR</code>, and has no timeout. The robust version polls with a deadline, retries on <code>EINTR</code>/<code>EAGAIN</code>, accumulates partials into an offset, and returns early on timeout or EOF:</p>
+          <div class="codeblock"><div class="code-head">robust_read.c <span class="lang">C</span></div>
+<pre><code class="language-c">/* ms remaining until the absolute deadline `end`, clamped to &gt;= 0 */
+static int ms_left(const struct timespec *end) {
+    struct timespec now; clock_gettime(CLOCK_MONOTONIC, &amp;now);
+    long ms = (end-&gt;tv_sec - now.tv_sec) * 1000
+            + (end-&gt;tv_nsec - now.tv_nsec) / 1000000;
+    return ms &gt; 0 ? (int)ms : 0;
+}
+
+ssize_t read_n(int fd, void *buf, size_t n, int deadline_ms) {
+    uint8_t *p = (uint8_t *)buf;
+    size_t got = 0;
+    struct timespec end; clock_gettime(CLOCK_MONOTONIC, &amp;end);
+    end.tv_sec  += deadline_ms / 1000;
+    end.tv_nsec += (deadline_ms % 1000) * 1000000L;
+    if (end.tv_nsec &gt;= 1000000000L) { end.tv_sec++; end.tv_nsec -= 1000000000L; }
+    while (got &lt; n) {
+        struct pollfd pfd = { .fd = fd, .events = POLLIN };
+        int pr = poll(&amp;pfd, 1, ms_left(&amp;end));   /* only the time LEFT, not the full budget */
+        if (pr &lt; 0) { if (errno == EINTR) continue; return -1; }
+        if (pr == 0) return (ssize_t)got;          /* timeout */
+        ssize_t r = read(fd, p + got, n - got);
+        if (r &lt; 0) {
+            if (errno == EINTR || errno == EAGAIN) continue;
+            return -1;                              /* device gone */
+        }
+        if (r == 0) return (ssize_t)got;            /* EOF */
+        got += (size_t)r;                           /* partial: keep going */
+    }
+    return (ssize_t)got;                            /* got == n */
+}
+</code></pre></div>
+          <p>The same shape works for writes (advance an offset until all bytes are out, retry on <code>EINTR</code>). Never call bare <code>read()</code>/<code>write()</code> in robot code.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>Real-time means meeting the <strong>worst-case deadline</strong>, not a good average — engineer the tail. Latency comes from the scheduler, IRQs, page faults, and power states; tame them with PREEMPT_RT, <code>SCHED_FIFO</code> priority, <code>mlockall()</code>, <code>isolcpus</code>, and IRQ affinity. Keep the hot loop minimal: read non-blocking, compute, actuate, and push samples through a ring to <code>SCHED_OTHER</code> workers that log and telemeter. Make I/O robust by handling <code>EINTR</code>, partial reads/writes, <code>EAGAIN</code>, timeouts, and idempotent reopen. Log durably off the hot path with big, aligned, sequential writes and rare <code>fsync</code> to spare the SD card. Finally, a hardware watchdog petted only by a healthy loop, plus a heartbeat-gated failsafe, turn any hang or WiFi drop into a safe state instead of a runaway boat.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

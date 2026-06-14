@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>總整理：規劃機器人的 I/O 架構 — 機器人的 Linux I/O</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="12-capstone-robot-io">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · 第 12 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · 第 12 章 · 總整理</div>
+        <h1>規劃機器人的 I/O 架構：整艘 USV，一個系統</h1>
+        <p>十一章的系統呼叫（syscall）、sysfs、udev、驅動程式（driver）、匯流排（bus）、序列（serial）、DMA、epoll、網路、CAN 與即時（real-time）。現在我們把它們組裝起來。我們要把這艘 Jetson AGX Orin USV 從一塊裸板，帶到一艘每一個感測器與致動器（actuator）都對應到一條匯流排、一支驅動程式、一個檔案描述子（file descriptor）的載具——它能確定性地開機、被單一事件迴圈（event loop）讀取，並挺過大海丟給它的種種故障。</p>
+        <div class="meta"><span>⏱ 約 45 分鐘</span><span>🧠 系統綜合</span><span>⚡ 系統初始化 + epoll</span><span>∑ 頻寬預算</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="whole-system-view"><span class="sec-no">1</span>全系統視角：所有 I/O 攤在同一張圖上</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>一眼看完整艘船</small></div>
+      <p>機器人不是一顆栓上感測器的 CPU；它是<strong>一個帶著船殼的並行（concurrency）問題</strong>。航向感測器、定位感測器、光達（LiDAR）、推進器（thruster）以及岸基連線全都同時在搬移位元組，跑在不同的匯流排上，速率與容錯能力天差地遠。先前每一章都教了其中一個切片。總整理的功力，在於把整張資料流圖（data-flow graph）整個裝進腦袋裡：從實體接腳（physical pin），往上經過匯流排控制器，進入核心驅動程式（kernel driver），再出來成為你的程式碼會對它呼叫 <code>read()</code> 的那個檔案描述子。</p>
+      <p>這就是這艘 USV 完整的 I/O 地圖。沿著任何一片葉子由左讀到右，你就走過了一個位元組的確切路徑——<em>實體埠 → 匯流排 → 核心驅動程式 → 使用者空間（user space）所碰觸的那個 fd</em>：</p>
+
+      <div class="mermaid">
+flowchart LR
+    subgraph Wireless
+      W["岸基無線電<br/>2.4 GHz WiFi"] --> SDIO["SDIO 匯流排<br/>（裝置樹宣告）"]
+      SDIO --> MOAL["mlan / moal<br/>驅動 + 韌體"] --> WLAN["wlan0<br/>socket fd"]
+    end
+    subgraph Wired-LAN
+      LID["光達<br/>1000BASE-T"] --> ETH["乙太網 MAC<br/>（MGBE）"]
+      ETH --> EQOS["nvethernet<br/>驅動"] --> EFD["eth0<br/>UDP socket fd"]
+    end
+    subgraph USB
+      GPS["GPS"] --> HUB["USB host<br/>自動列舉"]
+      IMU["IMU"] --> HUB
+      HUB --> CDC["cdc-acm /<br/>ftdi_sio"] --> TTY["/dev/gps<br/>/dev/imu（udev）"]
+    end
+    subgraph Field
+      THR["推進器 +<br/>N2K 儀表"] --> CANC["CAN 控制器<br/>（mttcan）"]
+      CANC --> CANDRV["SocketCAN<br/>can0"] --> CANFD["AF_CAN<br/>socket fd"]
+    end
+</div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>為什麼是一張圖，不是四張</small></div>
+      <p>你之所以畫<em>一</em>張圖而不是四張各自獨立的示意圖，是因為核心把它們全部塌縮成單一命名空間：整數型的檔案描述子。WiFi socket、光達 UDP socket、<code>/dev/gps</code>、CAN socket，全都只是同一張行程內表格裡的非負整數。這份一致性正是第 01 章「一切皆檔案」的全部重點——也正是它讓 §4 那個統一的 epoll 迴圈成為可能。若有 $N$ 個 I/O 來源、每個拿到一個 fd，那整艘船的輸入就是 $N$ 個整數的集合，你可以用<em>單一</em>系統呼叫去監看它們。</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——AGX Orin 的雙重性格</div>
+        <p>注意匯流排分成兩派。PCIe 等級的匯流排（MGBE 乙太網、USB host）會<strong>自動列舉（enumeration）</strong>：插上一個裝置，核心就走訪描述子並綁定一支驅動程式（第 05 章）。模組上的 WiFi 坐在 <strong>SDIO</strong> 上，它沒有列舉協定——核心之所以知道它存在，純粹是因為<em>裝置樹（device tree）</em>宣告了它（第 05 章）。CAN（<code>mttcan</code>）也是一樣：是被宣告的，不是被發現的。光這一個事實，就決定了 §3 裡你一半的系統初始化工作。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="interface-roles"><span class="sec-no">2</span>介面角色指派：誰負責載送什麼</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>讓媒介配上對的訊息</small></div>
+      <p>每個介面都有一個你在前面幾章吃過苦頭才認識的個性，而架構設計大半就是在<em>不跟它對著幹</em>。WiFi 是一種共享、半雙工、抖動很大的媒介（第 09 章）——拿來做「你在哪、還活著嗎、這是新的航點」棒極了，拿去載 76 Mbit/s 的點雲（point cloud）則是災難。乙太網是全雙工、有交換機的——天生就是要載送沉重、對延遲敏感的感測器串流。USB 上的序列傳輸速率低、節奏接近人類操作，但需要穩定的名稱（第 03／06 章）。CAN 慢，但有優先權仲裁（arbitration）、是確定性的（第 10 章）——正是致動器所要的。</p>
+      <p>所以只要你尊重每一種媒介，這份指派自己就寫好了：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>介面</th><th>角色</th><th>為什麼用這個媒介</th><th>絕對不能放上去的東西</th></tr></thead>
+        <tbody>
+          <tr><td>WiFi（<code>wlan0</code>）</td><td>控制與遙測（telemetry）</td><td>資料速率低、容忍抖動；唯一通往岸基的連線</td><td>光達、影像、任何 &gt; 數 Mbit/s 的東西</td></tr>
+          <tr><td>乙太網（<code>eth0</code>）</td><td>沉重感測器（光達、相機）</td><td>全雙工、有交換機、約 118 MB/s 可用</td><td>預設路由（default route）（第 09 章的路由竊取！）</td></tr>
+          <tr><td>USB／序列（<code>/dev/gps</code>、<code>/dev/imu</code>）</td><td>低速率的點感測器</td><td>簡單、無所不在；udev 給出穩定名稱</td><td>任何沒有流量控制、卻又對時間敏感的東西</td></tr>
+          <tr><td>CAN（<code>can0</code>）</td><td>致動器與場域儀表</td><td>優先權仲裁、多點掛接、抗雜訊</td><td>大量資料——500 kbit/s 是天花板</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——預設路由只能活在恰好一張網卡上</div>
+        <p>最常見的雙網卡 bug（第 09 章）：光達的乙太網連線用 DHCP 起來、搶下一條預設路由，於是你那些走 WiFi 的 SSH 封包就想從光達那條死路網路出去。控制連線<em>必須</em>擁有預設路由；感測器網卡只拿一個主機範圍（host-scoped）的位址、<strong>不設閘道（gateway）</strong>。我們在 §3 用 netplan 把這件事強制下來。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="bring-up-chain"><span class="sec-no">3</span>把系統初始化鏈寫成持久設定</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>手打的任何東西都撐不過一次重開機</small></div>
+      <p>你在整門課裡互動式證明出來的一切——宣告匯流排、載入韌體（firmware）、命名裝置、給網卡定址、排定常駐程式（daemon）的順序——在磁碟上都有一個<em>持久</em>的家。一台你得在開機時全程顧著的機器人，就是一台會把你晾在海上的機器人。系統初始化鏈是一個分層的堆疊；每一層只有在它下面那層已經成功時才可能成功。</p>
+
+      <div class="mermaid">
+flowchart TB
+    DT["裝置樹 + overlay<br/>宣告 SDIO / CAN / pinmux"] --> FW["/lib/firmware 裡的韌體<br/>probe 時 request_firmware()"]
+    FW --> DRV["驅動綁定<br/>建立 netdev / chardev"]
+    DRV --> UDEV["udev 規則<br/>穩定的 /dev 名稱 + 網卡名稱"]
+    UDEV --> NET["netplan<br/>位址 + 預設路由"]
+    NET --> SYS["systemd 排序<br/>can0.service 在 network-online 之後"]
+    SYS --> APP["sensor-manager.service<br/>開啟每一個 fd"]
+</div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>啟動這艘船的四個設定檔</small></div>
+      <p>第 1–3 層你先前已經建立過；這裡是它們在磁碟上結晶成的樣子。首先是把序列裝置釘到穩定符號連結（symlink）、不管插拔順序如何的 udev 規則（第 03 章）：</p>
+
+      <div class="codeblock">
+        <div class="code-head">/etc/udev/rules.d/90-usv.rules <span class="lang">bash</span></div>
+<pre><code class="language-bash"># Match the GPS by its FTDI serial number, never by ttyUSB enumeration order
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{serial}=="A50285BI", \
+    SYMLINK+="gps", MODE="0660", GROUP="dialout"
+
+# The IMU is a CDC-ACM device; match by USB serial string
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1546", ATTRS{serial}=="3779A1C2", \
+    SYMLINK+="imu", MODE="0660", GROUP="dialout"
+</code></pre>
+      </div>
+
+      <p>接著是 netplan——控制連線擁有預設路由；光達網卡是主機範圍、沒有閘道，藉此殺掉路由竊取的 bug：</p>
+
+      <div class="codeblock">
+        <div class="code-head">/etc/netplan/01-usv.yaml <span class="lang">bash</span></div>
+<pre><code class="language-bash">network:
+  version: 2
+  ethernets:
+    eth0:                      # LiDAR — heavy sensor, NO gateway
+      addresses: [192.168.10.2/24]
+      dhcp4: false
+      routes: []              # host-scoped: never steals the default route
+  wifis:
+    wlan0:                     # control + telemetry — owns the default route
+      dhcp4: true
+      access-points:
+        "usv-shore": {password: "redacted-key"}
+</code></pre>
+      </div>
+
+      <p>最後是把 CAN 拉起來的 systemd unit。SocketCAN 的 <code>can0</code> 由裝置樹宣告，但起來時是<em>down</em> 的；你必須設定位元率（bitrate）並把連結拉起來（第 10 章）。它不依賴任何網路相關的東西，所以把它排在 app 之前——但 app 的 WiFi socket 需要網路，所以 app 要等 <code>network-online.target</code>：</p>
+
+      <div class="codeblock">
+        <div class="code-head">/etc/systemd/system/can0.service <span class="lang">bash</span></div>
+<pre><code class="language-bash">[Unit]
+Description=Bring up SocketCAN can0
+# The mttcan driver must have bound the netdev first
+After=sys-subsystem-net-devices-can0.device
+BindsTo=sys-subsystem-net-devices-can0.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 500 kbit/s; auto-recover from bus-off after 100 ms (Ch 10)
+ExecStart=/sbin/ip link set can0 type can bitrate 500000 restart-ms 100
+ExecStart=/sbin/ip link set can0 up
+ExecStop=/sbin/ip link set can0 down
+
+[Install]
+WantedBy=multi-user.target
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> <code>network-online.target</code> 不等於 <code>network.target</code></div>
+        <p><code>network.target</code> 只代表「網路堆疊已設定完成」——在任何一張介面拿到 IP 之前它就可能達成了。sensor-manager 需要一條真正可路由的 WiFi 連線，所以它的 unit 必須 <code>After=network-online.target</code> <em>而且</em> <code>Wants=network-online.target</code>（那個 <code>Wants</code> 才是把 <code>systemd-networkd-wait-online</code> 拉進來的東西；單靠 <code>After</code> 永遠不會等）。把這件事弄錯，就是為什麼一個服務會「我手動啟動就好好的，開機卻不行」。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="sensor-manager"><span class="sec-no">4</span>一個 epoll 迴圈讀盡所有來源</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>四條匯流排、一個執行緒、零輪詢</small></div>
+      <p>你現在有了四個（或更多）檔案描述子：光達的一個 UDP socket、GPS 與 IMU 的兩個原始（raw）TTY，還有一個 CAN socket。最天真的設計——每個裝置開一個執行緒、各自阻塞在自己的 <code>read()</code> 上——會燒掉一堆內容切換（context switch），還把關機搞成同步惡夢（第 08 章）。對的設計是一個執行緒、所有 fd 都註冊到 <strong>epoll</strong>、阻塞在單一一次 <code>epoll_wait()</code>，直到<em>任何</em>一個來源就緒。這就是多工（multiplexing）的回報：成本只隨<em>就緒</em>的 fd 數量增長，而不是隨總數。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>為什麼單一迴圈會贏</small></div>
+      <p>用「每個 fd 一條執行緒」的做法，$N$ 個裝置大約要 $N$ 條核心執行緒，外加每一輪排程 $O(N)$ 次內容切換。用 <code>poll()</code>／<code>select()</code>，核心每次呼叫都要重掃全部 $N$ 個 fd，所以一次喚醒要 $O(N)$。<code>epoll</code> 只回傳就緒集合 $k$，所以一次喚醒只要：</p>
+      <div class="math-box">$$ C_\text{epoll} = O(k), \qquad k \le N, \quad k \approx 1\text{–}2 \text{ in steady state} $$</div>
+      <p>對我們這 4–8 個來源來說 $k$ 很小，但結構上的勝利和當年解決 C10k 的那個一模一樣：你加進更多安靜的感測器，迴圈也不會變貴。一次 <code>epoll_wait()</code> 呼叫，只在真的有位元組到達時才被喚醒。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>sensor-manager 骨架</small></div>
+      <p>每個 fd 都是非阻塞（non-blocking）且邊緣觸發（edge-triggered，要排乾到 <code>EAGAIN</code> 為止），還有一個 <code>timerfd</code> 從<em>同一個</em>迴圈<em>裡面</em>驅動 20 Hz 的控制節拍（tick）——這樣控制器和感測器就共用一個排程器，不必額外開執行緒：</p>
+
+      <div class="codeblock">
+        <div class="code-head">sensor_manager.c <span class="lang">C</span></div>
+<pre><code class="language-c">int ep = epoll_create1(EPOLL_CLOEXEC);
+
+// Each open_* returns a non-blocking fd; tag it so we know who fired.
+int fds[] = { lidar_udp, gps_tty, imu_tty, can_sock, tick_timerfd };
+for (int i = 0; i &lt; 5; i++) {
+    struct epoll_event ev = {
+        .events = EPOLLIN | EPOLLET,        // edge-triggered: drain fully
+        .data.fd = fds[i],
+    };
+    epoll_ctl(ep, EPOLL_CTL_ADD, fds[i], &amp;ev);
+}
+
+struct epoll_event events[16];
+for (;;) {
+    int n = epoll_wait(ep, events, 16, -1);
+    if (n &lt; 0) { if (errno == EINTR) continue; break; }   // Ch 11: handle EINTR
+
+    for (int i = 0; i &lt; n; i++) {
+        int fd = events[i].data.fd;
+        if (events[i].events &amp; (EPOLLHUP | EPOLLERR)) {
+            mark_source_down(fd);            // §6 failure matrix takes over
+            continue;
+        }
+        if (fd == tick_timerfd)      run_control_step();   // 20 Hz PID tick
+        else                         drain_source(fd);     // read until EAGAIN
+    }
+}
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 整門課在這裡被串起來</div>
+        <p>這一個迴圈用上了第 01 章（fd + 部分讀取）、06 章（原始 termios 的 TTY）、08 章（epoll、邊緣觸發）、09 章（那個 UDP socket）、10 章（那個 CAN socket），以及 11 章（EINTR + 一個用來做確定性計時的 timerfd）。五章塌縮成約 30 行。<code>EPOLLHUP</code> 是你免費的斷線偵測器——裝置消失時核心會告訴你，所以你永遠不必輪詢（polling）去確認它還活著。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="bandwidth-budget"><span class="sec-no">5</span>跨匯流排的頻寬預算</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>它在物理上塞得下嗎？</small></div>
+      <p>在你信任這套架構之前，先證明資料<em>塞得下</em>這些線路。每個來源有一個負載（payload）速率；每條匯流排有一個可用上限（永遠低於線路速率——協定有額外開銷，WiFi 還要加上爭用（contention））。規則很簡單：</p>
+      <div class="math-box">$$ \text{utilization}_\text{bus} = \frac{\sum_i R_i^{\,\text{payload}} \cdot (1+h_i)}{B_\text{usable}} \;&lt;\; 1 $$</div>
+      <p>其中 $R_i$ 是某條串流的負載速率，$h_i$ 是它的封裝（framing）開銷比例，$B_\text{usable}$ 是這條匯流排現實可達的吞吐量。拿光達來說：一台旋轉式單元以 $6.0\times10^{5}$ 點／秒、每點 16 位元組發出，於是</p>
+      <div class="math-box">$$ R_\text{lidar} = 6.0\times10^{5}\times16 = 9.6\times10^{6}\ \text{B/s} = 76.8\ \text{Mbit/s} $$</div>
+      <p>在一條 1000BASE-T 連線上、約 118 MB/s 可用，那是 $9.6/118 \approx 8\%$ 使用率——綽綽有餘。現在把整艘船跑一遍：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>來源</th><th>負載速率</th><th>匯流排</th><th>匯流排可用</th><th>使用率</th></tr></thead>
+        <tbody>
+          <tr><td>光達 @ 600 k 點/s</td><td>76.8 Mbit/s</td><td>乙太網（1 Gbit/s）</td><td>約 944 Mbit/s</td><td>約 8%</td></tr>
+          <tr><td>GPS @ 10 Hz, 80 B</td><td>約 6.4 kbit/s</td><td>USB 序列（115200）</td><td>約 92 kbit/s</td><td>約 7%</td></tr>
+          <tr><td>IMU @ 200 Hz, 40 B</td><td>約 64 kbit/s</td><td>USB 序列（921600）</td><td>約 737 kbit/s</td><td>約 9%</td></tr>
+          <tr><td>推進器 + N2K</td><td>約 80 kbit/s</td><td>CAN（500 kbit/s）</td><td>約 250 kbit/s</td><td>約 32%</td></tr>
+          <tr><td>遙測回傳岸基</td><td>約 200 kbit/s</td><td>WiFi（共享）</td><td>約 20 Mbit/s 實測</td><td>約 1%</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——WiFi 的天花板若你拿來平均，那就是個謊</div>
+        <p>WiFi 的「20 Mbit/s 實測」是一個<em>整體、被爭用</em>的數字，帶著肥厚的抖動（第 09 章）。在 1% 的平均值下，當媒介忙起來時你照樣會看到 200 ms 的停頓。這正是為什麼遙測走 WiFi、光達不走——也正是為什麼 §6 的故障矩陣假設 WiFi 連線可能一次消失好幾秒。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="failure-matrix"><span class="sec-no">6</span>健康監測與故障矩陣</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>在故障發生前就規劃好它</small></div>
+      <p>在海上，每一條連線<em>都會</em>故障。穩健的 I/O（第 11 章）不是一個 try／catch；它是事先決定好的、每個來源各自的策略。核心很便宜地把故障訊號交到你手上——消失的 USB 裝置會給 <code>EPOLLHUP</code>、死掉的 socket 會讓 <code>recv()</code> 逾時、CAN 的錯誤計數器會越界進入 bus-off——而你的工作，是把每一個訊號對應到一個降級模式（degraded mode），讓船保持安全，而不是把整個堆疊搞當。</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>故障</th><th>你如何偵測它</th><th>核心／驅動的行為</th><th>架構上的應對</th></tr></thead>
+        <tbody>
+          <tr><td>WiFi 中斷（控制連線）</td><td>持續 <em>T</em> 沒有心跳；<code>send()</code> 的 EAGAIN 越堆越多</td><td>Socket 保持開啟；封包被默默丟棄</td><td>失效安全（failsafe）：定點停留／盤旋，長時間斷線就切掉推力，繼續記錄</td></tr>
+          <tr><td>USB GPS／IMU 拔除</td><td>fd 上出現 <code>EPOLLHUP</code>；<code>read()</code> 回傳 0 / <code>ENODEV</code></td><td>chardev 消失，重新插上後 udev 重新建立 <code>/dev/gps</code></td><td>標記為陳舊，退回航位推算（dead-reckoning，IMU）或最後定位；udev 重新加入時重新開啟</td></tr>
+          <tr><td>CAN bus-off</td><td>Netlink 狀態 = <code>BUS_OFF</code>；TX 錯誤計數器 &gt; 255</td><td>控制器停止 TX/RX 直到重置</td><td><code>restart-ms 100</code> 自動恢復；若反覆 bus-off，命令推力歸中</td></tr>
+          <tr><td>乙太網連結斷開（光達）</td><td><code>SIOCGIFFLAGS</code> 失去 <code>IFF_RUNNING</code>；持續 <em>T</em> 無 UDP</td><td>載波（carrier）遺失；socket 開著卻安靜無聲</td><td>把感知切換到最後一次良好掃描；發出警報；導航是降級，不是當機</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>一個會拒絕帶傷起飛的飛行前檢查</small></div>
+      <p>在你武裝推進器之前，跑一個飛行前檢查（pre-flight），斷言矩陣所依賴的每一條連線都在。要吵著失敗、要在碼頭上失敗——不要等到 2 公里外才失敗：</p>
+
+      <div class="codeblock">
+        <div class="code-head">preflight.sh <span class="lang">bash</span></div>
+<pre><code class="language-bash">#!/usr/bin/env bash
+set -euo pipefail
+fail=0
+check() { if eval "$2"; then echo "  OK  $1"; else echo "FAIL  $1"; fail=1; fi; }
+
+echo "== USV pre-flight =="
+check "GPS symlink present"   '[ -e /dev/gps ]'
+check "IMU symlink present"   '[ -e /dev/imu ]'
+check "can0 is UP"            '[ "$(cat /sys/class/net/can0/operstate)" = up ]'
+check "eth0 carrier (LiDAR)"  '[ "$(cat /sys/class/net/eth0/carrier)" = 1 ]'
+check "wlan0 has a route"     'ip route show default | grep -q wlan0'
+check "LiDAR answering"       'timeout 2 nc -uz 192.168.10.10 2368'
+# CAN traffic seen in 1 s? (Ch 10 candump)
+check "thruster CAN traffic"  'timeout 1 candump -n 1 can0 >/dev/null 2>&amp;1'
+
+[ "$fail" -eq 0 ] &amp;&amp; { echo "PRE-FLIGHT PASS"; exit 0; } \
+                  || { echo "PRE-FLIGHT FAIL — do not arm"; exit 1; }
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——健康狀態取自 <code>/sys</code> 與 <code>/proc</code>，不是用猜的</div>
+        <p>即時健康監測讀的就是你在第 02 章逛過的那幾個核心介面：<code>/sys/class/net/&lt;if&gt;/operstate</code> 與 <code>carrier</code> 看連結狀態、<code>/sys/class/net/can0/can/state</code> 看 CAN 錯誤狀態、<code>/proc/interrupts</code> 確認光達網卡的 IRQ 真的有在觸發（第 07 章）。沒有啟發式臆測——核心早就知道真相，而且把它攤成檔案。你的監測器，就是一個對虛擬檔案（virtual file）做廉價 <code>read()</code> 的迴圈。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="whole-course-recap"><span class="sec-no">7</span>整門課，凝在一個畫面裡</h2>
+      <p>退一步看。總整理其實就是把這門課照著依賴順序重讀一遍。每一章都是位元組從水面走到你的控制迴圈、再走回推進器這條路上所經過的一層：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>章</th><th>路徑中的這一層</th><th>它替 USV 貢獻了什麼</th></tr></thead>
+        <tbody>
+          <tr><td>01</td><td>系統呼叫邊界與 fd</td><td>每個裝置都是一個你會去 <code>read()</code> 的整數</td></tr>
+          <tr><td>02</td><td><code>/dev</code> 與 sysfs</td><td>找到並審視裝置；讀取健康屬性</td></tr>
+          <tr><td>03</td><td>udev 命名</td><td><code>/dev/gps</code>、<code>/dev/imu</code> 撐得過重新插拔</td></tr>
+          <tr><td>04</td><td>驅動、模組、韌體</td><td>WiFi 的 <code>moal</code> + blob 真的綁定上去</td></tr>
+          <tr><td>05</td><td>匯流排、列舉、裝置樹</td><td>SDIO/CAN 被宣告；USB/PCIe 被發現</td></tr>
+          <tr><td>06</td><td>序列與 TTY 層</td><td>GPS/IMU 跑在原始模式，沒有延遲</td></tr>
+          <tr><td>07</td><td>中斷（interrupt）、DMA、MMIO</td><td>光達的 DMA 讓 CPU 空出來做控制</td></tr>
+          <tr><td>08</td><td>多工與 epoll</td><td>一個執行緒讀盡每一個來源</td></tr>
+          <tr><td>09</td><td>網路 I/O</td><td>WiFi=控制、乙太網=感測器、不偷路由</td></tr>
+          <tr><td>10</td><td>CAN 與 SocketCAN</td><td>推進器與 N2K 化為一個 socket；bus-off 恢復</td></tr>
+          <tr><td>11</td><td>即時與穩健 I/O</td><td>20 Hz 期限達成；斷線即失效安全</td></tr>
+          <tr><td>12</td><td>這份綜合</td><td>整艘船，會開機、能存活</td></tr>
+        </tbody>
+      </table></div>
+
+      <p>如果你能憑記憶畫出 §1 的地圖，並且能對任何一片葉子說清楚：它坐在哪條匯流排上、為什麼坐在那裡、什麼驅動綁定它、它變成什麼 fd、它故障時會發生什麼——那你就懂了機器人的 Linux I/O。那就是整門課。</p>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>換你了</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io12-role-assignment">
+        <div class="ex-head"><span class="badge">Q1</span> 介面角色指派</div>
+        <div class="ex-q">你要加一台 4K 船首相機，把約 30 Mbit/s 的 H.264 串流給操作員。依照我們指派的角色，該由哪個介面來載送它？</div>
+        <ul class="ex-options">
+          <li data-correct="false">WiFi（<code>wlan0</code>）——它是通往操作員的連線，所以把影像放那裡。</li>
+          <li data-correct="true">在船上走乙太網（<code>eth0</code>），任何 WiFi 跳接之前先轉碼／抽稀——沉重媒體屬於全雙工的交換式連線，絕不能以原始形式放上共享的 WiFi 媒介。</li>
+          <li data-correct="false">CAN（<code>can0</code>）——它本來就是裝置的場域匯流排。</li>
+          <li data-correct="false">USB 序列（<code>/dev/cam</code>）——給它一個穩定的 udev 名稱然後串流出去。</li>
+        </ul>
+        <div class="ex-explain">30 Mbit/s 超過 WiFi 現實的爭用上限（約 20 Mbit/s），會把控制連線餓死。沉重媒體在船上要走乙太網；只有經過大幅壓縮、限速的預覽才應該碰 WiFi。CAN 頂多到 500 kbit/s、USB 序列 &lt;1 Mbit/s——兩者都差了好幾個數量級。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io12-lidar-budget" data-answer="76.8" data-tol="0.5">
+        <div class="ex-head"><span class="badge">Q2</span> 算出光達的匯流排負載</div>
+        <div class="ex-q">光達每秒發出 $6.0\times10^{5}$ 個點，每點 16 位元組（僅負載）。它的負載吞吐量是多少 <strong>Mbit/s</strong>？（提示：bytes/s × 8，再 ÷ $10^{6}$。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">Mbit/s</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$6.0\times10^{5}\times16 = 9.6\times10^{6}$ B/s。$\times 8 = 7.68\times10^{7}$ bit/s $= 76.8$ Mbit/s。在一條 1 Gbit/s 連線上（扣掉封裝後約 944 Mbit/s 可用）那是約 8% 使用率——這正是為什麼這條串流走乙太網、而在 WiFi 上根本不可能。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io12-can-unit">
+        <div class="ex-head"><span class="badge">Q3</span> 動手做——一個 systemd unit + 飛行前閘門</div>
+        <div class="ex-q">替 <code>sensor-manager</code> 寫一個 systemd unit，要做到：（a）只在 WiFi 連線真的可路由之後才啟動，（b）要求 <code>can0</code> 先被拉起來，（c）除非 <code>preflight.sh</code> 以 0 結束否則拒絕啟動。然後說明為什麼 <code>Wants=network-online.target</code> 很重要。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">用 <code>After=</code> 做排序、<code>Requires=</code>／<code>Wants=</code> 做依賴、<code>ExecStartPre=</code> 做那道閘門。記得單靠 <code>After</code> 永遠不會<em>等</em>網路——你還必須 <code>Wants</code> 那個 wait-online target。</div></details>
+        <details class="ex-acc"><summary>看一個解答</summary><div class="acc-body">
+          <div class="codeblock"><div class="code-head">/etc/systemd/system/sensor-manager.service <span class="lang">bash</span></div>
+<pre><code class="language-bash">[Unit]
+Description=USV unified sensor-manager (epoll loop)
+# Ordering: only after a routable network AND can0 is up
+After=network-online.target can0.service
+Wants=network-online.target        # pulls in systemd-networkd-wait-online
+Requires=can0.service              # if CAN fails to come up, do not start
+
+[Service]
+Type=simple
+# Pre-flight gate: nonzero exit here blocks the service from starting
+ExecStartPre=/usr/local/bin/preflight.sh
+ExecStart=/usr/local/bin/sensor-manager
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+</code></pre></div>
+          <p><strong>為什麼要 <code>Wants=network-online.target</code>：</strong><code>After=network-online.target</code> 只是把這個 unit 排在那個 target 達成<em>之後</em>，但它並不會讓那個 target 被達成。那個 target 只有在某個 <code>Wants</code>／<code>Requires</code> 它的東西把它拉進開機交易（boot transaction）時才會被拉進來（這又會啟動 <code>systemd-networkd-wait-online.service</code>，也就是真正會阻塞到某張介面起來為止的那個東西）。少了 <code>Wants</code>，<code>network-online.target</code> 可能在 WiFi 還在連線（associating）時就瞬間達成，sensor-manager 就啟動了，它在 <code>wlan0</code> 上的 <code>connect()</code> 失敗，於是你就拿到了那個經典的「手動就好好的、開機就壞掉」。那道 <code>ExecStartPre</code> 閘門則是同一條保險帶外的另一道：就算每一個依賴都滿足了，一條故障的實體連結（沒有 GPS 符號連結、光達載波掛了、沒有 CAN 流量）會以非零結束，systemd 便拒絕啟動，讓推進器保持解除武裝。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章回顧</div>
+        <p>機器人的 I/O 就是一張資料流圖：每個來源都對應到 實體埠 → 匯流排 → 驅動 → fd。依介面的本性去指派——WiFi=控制/遙測、乙太網=沉重感測器、USB/序列=低速率配 udev 名稱、CAN=致動器——而且永遠別讓感測器網卡偷走預設路由。系統初始化鏈以持久設定的形式活在磁碟上：裝置樹 + 韌體 + udev 規則 + netplan + 受 <code>network-online.target</code> 與一個 <code>can0</code> unit 把關的有序 systemd unit。一個 epoll 迴圈讀盡每一個 fd，並從一個 timerfd 驅動 20 Hz 的節拍，把第 01、06、08、09、10、11 章綜合在一起。證明頻寬預算塞得下每一條匯流排，把每一種故障（WiFi 中斷、USB 拔除、CAN bus-off、連結斷開）對應到一個事先規劃好的降級模式，並把起飛擋在一個直接從 <code>/sys</code> 讀取真相的飛行前檢查後面。憑記憶畫出 §1 的地圖，你就擁有了整門課。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

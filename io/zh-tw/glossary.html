@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>術語表 — 機器人的 Linux I/O</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="glossary">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · 術語表</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · 參考資料</div>
+        <h1>術語表 <span style="opacity:.7">/ Glossary</span></h1>
+        <p>一頁裝下整門課的所有術語，雙語對照。這是一張查詢表，不是一堂課——面試前掃一眼，當核心日誌（kernel log）丟給你一個陌生字時用它查，或者從頭讀到尾一次，看看整個堆疊（stack）是怎麼拼起來的。每個術語都附上英文名稱、你在深圳實驗室會聽到的中文說法，以及一句精煉到凌晨兩點在船上也派得上用場的定義。貫穿整門課的範例——也是這些術語多半是在它身上學會的裝置——就是一艘無人水面載具（USV）的大腦：<strong>Jetson AGX Orin</strong>。</p>
+        <div class="meta"><span>📚 參考資料</span><span>🌐 EN / 中文</span><span>🔎 6 組 · 60+ 術語</span></div>
+      </section>
+
+      <p>下面這個堆疊是整門課的脊椎。本術語表裡的每個詞都落在其中某一層——當一個字讓你困惑時，先問自己：<em>它屬於哪一個方塊？</em></p>
+
+      <div class="mermaid">
+flowchart TB
+    APP["你的程式碼<br/>(ROS 2 節點)"] -->|"syscall: read/write/ioctl"| VFS["VFS<br/>一切皆檔案"]
+    VFS --> DRV["裝置驅動<br/>字元 / 區塊 / 網路"]
+    DRV --> BUS["匯流排<br/>PCIe · USB · I2C · SPI · SDIO · CAN"]
+    BUS --> HW["硬體<br/>感測器 · 網卡 · 致動器"]
+    DRV -.->|"sysfs / procfs"| OBS["可觀測性<br/>/sys · /proc"]
+    HW -.->|"中斷 / DMA"| DRV
+</div>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="core-io"><span class="sec-no">1</span>核心 I/O <span style="opacity:.6;font-weight:400">Core I/O</span></h2>
+      <p>最底層的基石：你的程式與核心（kernel）之間的邊界，以及那個讓其餘一切都掛在上面的抽象——檔案描述子（file descriptor）。這些若是模糊不清，上面的東西就都說不通了。</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語</th><th>中文</th><th>一句話定義</th></tr></thead>
+        <tbody>
+          <tr><td><strong>System call (syscall)</strong></td><td>系統呼叫</td><td>從使用者空間（user space）進入核心空間（kernel space）的受控門戶；CPU 觸發陷阱（trap）、切換特權等級、執行核心程式碼、再返回。<code>read</code>、<code>write</code>、<code>ioctl</code> 都是系統呼叫。</td></tr>
+          <tr><td><strong>User space / kernel space</strong></td><td>使用者空間 / 核心空間</td><td>兩個特權環（ring）。你的行程（process）以無特權身分執行；只有核心能碰硬體。系統呼叫是唯一合法的跨越方式。</td></tr>
+          <tr><td><strong>File descriptor (fd)</strong></td><td>檔案描述子</td><td>一個小的非負整數，當作你行程的開啟檔案表（open-file table）索引。<code>0/1/2</code> 是 stdin/stdout/stderr；你每開啟一個東西就拿到下一個可用的編號。</td></tr>
+          <tr><td><strong>VFS (Virtual File System)</strong></td><td>虛擬檔案系統（VFS）</td><td>讓檔案、socket、裝置與管線（pipe）全都回應同一套 <code>read</code>/<code>write</code>/<code>close</code> API 的核心層——也就是「一切皆檔案」背後的機制。</td></tr>
+          <tr><td><strong>inode</strong></td><td>索引節點（inode）</td><td>一個檔案系統物件中繼資料（metadata）的磁碟（或記憶體）紀錄——型別、權限，以及若是裝置節點，還有主／次編號（major/minor）這一對。它不是名字；名字住在目錄裡。</td></tr>
+          <tr><td><strong>Blocking I/O</strong></td><td>阻塞 I/O</td><td>會讓你的執行緒（thread）睡著、直到資料到來才醒的 <code>read()</code>。簡單，但一個慢裝置就能讓整條執行緒卡死。</td></tr>
+          <tr><td><strong>Non-blocking I/O</strong></td><td>非阻塞 I/O</td><td>用 <code>O_NONBLOCK</code> 開啟；沒資料時 <code>read()</code> 不睡覺，而是立刻回傳 <code>-1</code> 並帶有 <code>errno == EAGAIN</code>。這是事件迴圈（event loop）的前提。</td></tr>
+          <tr><td><strong>Partial read / short read</strong></td><td>部分讀取</td><td><code>read()</code> 可能回傳比你要的還少的位元組——這不是錯誤。穩健的程式碼會迴圈讀取，直到湊齊一則完整訊息或碰到 EOF。</td></tr>
+          <tr><td><strong>Buffering (stdio)</strong></td><td>緩衝（buffering）</td><td>C 函式庫把位元組囤在使用者空間的緩衝區裡，再大塊大塊地刷出（flush），所以一次 <code>fwrite</code> ≠ 一次系統呼叫。對吞吐量（throughput）很好，但若你忘了 flush，對延遲（latency）就是致命傷。</td></tr>
+          <tr><td><strong>Raw / unbuffered I/O</strong></td><td>無緩衝 I/O</td><td>直接呼叫 <code>read</code>/<code>write</code>——一次呼叫一次系統呼叫，沒有函式庫囤積。當你要讀一個 200 Hz 感測器、而資料過時就是 bug 時，這正是你要的。</td></tr>
+          <tr><td><strong>Page cache</strong></td><td>頁快取（page cache）</td><td>核心對檔案／區塊資料的 RAM 快取。對檔案的 <code>write()</code> 會先落在這裡，稍後才刷到媒體上——很快，但在 <code>fsync()</code> 之前這些位元組並不持久（durable）。</td></tr>
+          <tr><td><strong>errno</strong></td><td>錯誤碼（errno）</td><td>失敗的系統呼叫會設定的一個執行緒區域整數，用來說明<em>為什麼</em>失敗。<code>EINTR</code>、<code>EAGAIN</code>、<code>ENODEV</code> 是你在機器人上會處理到的幾個。</td></tr>
+          <tr><td><strong>EINTR</strong></td><td>系統呼叫被中斷</td><td>「Interrupted system call」——系統呼叫進行到一半，有個訊號（signal）來了。不是真正的失敗；重試（retry）這次呼叫即可。</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 你會反覆回來查的攤提公式</div>
+        <p>每次系統呼叫都有一筆固定開銷（陷阱＋特權切換＋返回），記作 $C_s \approx 1\text{–}3\,\mu\text{s}$。如果你每次呼叫讀 $B$ 個位元組、每位元組成本為 $c_b$，那麼有效速率是</p>
+        <div class="math-box">$$ R_\text{eff} = \frac{B}{C_s + B\,c_b} \xrightarrow{B \to \infty} \frac{1}{c_b} $$</div>
+        <p>小量讀取把時間全花在 $C_s$ 上；大量讀取則把它攤提掉。光這一個事實，就是 stdio 要緩衝、你要批次讀感測器、以及 <code>io_uring</code> 之所以存在的<em>原因</em>。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="devices-drivers"><span class="sec-no">2</span>裝置與驅動 <span style="opacity:.6;font-weight:400">Devices &amp; drivers</span></h2>
+      <p>一塊矽晶片如何變成一個你能 <code>open()</code> 的檔案。驅動（driver）是翻譯官；<code>/dev</code> 是電話簿；<code>/sys</code> 是即時呈現有什麼被插上的活地圖。</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語</th><th>中文</th><th>一句話定義</th></tr></thead>
+        <tbody>
+          <tr><td><strong>/dev</strong></td><td>裝置目錄</td><td>裝置節點（device node）的目錄。每個節點是一個名字，攜帶著一組（型別、主編號、次編號）三元組，把 <code>open()</code> 路由到某個驅動。開機時由 <code>devtmpfs</code> 填入。</td></tr>
+          <tr><td><strong>sysfs (/sys)</strong></td><td>系統檔案系統</td><td>一個常駐 RAM 的檔案系統，把核心的裝置模型攤成可瀏覽的檔案。<code>cat</code> 一個屬性可讀出一個近似暫存器的值；<code>echo</code> 進去則可戳硬體。</td></tr>
+          <tr><td><strong>procfs (/proc)</strong></td><td>行程檔案系統</td><td>sysfs 的姊妹，呈現行程與核心狀態——<code>/proc/interrupts</code>、<code>/proc/cpuinfo</code>、<code>/proc/PID/fd</code>。</td></tr>
+          <tr><td><strong>Character device</strong></td><td>字元裝置</td><td>位元組串流裝置——UART、I²C 匯流排、GPIO、相機。你和驅動之間沒有頁快取。在 <code>ls -l</code> 裡顯示為 <code>c</code>。</td></tr>
+          <tr><td><strong>Block device</strong></td><td>區塊裝置</td><td>固定區塊、隨機存取、有快取的裝置——eMMC、NVMe、SD 卡。走區塊層（block layer）與頁快取。顯示為 <code>b</code>。</td></tr>
+          <tr><td><strong>Major / minor number</strong></td><td>主設備號 / 次設備號</td><td>裝置節點裡的兩個整數。主編號選驅動；次編號選哪一個實例。一起打包進一個 <code>dev_t</code>。</td></tr>
+          <tr><td><strong>dev_t</strong></td><td>裝置號（dev_t）</td><td>那個 32 位元（現代：12 位元主 + 20 位元次）打包好的裝置編號。用 <code>MKDEV(maj, min)</code> 編碼；用 <code>MAJOR()</code>/<code>MINOR()</code> 解碼。</td></tr>
+          <tr><td><strong>devtmpfs</strong></td><td>裝置臨時檔案系統</td><td>核心開機時自動掛載在 <code>/dev</code> 上的 tmpfs，並在驅動註冊時預先填入節點，這樣 <code>/dev</code> 在 udev 跑起來之前就已存在。</td></tr>
+          <tr><td><strong>udev / udevd</strong></td><td>裝置管理器</td><td>監聽核心 <em>uevent</em> 並套用規則的使用者空間常駐程式——重新命名、建立符號連結、設定權限。你那個穩定的 <code>/dev/gps</code> 就是這樣來的。</td></tr>
+          <tr><td><strong>uevent</strong></td><td>裝置事件</td><td>核心在裝置 新增/移除/變更 時發出的一則 netlink 訊息。它是 udev 的輸入。</td></tr>
+          <tr><td><strong>Kernel module (.ko)</strong></td><td>核心模組</td><td>用 <code>modprobe</code>/<code>insmod</code> 在執行期載入運行中核心的驅動程式碼——免重開機。用 <code>modinfo</code> 檢視、用 <code>lsmod</code> 列出。</td></tr>
+          <tr><td><strong>In-tree / out-of-tree</strong></td><td>主線 / 樹外驅動</td><td>主線（in-tree）驅動隨核心原始碼一起出貨、一起重新編譯；樹外（out-of-tree）驅動（廠商 blob、DKMS）是單獨編譯的，核心升級時就壞了。</td></tr>
+          <tr><td><strong>Firmware</strong></td><td>韌體（firmware）</td><td>驅動在探測（probe）時透過 <code>request_firmware()</code> 從 <code>/lib/firmware</code> 載入<em>進</em>裝置（Wi-Fi、GPU）的一塊二進位 blob。檔案不見了在 <code>dmesg</code> 裡會顯示為錯誤 <code>-2</code>（ENOENT）。</td></tr>
+          <tr><td><strong>Device tree (DT)</strong></td><td>裝置樹（device tree）</td><td>一個資料結構（<code>.dts</code> → <code>.dtb</code>），向核心<em>描述</em>不可自我探索的硬體——位址、IRQ、<code>compatible</code> 字串——好讓正確的驅動綁定（bind）。在像 Orin 這種 ARM SoC 上不可或缺。</td></tr>
+          <tr><td><strong>ioctl</strong></td><td>裝置控制（ioctl）</td><td>專收那些塞不進 <code>read</code>/<code>write</code> 的裝置命令的萬用系統呼叫——設定序列埠鮑率、查詢 CAN 位元率、發出自訂命令。<code>ioctl(fd, REQUEST, &amp;arg)</code>。</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——USV 的 Wi-Fi 就是這整個第二欄</div>
+        <p>在 AGX Orin 上，板載 Wi-Fi 模組掛在 <strong>SDIO</strong>（一個不可自我探索的匯流排）上，所以它必須在<strong>裝置樹</strong>裡被<em>宣告</em>；它的<strong>樹外</strong>廠商<strong>核心模組</strong>會從 <code>/lib/firmware</code> 載入一塊<strong>韌體</strong> blob；接著 <strong>udev</strong> 給最終的網路介面一個可預期的名字。這句話裡的每個術語都是上面表格的一列——而只要其中任一步驟失敗，<code>dmesg</code> 都會告訴你是哪一步。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="buses"><span class="sec-no">3</span>匯流排與列舉 <span style="opacity:.6;font-weight:400">Buses &amp; enumeration</span></h2>
+      <p>硬體實際上拿來對話的那些線。最有用的一個區別：會<em>自己找到自己裝置</em>的匯流排（PCIe、USB），對上你必須透過裝置樹<em>告訴核心那裡有什麼</em>的匯流排（I²C、SPI、SDIO）。</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語</th><th>中文</th><th>一句話定義</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Enumeration</strong></td><td>列舉（enumeration）</td><td>發現匯流排上有什麼、並指派位址的過程。PCIe 與 USB 自動列舉；I²C/SPI/SDIO 裝置則必須在裝置樹裡被宣告。</td></tr>
+          <tr><td><strong>PCIe</strong></td><td>PCIe 高速匯流排</td><td>給 NVMe、網卡、GPU 用的高速、交換式、點對點序列匯流排。會自我列舉；用 <code>lspci -t</code> 檢視拓樸。</td></tr>
+          <tr><td><strong>BDF (Bus:Device.Function)</strong></td><td>PCIe 位址</td><td>一個 PCIe 裝置的位址，例如 <code>0000:05:00.0</code> = domain:bus:device.function。也就是 <code>lspci</code> 印出來的那個代號。</td></tr>
+          <tr><td><strong>BAR (Base Address Register)</strong></td><td>基址暫存器</td><td>一個 PCIe 設定空間（config-space）暫存器，告訴作業系統要把裝置的 MMIO 視窗映射到實體記憶體的哪裡。</td></tr>
+          <tr><td><strong>USB</strong></td><td>通用序列匯流排</td><td>可熱插拔、樹狀拓樸、會自我列舉的匯流排。裝置透過<em>描述符（descriptor）</em>自我描述；用 <code>lsusb -t</code> 看那棵樹。</td></tr>
+          <tr><td><strong>USB descriptor</strong></td><td>USB 描述符</td><td>USB 裝置插上時回報的自我描述資料（idVendor、idProduct、序號、端點 endpoint）。udev 規則就比對這些。</td></tr>
+          <tr><td><strong>I²C</strong></td><td>I²C 匯流排</td><td>給低速率感測器用的兩線（SDA/SCL）多點匯流排。7 位元定址 → 128 個位址（少數保留）。必須在 DT 裡宣告。</td></tr>
+          <tr><td><strong>SPI</strong></td><td>SPI 匯流排</td><td>四線（MOSI/MISO/SCLK/CS）全雙工匯流排；比 I²C 快，以晶片選擇（chip-select）線、而非位址來定址。在 DT 裡宣告。</td></tr>
+          <tr><td><strong>SDIO</strong></td><td>SDIO 匯流排</td><td>把 SD 卡的電氣匯流排挪去接 I/O 周邊（最著名的是 Wi-Fi）。不可自我探索——必須在裝置樹裡宣告。</td></tr>
+          <tr><td><strong>MMIO</strong></td><td>記憶體映射 I/O</td><td>Memory-Mapped I/O：裝置暫存器以實體記憶體位址的樣子出現，所以一次 CPU load/store 就讀／寫一個暫存器。從使用者空間透過 <code>mmap</code> 與 <code>volatile</code> 存取。</td></tr>
+          <tr><td><strong>compatible string</strong></td><td>相容性標識</td><td>那個 DT 屬性（例如 <code>"ti,tmp102"</code>），用來標明一個裝置的型別，好讓核心挑出相符的驅動。</td></tr>
+          <tr><td><strong>Device tree overlay</strong></td><td>裝置樹覆蓋</td><td>疊加在基底 DT 之上的一片補丁（<code>.dtbo</code>），用來啟用一支排針或掛上一個感測器，而不必重新編譯整棵樹——例如透過 <code>jetson-io</code>。</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 為什麼「這匯流排夠快嗎？」只是一個比較</div>
+        <p>挑匯流排的方法，就是拿你所需的吞吐量去跟它的上限比。I²C 標準模式頂在 $100\,\text{kbit/s}$ 附近（快速模式 $400\,\text{k}$）；單一條 PCIe Gen4 通道（lane）在 128b/130b 編碼後約可承載 $1.97\,\text{GB/s}$ 可用頻寬。一顆 16 線束的光達（lidar），以 $1\,\text{Mpoint/s} \times 16\,\text{B/point}$ 計，需要</p>
+        <div class="math-box">$$ R_\text{req} = 1{\times}10^6 \cdot 16 = 16\,\text{MB/s} $$</div>
+        <p>——在 I²C 上荒謬地不可能，在 PCIe 或 Gigabit 乙太網上則輕而易舉。挑一條匯流排，就是逐裝置算這一條不等式 $R_\text{req} \le R_\text{bus}$，就這樣。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="data-movement"><span class="sec-no">4</span>資料搬運與多路複用 <span style="opacity:.6;font-weight:400">Data movement &amp; multiplexing</span></h2>
+      <p>兩個問題：位元組<em>如何</em>實際從裝置進到 RAM（中斷對上 DMA），以及一條執行緒如何不靠忙等（busy-wait）就同時盯著<em>許多</em>裝置（epoll、io_uring）。</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語</th><th>中文</th><th>一句話定義</th></tr></thead>
+        <tbody>
+          <tr><td><strong>PIO (Programmed I/O)</strong></td><td>程式控制 I/O</td><td>CPU 親自一個暫存器一個暫存器地把每個位元組搬過去。簡單，但傳輸期間會把一顆核心燒滿。</td></tr>
+          <tr><td><strong>Interrupt</strong></td><td>中斷（interrupt）</td><td>一個硬體訊號，把 CPU 從手邊工作硬扯開去執行一段<em>中斷服務程式（ISR）</em>——「資料好了，快來處理」，而不是用輪詢（polling）去問。</td></tr>
+          <tr><td><strong>IRQ (Interrupt Request line)</strong></td><td>中斷請求</td><td>裝置用來拉起一個中斷的那條編號線路。計數住在 <code>/proc/interrupts</code> 裡。</td></tr>
+          <tr><td><strong>ISR / top half / bottom half</strong></td><td>中斷服務程式 / 上半部 / 下半部</td><td>處理器（handler）。<em>上半部</em>在關中斷的情況下快速跑完；繁重工作則延後給一個可以睡覺的<em>下半部</em>（softirq/tasklet/執行緒化 IRQ）。</td></tr>
+          <tr><td><strong>DMA</strong></td><td>直接記憶體存取</td><td>Direct Memory Access：一個專屬引擎<em>不經 CPU</em> 就把位元組在裝置與 RAM 之間搬移，CPU 只在整塊搞定時收到一個中斷。這是在重 I/O 下仍讓控制迴圈（control loop）保持反應靈敏的關鍵。</td></tr>
+          <tr><td><strong>Coherent vs. streaming DMA</strong></td><td>一致性 / 串流式 DMA</td><td>一致性（coherent）緩衝區會自動維持快取一致（小、長壽）；串流式（streaming）緩衝區則逐次傳輸映射、並做明確的快取同步（大、一次性）。</td></tr>
+          <tr><td><strong>IRQ affinity</strong></td><td>中斷親和性</td><td>透過 <code>/proc/irq/N/smp_affinity</code> 把一個 IRQ 釘在特定 CPU 上，這樣中斷風暴就不會落在跑你即時迴圈的那顆核心上。</td></tr>
+          <tr><td><strong>Coalescing</strong></td><td>中斷合併</td><td>把許多事件併成一個中斷（例如網卡 rx-coalesce），在高速率下拿一點點延遲去換取大幅降低的 CPU 開銷。</td></tr>
+          <tr><td><strong>select / poll</strong></td><td>多路複用（select/poll）</td><td>一次等待許多 fd 的舊系統呼叫。成本隨被監看的 fd 數量呈 $O(n)$ 成長——它們每次呼叫都重掃整個集合。</td></tr>
+          <tr><td><strong>epoll</strong></td><td>epoll 事件機制</td><td>Linux 可擴展的就緒（readiness）API：fd 只註冊一次，之後每次等待只花 $O(\text{ready})$ 而非 $O(n)$。支援水平觸發（level-triggered）與邊沿觸發（edge-triggered）模式。它是感測器管理器的骨幹。</td></tr>
+          <tr><td><strong>Level vs. edge triggered</strong></td><td>水平 / 邊沿觸發</td><td>水平觸發只要還有資料就持續回報該 fd；邊沿觸發只在<em>轉變</em>為可讀的那一刻回報，所以你必須把它徹底排空（迴圈讀到 <code>EAGAIN</code> 為止）。</td></tr>
+          <tr><td><strong>io_uring</strong></td><td>io_uring 非同步 I/O</td><td>現代的共享記憶體環（提交＋完成兩個佇列），用於真正的非同步 I/O，每次操作幾乎零系統呼叫——多路複用的高階選擇。</td></tr>
+          <tr><td><strong>C10k problem</strong></td><td>C10k 問題</td><td>同時服務一萬條連線這個經典挑戰；也是「每 fd 一執行緒」輸給事件迴圈的原因。</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 邊沿觸發的自爆陷阱</div>
+        <p>用邊沿觸發模式的 epoll，如果你每個事件只讀一次，就會把位元組留在緩衝區裡、再也不會被喚醒——那個 fd 看起來像是死了。約定是：每次被喚醒時，<code>read()</code> 要迴圈讀到拿到 <code>EAGAIN</code> 為止。一半的「我的感測器隨機卡死」bug 都是這個。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="networking"><span class="sec-no">5</span>網路 <span style="opacity:.6;font-weight:400">Networking</span></h2>
+      <p>從網卡到 socket fd。最常咬機器人的兩個概念：路由表（routing table）（以及誰偷走了預設路由），還有頻寬時延積（BDP）（多少資料正「在途」）。</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語</th><th>中文</th><th>一句話定義</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Socket</strong></td><td>套接字（socket）</td><td>一個會說網路的檔案描述子。<code>socket()</code> 回傳一個 fd，你接著就像對其他任何 fd 一樣對它 <code>read</code>/<code>write</code>——把網路當成檔案。</td></tr>
+          <tr><td><strong>TCP vs. UDP</strong></td><td>TCP / UDP</td><td>TCP 是可靠、有序的串流——代價是重傳與隊頭阻塞（head-of-line blocking）。UDP 是發了就不管的資料包（datagram）——對感測器資料完美，因為一個新鮮封包勝過一個重送的陳舊封包。</td></tr>
+          <tr><td><strong>NIC</strong></td><td>網卡</td><td>Network Interface Controller——硬體本身。核心驅動透過中斷／DMA 與 NAPI 輪詢，把收到的訊框（frame）往上交給協定堆疊。</td></tr>
+          <tr><td><strong>Routing table</strong></td><td>路由表</td><td>決定一個封包該從哪個介面送出去的規則，以最長前綴優先（longest-prefix-first）比對。用 <code>ip route</code> 檢視。</td></tr>
+          <tr><td><strong>Default route</strong></td><td>預設路由</td><td>那條萬用條目（<code>0.0.0.0/0</code>），用於任何沒有特定路由相符的目的地。你應該只有確切一條值得信任的。</td></tr>
+          <tr><td><strong>Default-route theft</strong></td><td>預設路由搶占</td><td>當第二個介面（剛接上的 Wi-Fi）裝上自己的預設路由、悄悄偷走所有出口（egress）流量時——也就是經典的「我一插上乙太網路 SSH 就斷了」bug。用路由度量值（metric）來修。</td></tr>
+          <tr><td><strong>Metric</strong></td><td>路由度量值</td><td>一條路由上的優先級數字；越低越優先。你就是靠它讓 Wi-Fi 成為偏好的預設路由、乙太網路成為只走感測器的路徑。</td></tr>
+          <tr><td><strong>MTU</strong></td><td>最大傳輸單元</td><td>Maximum Transmission Unit——一條鏈路在一個訊框裡承載的最大酬載（乙太網路預設 $1500\,\text{B}$）。超過它，封包就會被分片（fragment）或丟棄。</td></tr>
+          <tr><td><strong>BDP (Bandwidth-Delay Product)</strong></td><td>頻寬時延積（BDP）</td><td>頻寬 × 來回時間（RTT）＝ 一條鏈路上「在途」的位元組數；也是要把管道灌滿所需的最小 socket 緩衝區。</td></tr>
+          <tr><td><strong>SO_RCVBUF / SO_SNDBUF</strong></td><td>套接字緩衝區</td><td>調整核心收／送緩衝區大小的 socket 選項。太小會在高 BDP 鏈路上限制吞吐量；太大則招來緩衝膨脹（bufferbloat）。</td></tr>
+          <tr><td><strong>Bufferbloat</strong></td><td>緩衝膨脹</td><td>過大的緩衝區囤積封包，在負載下增加延遲——即使吞吐量看起來沒問題——對控制鏈路是致命的。</td></tr>
+          <tr><td><strong>Backpressure</strong></td><td>背壓（backpressure）</td><td>那個告訴快生產者放慢、好讓慢消費者跟得上的訊號（緩衝區滿、<code>EAGAIN</code>、TCP 視窗關閉）。</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> BDP，以及緩衝區為什麼要緊</div>
+        <p>一條鏈路在飛行途中能裝下的位元組數——也就是要灌滿它所需的 socket 緩衝區——是</p>
+        <div class="math-box">$$ \text{BDP} = \text{Bandwidth} \times \text{RTT} $$</div>
+        <p>一條 RTT 為 $20\,\text{ms}$ 的 $1\,\text{Gbit/s}$ 岸對 USV 鏈路，在途量為 $1{\times}10^9/8 \cdot 0.020 = 2.5\,\text{MB}$。如果 <code>SO_RCVBUF</code> 還是預設的 $\sim 200\,\text{kB}$，發送端就會卡著等 ACK，你永遠看不到線速（line rate）。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="can-realtime"><span class="sec-no">6</span>CAN 與即時 <span style="opacity:.6;font-weight:400">CAN &amp; real-time</span></h2>
+      <p>致動器匯流排，以及要讓一個控制迴圈<em>每一次</em>都趕上它的截止期限（deadline）需要付出什麼。即時（real-time）講的是最壞情況，從來不是平均值。</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>術語</th><th>中文</th><th>一句話定義</th></tr></thead>
+        <tbody>
+          <tr><td><strong>CAN</strong></td><td>CAN 匯流排</td><td>Controller Area Network——給致動器與儀器用的穩健、差動、多點匯流排。訊框攜帶一個 ID 與最多 8 個資料位元組（CAN-FD 為 64 個）。</td></tr>
+          <tr><td><strong>Arbitration</strong></td><td>仲裁（arbitration）</td><td>CAN 如何化解同時發送：數值上<em>最低</em>的 ID 那則訊息勝出（顯性位元 dominant 蓋過隱性位元 recessive）；輸的那方退讓並重試。ID 最低 = 優先級最高。</td></tr>
+          <tr><td><strong>Bit stuffing</strong></td><td>位元填充</td><td>在 5 個相同位元之後插入一個相反位元，好讓接收端保持時脈同步——這會讓最壞情況的訊框長度比標稱值長個幾位元。</td></tr>
+          <tr><td><strong>SocketCAN</strong></td><td>SocketCAN</td><td>Linux 把一個 CAN 介面當成網路 socket（<code>AF_CAN</code>）來看待的框架，於是你可以像對任何 fd 那樣 <code>read</code>/<code>write</code> CAN 訊框，並使用 <code>candump</code>/<code>cansend</code>。</td></tr>
+          <tr><td><strong>Sample point</strong></td><td>採樣點</td><td>控制器採樣電位所在的那個位元時間比例（通常 75–87.5%）。所有節點必須一致，否則就會出錯。</td></tr>
+          <tr><td><strong>Termination (60 Ω test)</strong></td><td>終端電阻</td><td>匯流排兩端各一顆 120 Ω 電阻；兩顆都裝上時，在斷電的匯流排上量 CAN-H/CAN-L 之間約讀到 ~60 Ω。終端電阻不對 = 反射 = 錯誤。</td></tr>
+          <tr><td><strong>Error counters / bus-off</strong></td><td>錯誤計數 / 總線關閉</td><td>每個節點都計數 TX/RX 錯誤；超過 255 它就進入<em>bus-off</em>，悄悄從匯流排上掉線，直到被重置。也就是「致動器不回應了」的症狀。</td></tr>
+          <tr><td><strong>restart-ms</strong></td><td>自動重啟間隔</td><td>那個 SocketCAN 選項（<code>ip link set can0 type can restart-ms 100</code>），在指定延遲後自動把一個 bus-off 介面救回來。</td></tr>
+          <tr><td><strong>CAN-FD</strong></td><td>CAN-FD</td><td>Flexible Data-rate CAN：最多 64 位元組酬載與更快的資料相位，在保留 CAN 仲裁機制的同時提供更高吞吐量。</td></tr>
+          <tr><td><strong>NMEA 2000</strong></td><td>NMEA 2000</td><td>架在 CAN 上、跑 $250\,\text{kbit/s}$ 的船用儀器協定——USV 上的 GPS、深度、風。</td></tr>
+          <tr><td><strong>Real-time</strong></td><td>即時</td><td>一個對<em>最壞情況</em>反應的保證，不是速度。一個 20 Hz 的迴圈，只要它<em>從不</em>錯過它的 $50\,\text{ms}$ 截止期限，它就是即時的——平均延遲無關緊要。</td></tr>
+          <tr><td><strong>Deadline</strong></td><td>截止期限</td><td>一個任務為了正確，最晚可以完成的時間。在硬即時（hard-real-time）系統裡錯過它就是失敗，不只是慢。</td></tr>
+          <tr><td><strong>Jitter</strong></td><td>抖動（jitter）</td><td>一個週期性任務實際耗時逐週期之間的變動。低平均＋高抖動照樣會炸掉截止期限。</td></tr>
+          <tr><td><strong>PREEMPT_RT</strong></td><td>即時核心補丁</td><td>讓幾乎所有核心程式碼都可被搶占（preemptible）的核心補丁集，把最壞情況的排程延遲從毫秒砍到微秒。</td></tr>
+          <tr><td><strong>SCHED_FIFO / rtprio</strong></td><td>即時排程 / 即時優先級</td><td>一種即時排程策略，讓一條執行緒在所有一般任務之前執行、直到它主動讓出（yield）——控制迴圈就是這樣準時拿到 CPU 的。</td></tr>
+          <tr><td><strong>mlockall</strong></td><td>鎖定記憶體</td><td>把一個行程的頁面鎖在 RAM 裡，這樣一個分頁錯誤（page fault）就絕不會在週期中途卡住即時迴圈。</td></tr>
+          <tr><td><strong>Watchdog</strong></td><td>看門狗（watchdog）</td><td>一個計時器，如果軟體沒有及時「踢」它就重置（或進入失效安全）系統——當迴圈卡死時的最後一道防線。</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——USV 的最壞情況預算</div>
+        <p>Orin 以 20 Hz 跑轉向 PID，所以截止期限是 $50\,\text{ms}$。平均迴圈時間是 $4\,\text{ms}$——沒有意義。重要的是最壞情況：一場 Wi-Fi <strong>IRQ</strong> 風暴落在迴圈的核心上、一個<strong>分頁錯誤</strong>、一個日誌 <code>fsync</code> 在阻塞。用 <strong>IRQ 親和性</strong>（把網卡移離迴圈的 CPU）、<strong>SCHED_FIFO</strong>、<strong>mlockall</strong>，以及一個會在迴圈真的錯過時把舵失效到中立位的<strong>看門狗</strong>，來修這份預算。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="quiz"><span class="sec-no">G</span>快速自我測驗 <span style="opacity:.6;font-weight:400">小測驗</span></h2>
+      <p>如果這四題你都覺得理所當然，那這份術語表就盡了它的責任。如果不是，連結到的那一層就是你該去看的地方。</p>
+
+      <div class="exercise" data-ex="quiz" data-id="ioG-arbitration">
+        <div class="ex-head"><span class="badge">Q1</span> CAN 仲裁</div>
+        <div class="ex-q">兩個 CAN 節點在同一瞬間開始發送——一個 ID 是 <code>0x0A0</code>，另一個是 <code>0x320</code>。哪則訊息贏得匯流排，另一則又會怎樣？</div>
+        <ul class="ex-options">
+          <li data-correct="true"><code>0x0A0</code> 勝出（ID 較低 = 優先級較高）；<code>0x320</code> 的發送端偵測到自己輸了，退讓並自動重試。</li>
+          <li data-correct="false"><code>0x320</code> 勝出，因為數字較大者有優先權；<code>0x0A0</code> 被丟棄。</li>
+          <li data-correct="false">兩者相撞並損毀；每個節點必須像乙太網路那樣等一段隨機退避（backoff）。</li>
+          <li data-correct="false">不論 ID 如何，先開始發送的那個節點勝出。</li>
+        </ul>
+        <div class="ex-explain">CAN 仲裁是非破壞性且基於優先級的：一個顯性位元（0）蓋過隱性位元（1），所以數值上<em>最低</em>的 ID 會逐位元勝出而毫無資料損失。輸的那方看到不符，立即停止，並在下一個匯流排閒置時重新仲裁。見 <a href="#can-realtime">§6 — 仲裁</a>。</div>
+      </div>
+
+      <div class="exercise" data-ex="quiz" data-id="ioG-bus-discovery">
+        <div class="ex-head"><span class="badge">Q2</span> 匯流排與裝置樹</div>
+        <div class="ex-q">下列哪一種匯流排，因為無法自己發現裝置，所以需要你在裝置樹裡<em>宣告</em>所接的裝置？</div>
+        <ul class="ex-options">
+          <li data-correct="false">PCIe——它會自我列舉，你從 <code>lspci</code> 讀出位址。</li>
+          <li data-correct="false">USB——裝置插上時回報描述符，核心自動比對驅動。</li>
+          <li data-correct="true">SDIO（以及 I²C/SPI）——不可自我探索，所以硬體必須在 DT 裡被描述，驅動才能綁定。</li>
+          <li data-correct="false">沒有——核心永遠會探測每條匯流排，自己把一切都找出來。</li>
+        </ul>
+        <div class="ex-explain">PCIe 與 USB 是<em>可列舉的</em>：匯流排協定讓主機能走遍它、並讀出每個裝置的身分。I²C、SPI 與 SDIO 沒有這種機制——沒有辦法可靠地問「0x48 位址上的是誰？」——所以核心要倚賴<strong>裝置樹</strong>才知道什麼接在哪裡、在哪個位置。這正是 Orin 的 SDIO Wi-Fi 必須在 DT 裡的原因。見 <a href="#buses">§3 — 列舉</a>。</div>
+      </div>
+
+      <div class="exercise" data-ex="quiz" data-id="ioG-epoll-trigger">
+        <div class="ex-head"><span class="badge">Q3</span> epoll 觸發</div>
+        <div class="ex-q">你用<strong>邊沿觸發</strong>模式的 epoll，而且每次喚醒只呼叫 <code>read()</code> 恰好一次。你的感測器明明還在發送，卻「隨機停止」送資料。為什麼？</div>
+        <ul class="ex-options">
+          <li data-correct="false">邊沿觸發模式有 bug，永遠不該拿來用在感測器上。</li>
+          <li data-correct="true">邊沿觸發只在轉變為可讀時觸發；殘留的位元組不會再次觸發，所以你必須迴圈 <code>read()</code> 到 <code>EAGAIN</code> 為止，把 fd 排空。</li>
+          <li data-correct="false">這個 fd 從來沒被註冊到 epoll；你得在每次讀取後重新加入它。</li>
+          <li data-correct="false">邊沿觸發模式下的 <code>read()</code> 回傳 0 個位元組，所以資料根本不會到。</li>
+        </ul>
+        <div class="ex-explain">邊沿觸發的 epoll 回報的是<em>邊沿</em>——一個 fd <em>變成</em>可讀的那一刻——而不是持續的水平狀態。如果你把位元組留著沒讀，就沒有新的邊沿，所以沒有新的喚醒，於是 fd 看起來像死了、而資料卻越堆越多。規則是：每個事件，迴圈 <code>read()</code> 到它回傳 <code>EAGAIN</code> 為止。見 <a href="#data-movement">§4 — 水平 / 邊沿觸發</a>。</div>
+      </div>
+
+      <div class="exercise" data-ex="quiz" data-id="ioG-realtime-metric">
+        <div class="ex-head"><span class="badge">Q4</span> 「即時」是什麼意思</div>
+        <div class="ex-q">你的 20 Hz（$50\,\text{ms}$ 截止期限）控制迴圈每週期平均 $4\,\text{ms}$，但偶爾會尖峰到 $60\,\text{ms}$。這個迴圈是即時的嗎？</div>
+        <ul class="ex-options">
+          <li data-correct="false">是——平均值遠低於截止期限，所以它從容地算即時。</li>
+          <li data-correct="true">不是——即時是一個對<em>最壞情況</em>的保證；單一個 $60\,\text{ms}$ 尖峰就錯過了 $50\,\text{ms}$ 截止期限，這就是失敗。</li>
+          <li data-correct="false">是，只要尖峰發生的時間少於 1%。</li>
+          <li data-correct="false">不知道 CPU 時脈頻率就無法判斷。</li>
+        </ul>
+        <div class="ex-explain">即時的正確性是由最壞情況延遲、而非平均值來定義的。一個迴圈趕上截止期限 999 次、錯過一次，就不是硬即時。那個尖峰才是要追的 bug——通常是一個 IRQ、分頁錯誤，或阻塞的 <code>fsync</code>——而拿來幹掉它的工具是 PREEMPT_RT、<code>SCHED_FIFO</code>、<code>mlockall</code> 與 IRQ 親和性。見 <a href="#can-realtime">§6 — 即時</a>。</div>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章回顧</div>
+        <p>六層，一套詞彙：<strong>syscall</strong>/<strong>fd</strong>/<strong>VFS</strong> 這道邊界把硬體變成檔案；<strong>驅動</strong>與<strong>裝置樹</strong>把矽晶片綁到 <code>/dev</code>，而 <code>/sys</code> 是那張活地圖；<strong>匯流排</strong>分成會自我列舉的（PCIe/USB）對上需要宣告的（I²C/SPI/SDIO）；<strong>DMA</strong> 與 <strong>epoll</strong> 在不燒 CPU 的前提下搬運並多路複用位元組；<strong>路由</strong>與 <strong>BDP</strong> 治理網路；而 <strong>CAN</strong> 加上 <strong>PREEMPT_RT</strong> 則在硬截止期限上把致動器送達。你將來在 USV 上讀到的每一行核心日誌，都是這些字裡的某一個——現在你能解讀它了。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

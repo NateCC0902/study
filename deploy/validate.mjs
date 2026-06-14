@@ -15,8 +15,10 @@ const EMBED = {
 };
 const MLDL_IDS = ['00-what-is-ml','01-math-foundations','02-linear-regression','03-gradient-descent','04-logistic-regression','05-overfitting-evaluation','06-knn-trees-ensembles','07-svm-kernels','08-kmeans-pca','09-neural-networks-mlp','10-backpropagation','11-pytorch-fundamentals','12-training-deep-nets','13-cnns','14-rnns-lstms','15-attention-transformers','16-generative-models','17-transfer-learning-llms-mlops','18-reinforcement-learning','19-detection-segmentation','20-data-feature-engineering','21-hyperparameter-optimization','appendix','glossary'];
 const PID_IDS = ['01-plant','02-p-control','03-d-control','04-i-control','05-windup','06-derivative-noise','07-wrapping-actuators','08-tuning-ros2','glossary'];
+const IO_IDS = ['01-io-model','02-devices-sysfs','03-udev-naming','04-drivers-modules-firmware','05-buses-enumeration','06-serial-tty','07-interrupts-dma-mmio','08-multiplexing-epoll','09-networking-io','10-can-socketcan','11-realtime-robust-io','12-capstone-robot-io','glossary'];
 const REF_PAGES = new Set(['appendix','glossary']);
 const ML_INTERACTIVE = { '02-linear-regression':1,'03-gradient-descent':1,'04-logistic-regression':1,'05-overfitting-evaluation':1,'08-kmeans-pca':2,'09-neural-networks-mlp':1,'13-cnns':1,'15-attention-transformers':1 };
+const IO_INTERACTIVE = { '05-buses-enumeration':1,'06-serial-tty':1,'07-interrupts-dma-mmio':1,'08-multiplexing-epoll':1,'09-networking-io':1,'10-can-socketcan':1 };
 
 const pages = [];
 const push = (rel, meta) => pages.push({ rel, ...meta });
@@ -31,6 +33,10 @@ for (const id of MLDL_IDS) {
 for (const id of PID_IDS) {
   push(`pid/${id}.html`,       { course:'pid', track:'main', chapter:id, lang:'en', isRef:REF_PAGES.has(id) });
   push(`pid/zh-tw/${id}.html`, { course:'pid', track:'main', chapter:id, lang:'zh', isRef:REF_PAGES.has(id) });
+}
+for (const id of IO_IDS) {
+  push(`io/${id}.html`,       { course:'io', track:'main', chapter:id, lang:'en', isRef:REF_PAGES.has(id) });
+  push(`io/zh-tw/${id}.html`, { course:'io', track:'main', chapter:id, lang:'zh', isRef:REF_PAGES.has(id) });
 }
 
 const sel = pages.filter(p => (!ARG.course || p.course === ARG.course) && (!ARG.lang || p.lang === ARG.lang));
@@ -102,6 +108,11 @@ for (const pg of sel) {
     if (!html.includes(assetPrefix + 'ml-demos.js')) issues.push('ml: missing ml-demos.js');
     const canv = [...html.matchAll(/EM\.mlDemo\.\w+\(/g)].length;
     if (canv < ML_INTERACTIVE[pg.chapter]) issues.push(`ml: ${canv} demos (want ${ML_INTERACTIVE[pg.chapter]})`);
+  }
+  if (pg.course === 'io' && IO_INTERACTIVE[pg.chapter]) {
+    if (!html.includes(assetPrefix + 'io-sim.js')) issues.push('io: missing io-sim.js');
+    const canv = [...html.matchAll(/EM\.ioDemo\.\w+\(/g)].length;
+    if (canv < IO_INTERACTIVE[pg.chapter]) issues.push(`io: ${canv} demos (want ${IO_INTERACTIVE[pg.chapter]})`);
   }
 
   rows.push({ rel: pg.rel, h2: h2all, ex: exTypes.length, issues });

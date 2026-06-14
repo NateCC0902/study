@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>CAN &amp; SocketCAN — Linux I/O for Robotics</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="10-can-socketcan">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · Ch 10</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · Chapter 10 · Field buses</div>
+        <h1>CAN &amp; SocketCAN: the wire that runs the actuators</h1>
+        <p>Serial and Ethernet move <em>data</em>. CAN is the bus you reach for when a thruster, a rudder servo, and a battery monitor all have to share two wires, never collide, and keep working when one node browns out. And the best part on Linux: it shows up as a network interface, so you drive it with sockets and <code>ip</code>, not some bespoke driver. This chapter takes you from the differential pair on the wire up to <code>candump can0</code>.</p>
+        <div class="meta"><span>⏱ ~40 min</span><span>🧠 arbitration</span><span>⚡ SocketCAN bring-up</span><span>∑ bus load</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="why-can"><span class="sec-no">1</span>Why a robot needs CAN at all</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>You already have UART (Ch 06) and Ethernet (Ch 09). Why add a third bus? Because actuators have a different problem than sensors. A GPS just streams; if a byte is late, who cares. But a motor controller, a steering servo, and a power monitor are all talking on the <em>same</em> two wires, all the time, and the message that says "EMERGENCY STOP" must win the wire over the message that says "battery is at 84%." CAN — Controller Area Network, born in 1980s automotive — is built for exactly that: many nodes, one shared pair, deterministic priority, and graceful behaviour when something on the bus dies.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence model</div>
+        <p>CAN is a <strong>shared two-wire broadcast bus where the lowest message ID always wins the wire</strong> — and it wins <em>without</em> corrupting the loser. That single property gives you collision-free, priority-ordered, multi-master messaging on a pair of cheap twisted wires.</p>
+      </div>
+
+      <p>Notice what CAN is <em>not</em>: it is not addressed to a node. A CAN frame has no destination field. Every node hears every frame and decides, by the 11-bit (or 29-bit) <strong>identifier</strong>, whether it cares. The ID is simultaneously the message's <em>name</em> and its <em>priority</em>. Hold that thought — it explains arbitration, hardware filtering, and bus-load all at once.</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — the USV actuator bus</div>
+        <p>On our Jetson AGX Orin USV, the heavy sensors (LiDAR, cameras) ride Ethernet and USB. The <em>actuators</em> — twin thruster ESCs, the rudder/azimuth servo, and the battery management system — sit on a single CAN bus at 500&nbsp;kbit/s. Separately, the marine instruments (GPS compass, depth, wind) speak NMEA&nbsp;2000, which is just CAN at 250&nbsp;kbit/s on a beefier connector. Two physical CAN segments, one mental model.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="physical-layer"><span class="sec-no">2</span>The physical layer: two wires, one dominant bit</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>what's actually on the wire</small></div>
+      <p>CAN is a <strong>differential</strong> bus: two signals, CAN&nbsp;High (CANH) and CAN&nbsp;Low (CANL). A receiver looks at the <em>difference</em> $V_{\text{diff}} = V_{\text{CANH}} - V_{\text{CANL}}$, not the absolute voltage. That is why CAN survives in an engine bay or a boat hull full of motor noise: a spike hits both wires roughly equally and cancels in the subtraction. This is the same common-mode-rejection trick that makes Ethernet's twisted pairs robust.</p>
+
+      <p>There are exactly two bus states, and their names matter:</p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>State</th><th>Logical bit</th><th>$V_{\text{diff}}$ (high-speed CAN)</th><th>Who drives it</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Dominant</strong></td><td>0</td><td>~2&nbsp;V (CANH≈3.5&nbsp;V, CANL≈1.5&nbsp;V)</td><td>a transceiver actively pulls the pair apart</td></tr>
+          <tr><td><strong>Recessive</strong></td><td>1</td><td>~0&nbsp;V (both ≈2.5&nbsp;V)</td><td>nobody drives; resistors relax the pair together</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Dominant beats recessive — physically</div>
+        <p>It's a wired-AND. If <em>any</em> node drives dominant (0) while others sit recessive (1), the whole bus reads 0. A recessive bit can never overwrite a dominant one. This is not a software rule — it is what the transceivers physically do. Every clever thing CAN does flows from this one fact.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>termination and the 60-ohm test</small></div>
+      <p>The pair is a transmission line, so it must be terminated at <em>both ends</em> with $120\,\Omega$ resistors to kill reflections. The two terminators sit in parallel across the bus, so an ohmmeter on a powered-off, healthy bus reads:</p>
+      <div class="math-box">$$ R_{\text{bus}} = \frac{R_1 \, R_2}{R_1 + R_2} = \frac{120 \cdot 120}{120 + 120} = 60\;\Omega $$</div>
+      <p>This is the single most useful field test you own. Power down the bus, measure CANH-to-CANL with a multimeter:</p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Reading</th><th>Diagnosis</th></tr></thead>
+        <tbody>
+          <tr><td>≈ 60&nbsp;Ω</td><td>Healthy — two terminators present.</td></tr>
+          <tr><td>≈ 120&nbsp;Ω</td><td>One terminator missing — may work short &amp; slow, fails at speed/length.</td></tr>
+          <tr><td>≈ 40&nbsp;Ω</td><td>Three terminators — someone added one in the middle. Remove it.</td></tr>
+          <tr><td>open / very high</td><td>Both terminators missing or a broken wire.</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — terminators go at the ends, not on every node</div>
+        <p>Termination belongs to the <em>bus</em>, not to nodes. Exactly two, one at each physical extreme. A common USV failure: every dev board ships with a jumper-enabled 120&nbsp;Ω terminator, you wire up four nodes, and now the bus reads 30&nbsp;Ω and won't run at 500k. Pull the jumpers on the inner nodes.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="arbitration"><span class="sec-no">3</span>Arbitration: the lowest ID wins, with no collision</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>bit-by-bit listening</small></div>
+      <p>Here is the elegant part. Multiple nodes may start transmitting in the same bit slot. As each node sends a bit of its identifier, it <em>also listens to the bus</em>. If a node sends recessive (1) but reads back dominant (0), it knows someone with a higher-priority message is also talking — so it immediately, silently, backs off and becomes a receiver. The node sending dominant never even noticed a contest; its frame continues uninterrupted.</p>
+
+      <p>Because dominant = 0 wins, the message whose ID has the <strong>smallest numeric value</strong> wins arbitration. Lower ID = more leading dominant bits = higher priority. No collision, no retransmission of the winner, no wasted bus time. The loser simply retries when the bus is idle again.</p>
+
+      <div class="mermaid">
+sequenceDiagram
+    participant A as Node A id 0x100
+    participant Bus
+    participant B as Node B id 0x101
+    Note over A,B: identifier bits 10..1 identical so far
+    A->>Bus: bit 0 = 0 (dominant)
+    B->>Bus: bit 0 = 1 (recessive)
+    Note over B: reads back 0, not 1 → loses, backs off
+    A->>Bus: sends rest of frame unaware
+    Note over B: waits for idle, retries
+</div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — never reuse an ID</div>
+        <p>Two nodes transmitting the same ID with different data will <em>not</em> arbitrate cleanly — they win arbitration together and then collide in the data field, triggering a bit error and a retransmit storm. Every transmitter on the bus must own a unique set of IDs. NMEA&nbsp;2000 solves this with a dynamic address-claim procedure that is, at its core, this same lowest-ID-wins game.</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — priority on the USV</div>
+        <p>We assign the thruster <em>command</em> frames the lowest IDs on the bus, the BMS over-current/fault frames lower still, and slow telemetry (temperatures, firmware version) the highest IDs. When the bus gets busy during an aggressive maneuver, the safety-critical traffic literally pushes the chatter aside on the wire. Priority is a wiring decision you make once, in the ID map.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="frame-anatomy"><span class="sec-no">4</span>Frame anatomy and bit-stuffing</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>count the bits</small></div>
+      <p>A classic CAN <strong>data frame</strong> (Standard format, 11-bit ID) is more than its payload. The fields, in order on the wire:</p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Field</th><th>Bits</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td>SOF</td><td>1</td><td>Start-of-frame (dominant) — wakes everyone, syncs clocks.</td></tr>
+          <tr><td>Identifier</td><td>11</td><td>Name + priority (arbitration field).</td></tr>
+          <tr><td>RTR + IDE + r0</td><td>3</td><td>Remote/data flag, extended-ID flag, reserved.</td></tr>
+          <tr><td>DLC</td><td>4</td><td>Data length code: 0–8 payload bytes.</td></tr>
+          <tr><td>Data</td><td>$8 \times p$</td><td>$p$ payload bytes, $0 \le p \le 8$.</td></tr>
+          <tr><td>CRC + delimiter</td><td>16</td><td>15-bit CRC + 1 recessive delimiter.</td></tr>
+          <tr><td>ACK + delimiter</td><td>2</td><td>Receivers pull this dominant to acknowledge.</td></tr>
+          <tr><td>EOF</td><td>7</td><td>End-of-frame (recessive).</td></tr>
+          <tr><td>IFS</td><td>3</td><td>Inter-frame space before the next frame.</td></tr>
+        </tbody>
+      </table></div>
+
+      <p>Sum the fixed overhead and you get a clean formula for the nominal frame length of a standard 11-bit frame carrying $p$ payload bytes:</p>
+      <div class="math-box">$$ N_{\text{nominal}}(p) = 47 + 8p \quad\text{bits} \qquad\Rightarrow\qquad N_{\text{nominal}}(8) = 47 + 64 = 111\ \text{bits} $$</div>
+
+      <p>But the wire carries <em>more</em> bits than that, because of <strong>bit-stuffing</strong>. CAN has no separate clock wire; receivers recover timing from edges in the data. After 5 consecutive identical bits the transmitter inserts one opposite "stuff" bit to guarantee an edge, and the receiver silently strips it. Stuffing applies to everything from SOF through the CRC — that is $34 + 8p$ stuffable bits — so the worst case adds:</p>
+      <div class="math-box">$$ N_{\text{stuff,max}}(p) = \left\lfloor \frac{34 + 8p - 1}{4} \right\rfloor, \qquad N_{\text{worst}}(p) = N_{\text{nominal}}(p) + N_{\text{stuff,max}}(p) $$</div>
+      <p>For $p = 8$: $\lfloor (34+64-1)/4 \rfloor = \lfloor 97/4 \rfloor = 24$ extra bits, so worst case $= 111 + 24 = 135$ bits on the wire. This variability is exactly why CAN gives you <em>bounded latency</em> for high-priority frames, not constant latency — the worst-case bound assumes the worst-case stuffing on everything ahead of you. (Those constants — $47+8p$ and the stuffing floor — are precisely what the sim below computes, so its numbers will line up with these.)</p>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="socketcan"><span class="sec-no">5</span>SocketCAN: CAN as a network interface</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the Linux design choice</small></div>
+      <p>Here is where Linux earns its keep. Other operating systems hand you a vendor SDK and a character device per CAN chip. Linux instead models a CAN controller as a <strong>network interface</strong> — <code>can0</code>, right next to <code>eth0</code> and <code>wlan0</code> in <code>ip link</code>. You open a socket in the new address family <code>AF_CAN</code>, bind it to <code>can0</code>, and then <code>read()</code>/<code>write()</code> fixed-size <code>struct can_frame</code> records. All the tooling you already know — <code>ip</code>, sockets, <code>tcpdump</code>-style sniffers — applies. That is the whole idea: CAN is just another network.</p>
+
+      <div class="mermaid">
+flowchart LR
+    APP["your app<br/>socket(AF_CAN)"] --> SC["SocketCAN core<br/>can / can-raw"]
+    SC --> DRV["controller driver<br/>e.g. mttcan / mcp251xfd"]
+    DRV --> XCV["CAN transceiver"]
+    XCV --> WIRE["CANH / CANL bus"]
+</div>
+
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>A raw CAN socket is almost boringly familiar if you've written UDP. The one twist is binding by interface <em>index</em> via <code>SIOCGIFINDEX</code>:</p>
+      <div class="codeblock">
+        <div class="code-head">can_rx.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;linux/can.h&gt;
+#include &lt;linux/can/raw.h&gt;
+#include &lt;net/if.h&gt;
+#include &lt;sys/ioctl.h&gt;
+#include &lt;sys/socket.h&gt;
+#include &lt;string.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;stdio.h&gt;
+
+int main(void) {
+    int s = socket(PF_CAN, SOCK_RAW, CAN_RAW);   // AF_CAN raw socket
+    struct ifreq ifr;
+    strcpy(ifr.ifr_name, "can0");
+    ioctl(s, SIOCGIFINDEX, &amp;ifr);                 // resolve can0 -&gt; index
+
+    struct sockaddr_can addr = {0};
+    addr.can_family  = AF_CAN;
+    addr.can_ifindex = ifr.ifr_ifindex;
+    bind(s, (struct sockaddr *)&amp;addr, sizeof(addr));
+
+    struct can_frame f;
+    while (read(s, &amp;f, sizeof(f)) == (ssize_t)sizeof(f)) {
+        printf("id=%03X dlc=%u  ", f.can_id &amp; CAN_SFF_MASK, f.can_dlc);
+        for (int i = 0; i &lt; f.can_dlc; i++) printf("%02X ", f.data[i]);
+        printf("\n");
+    }
+    close(s);
+    return 0;
+}
+</code></pre>
+      </div>
+
+      <p>Reads are <strong>whole frames</strong>, not byte streams — no partial-read dance like the serial chapter, because <code>read()</code> returns exactly one <code>struct can_frame</code> or nothing. You can also push hardware <strong>filters</strong> into the kernel with <code>setsockopt(s, SOL_CAN_RAW, CAN_RAW_FILTER, ...)</code> so the controller only wakes you for the IDs you care about — essential when you sit on a busy NMEA&nbsp;2000 backbone and want only the heading PGN.</p>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="bring-up"><span class="sec-no">6</span>Bring-up, bit timing, and the sample point</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>configure the interface</small></div>
+      <p>A SocketCAN interface comes up <em>down</em> and with no bitrate. You configure it with the same <code>ip link</code> you use for Ethernet, then bring it up:</p>
+      <div class="codeblock">
+        <div class="code-head">can-up.sh <span class="lang">bash</span></div>
+<pre><code class="language-bash"># configure can0: 500 kbit/s, auto-recover 100 ms after bus-off
+sudo ip link set can0 type can bitrate 500000 restart-ms 100
+sudo ip link set up can0
+
+# verify state, bitrate, sample point, and error counters
+ip -details -statistics link show can0
+
+# live sniff and decode every frame on the bus
+candump can0
+
+# send one frame: id 0x123, payload DE AD BE EF
+cansend can0 123#DEADBEEF
+
+# offered-load / frame-rate statistics for the running bus
+canbusload can0@500000
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — you cannot reconfigure a live interface</div>
+        <p><code>ip link set ... type can bitrate ...</code> fails with <code>RTNETLINK answers: Device or resource busy</code> if the link is up. Bring it down first (<code>sudo ip link set down can0</code>), change the bitrate, bring it back up. And every node on the bus must use the <em>same</em> bitrate — a single 250k node on a 500k bus throws errors for everyone.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>bit time and the sample point</small></div>
+      <p>One bit isn't sampled at its centre. CAN divides each bit into time quanta grouped into segments, and the controller samples the bus at the <strong>sample point</strong> — the fraction of the bit elapsed before the decision is made:</p>
+      <div class="math-box">$$ \text{sample point} = \frac{T_{\text{sync}} + T_{\text{seg1}}}{T_{\text{sync}} + T_{\text{seg1}} + T_{\text{seg2}}} $$</div>
+      <p>For high-speed CAN the recommended sample point is ~87.5% of the bit. Why so late? Because arbitration needs the signal to propagate to the far terminator and back <em>within one bit time</em> so a node can read its own transmitted bit before sampling. That round-trip is what caps bus length at a given bitrate: 1&nbsp;Mbit/s tops out near 40&nbsp;m, while 250k (NMEA&nbsp;2000) comfortably spans ~250&nbsp;m. The kernel computes the segment split for you from the bitrate and the controller's clock; you usually only override it (<code>sample-point 0.875</code>) when mixing pernickety third-party nodes.</p>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="errors-fd"><span class="sec-no">7</span>Error states, bus-off, and CAN-FD</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>a bus that polices itself</small></div>
+      <p>CAN nodes are not passive. Every controller keeps two counters — a Transmit Error Counter (TEC) and a Receive Error Counter (REC) — and bumps them on each detected error, decrements them on success. These counters drive a state machine that is the heart of CAN's fault containment:</p>
+
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> ErrorActive
+    ErrorActive --> ErrorPassive: TEC or REC &gt; 127
+    ErrorPassive --> ErrorActive: counters fall &lt; 128
+    ErrorPassive --> BusOff: TEC &gt; 255
+    BusOff --> ErrorActive: restart-ms timer
+</div>
+
+      <p><strong>Error-active</strong> is normal: the node can signal errors loudly (active error flags). At TEC&gt;127 it drops to <strong>error-passive</strong> — still talking, but politely, so a babbling node can't dominate. At TEC&gt;255 it goes <strong>bus-off</strong>: it disconnects from the bus entirely. This is the safety valve — one short-circuited or insane node removes <em>itself</em> rather than jamming the whole bus.</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> restart-ms is your auto-recovery</div>
+        <p>By default a bus-off interface stays dead until you manually cycle it. The <code>restart-ms 100</code> we set at bring-up tells the kernel to automatically re-enable the controller 100&nbsp;ms after bus-off. On a USV that means a momentary wiring glitch self-heals instead of killing thruster control until a human power-cycles. Watch the counters with <code>ip -details -statistics link show can0</code> — a climbing <code>bus-off</code> count is your early-warning of a flaky connector.</p>
+      </div>
+
+      <div class="layer"><span class="step">④</span> Real case <small>CAN-FD and NMEA 2000</small></div>
+      <p><strong>CAN-FD</strong> (Flexible Data-rate) keeps the same arbitration but switches to a faster bitrate <em>after</em> arbitration and allows up to 64-byte payloads. You bring it up with both a nominal and a data bitrate: <code>sudo ip link set can0 type can bitrate 500000 dbitrate 2000000 fd on</code>. Same sockets, same tools — <code>candump</code> just shows longer frames. <strong>NMEA&nbsp;2000</strong>, the marine standard, is plain classic CAN at 250&nbsp;kbit/s with a 29-bit extended ID, a defined connector/power scheme, and a fixed PGN message catalogue (heading, position, depth, wind). To Linux it is just another <code>can0</code> at 250k — you decode the PGNs in userspace.</p>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="bus-load"><span class="sec-no">8</span>Sizing the bus: load and the live gauge</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>bus load percent</small></div>
+      <p>Bus load is the fraction of wire-time consumed by frames. With $f$ frames per second of $N$ bits each at bitrate $B$:</p>
+      <div class="math-box">$$ \text{load} = \frac{f \cdot N}{B} \times 100\% $$</div>
+      <p>Keep nominal load under ~50–70%. Above that, worst-case bit-stuffing plus retransmissions pushes you toward saturation, and low-priority frames start starving. Play with the gauge — drag bitrate, frame rate, and payload and watch the green/amber/red zones. The dashed marker is the worst-case-stuffed load.</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>🚦</span> CAN bus-load gauge (bitrate × frame-rate × payload)</div>
+        <canvas id="sim-can"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What to notice</div>
+        <p>Load scales <em>linearly</em> with frame rate and (through $47+8p$) roughly with payload, and <em>inversely</em> with bitrate — so doubling the bitrate halves the load. Watch the dashed worst-case marker pull away from the solid nominal bar as payload grows: that gap is bit-stuffing, and it is the headroom you must leave. A bus that reads 65% nominal can hit 80%+ worst-case. Size for the worst case, not the average — that is the whole reason you chose CAN for the actuators.</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io10-arbitration-winner">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">Three nodes start transmitting in the same slot with standard IDs <code>0x2A0</code>, <code>0x180</code>, and <code>0x181</code>. Which node wins arbitration and keeps transmitting?</div>
+        <ul class="ex-options">
+          <li data-correct="false">The node with ID <code>0x2A0</code> — highest number, highest priority.</li>
+          <li data-correct="true">The node with ID <code>0x180</code> — the lowest numeric ID wins.</li>
+          <li data-correct="false">The node with ID <code>0x181</code> — it sent first.</li>
+          <li data-correct="false">All three collide and every node retransmits after a backoff.</li>
+        </ul>
+        <div class="ex-explain">Dominant (0) overrides recessive (1) bit-by-bit, so the smallest ID has the most leading dominant bits and wins. <code>0x180</code> and <code>0x181</code> agree until the last bit, where <code>0x180</code> sends 0 and <code>0x181</code> sends 1; <code>0x181</code> reads back 0, loses, and backs off. <code>0x2A0</code> diverges even earlier. The winner never notices a contest; the losers retry at the next idle.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io10-bus-load" data-answer="22.2" data-tol="0.5">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">A 500&nbsp;kbit/s bus carries 1000 frames/s, each a standard 11-bit frame with an 8-byte payload. Using the nominal length $N = 47 + 8p$ and $\text{load} = fN/B \times 100\%$, what is the nominal bus load in <strong>percent</strong>?</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">%</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$N = 47 + 8\times 8 = 111$ bits. $\text{load} = (1000 \times 111)/500000 \times 100 = 111000/500000 \times 100 = 22.2\%$. Comfortable headroom — even worst-case stuffing ($135$ bits → $27\%$) stays well under 50%. That matches the green zone on the gauge above for these settings.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io10-socketcan-bringup">
+        <div class="ex-head"><span class="badge">Q3</span> Hands-on — bring up and sniff a CAN bus</div>
+        <div class="ex-q">You have a fresh <code>can0</code> on the USV. Write the commands to: configure it for 500&nbsp;kbit/s with 100&nbsp;ms bus-off auto-recovery, bring it up, watch live traffic, and send a single test frame with ID <code>0x123</code> and payload bytes <code>DE AD BE EF</code>. Then say how you'd confirm it actually went out.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Configuration is an <code>ip link set ... type can</code> call; the interface starts down so you need a second <code>set up</code>. The sniffer and the sender are <code>candump</code> / <code>cansend</code> from <code>can-utils</code>.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <div class="codeblock"><div class="code-head">bring up + test <span class="lang">bash</span></div>
+<pre><code class="language-bash"># 1. configure bitrate + auto-recover, then bring the link up
+sudo ip link set can0 type can bitrate 500000 restart-ms 100
+sudo ip link set up can0
+
+# 2. confirm: state should read ERROR-ACTIVE, bitrate 500000
+ip -details -statistics link show can0
+
+# 3. in one terminal, watch the bus
+candump can0
+
+# 4. in another terminal, inject one frame
+cansend can0 123#DEADBEEF
+</code></pre></div>
+          <p>The injected frame appears in the <code>candump</code> window as <code>can0  123  [4]  DE AD BE EF</code>. Because SocketCAN echoes locally-sent frames to other sockets by default, you see your own <code>cansend</code> even with no other node present. If nothing shows up and the TX error counter in <code>ip -details</code> climbs, you have no ACK — meaning no second node is acknowledging, or termination/bitrate is wrong. That distinction (frame echoed but no real ACK) is exactly why the 60&nbsp;Ω test and matched bitrates matter.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>CAN is a shared, differential, two-wire broadcast bus terminated $120\,\Omega$ at each end (the 60&nbsp;Ω test). Dominant bits beat recessive ones physically, so the <strong>lowest ID wins arbitration</strong> with no collision. A standard frame is $47 + 8p$ bits plus worst-case bit-stuffing, and bus load is $fN/B$ — keep it under ~50–70%. Linux exposes CAN as a network interface: open an <code>AF_CAN</code> socket, bring it up with <code>ip link set can0 type can bitrate 500000 restart-ms 100</code>, and sniff with <code>candump</code>. Error counters drive error-active → passive → bus-off, and <code>restart-ms</code> auto-recovers. CAN-FD adds speed and 64-byte payloads; NMEA&nbsp;2000 is just CAN at 250k for the marine instruments. Next: making all of this real-time and robust.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+<script src="../assets/io-sim.js"></script>
+<script>EM.ioDemo.canLoad("sim-can");</script>
+</body>
+</html>

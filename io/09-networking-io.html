@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Networking I/O: NIC to Socket — Linux I/O for Robotics</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="09-networking-io">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · Ch 09</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · Chapter 09 · Networking</div>
+        <h1>Networking I/O: from the NIC to your socket</h1>
+        <p>A network card is just another device that DMAs bytes into RAM and raises interrupts — but on top of it sits a whole stack: drivers, softirqs, the protocol layers, socket buffers. And the moment you bolt a second interface onto your robot, a quiet DHCP server can steal your default route and silently kill the link you depend on. We trace one packet end to end, then make two NICs coexist on a USV without stepping on each other.</p>
+        <div class="meta"><span>⏱ ~40 min</span><span>🧠 packet path</span><span>⚡ ip route</span><span>∑ bandwidth-delay product</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="packet-journey"><span class="sec-no">1</span>A packet's journey: NIC to recv()</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>follow one frame</small></div>
+      <p>Everything you learned in Chapter 07 about interrupts and DMA applies directly here — a NIC is exactly that kind of device. When a frame arrives on the wire, the card doesn't hand it to the CPU byte by byte. It <strong>DMAs</strong> the whole frame into a ring of pre-allocated kernel buffers in RAM, then raises an <strong>interrupt</strong> to say "there's new mail." From that point the kernel walks the frame up the protocol layers until the payload lands in a per-socket buffer, and your blocked <code>recv()</code> finally returns.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The whole stack in one sentence</div>
+        <p>The NIC DMAs the frame into RAM and interrupts; a <strong>softirq</strong> drains the receive ring (NAPI), the IP/UDP/TCP layers strip headers and demultiplex by port, the payload is queued on the matching socket's receive buffer, and the kernel wakes whoever is sleeping in <code>recv()</code>. Hardware to userspace, with no copies you can avoid except the last one.</p>
+      </div>
+
+      <p>The single most important design choice in that path is that the hardware interrupt does almost <em>nothing</em>. A 10&nbsp;Gb/s link can deliver well over a million frames per second; one interrupt per frame would melt the CPU. So the driver uses <strong>NAPI</strong>: the hard IRQ just schedules a softirq (<code>NET_RX_SOFTIRQ</code>) and masks further RX interrupts, then the softirq <em>polls</em> the ring in a batch until it drains. This is the interrupt-vs-polling trade-off from Chapter 07, applied where it matters most. You can watch the softirq budget being spent in <code>/proc/net/softnet_stat</code> — the third column is the count of times the budget ran out before the ring emptied, which is your early warning of an overloaded receive path.</p>
+
+      <div class="mermaid">
+flowchart TB
+    W["wire / PHY"] --> N["NIC<br/>DMA into RX ring"]
+    N -->|"hard IRQ"| H["driver ISR<br/>schedule softirq"]
+    H --> S["NET_RX_SOFTIRQ<br/>NAPI poll ring"]
+    S --> IP["IP layer<br/>route, defrag"]
+    IP --> L4["UDP / TCP<br/>demux by port"]
+    L4 --> SB["socket recv buffer<br/>sk_rcvbuf"]
+    SB -->|"wake"| R["recv() returns<br/>copy to userspace"]
+</div>
+
+      <div class="layer"><span class="step">④</span> Real case <small>off the AGX Orin</small></div>
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — LiDAR on the Orin's GbE</div>
+        <p>Our 32-beam LiDAR pushes ~50&nbsp;Mb/s of UDP packets onto the Orin's gigabit port at ~5,000 packets/s of ~1.2&nbsp;KB datagrams during a dense scan. Without NAPI batching and IRQ coalescing (Ch 07), that's a softirq storm. With them, one core spends a few percent draining bursts of frames per interrupt, and the 20&nbsp;Hz control loop keeps its cycles. Check the interrupt with <code>cat /proc/interrupts | grep eth</code> and confirm it's pinned to a core you don't run the control loop on.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="sockets-are-fds"><span class="sec-no">2</span>Sockets ARE file descriptors</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the same VFS trick</small></div>
+      <p>Chapter 01 told you everything is a file. A socket is the cleanest proof: <code>socket()</code> returns an <code>int</code> file descriptor that lives in the exact same fd table as your open files and serial ports. You can <code>read()</code>/<code>write()</code> it, <code>close()</code> it, set it non-blocking with <code>fcntl(fd, F_SETFL, O_NONBLOCK)</code>, and — crucially — hand it to <code>epoll</code> alongside your GPS serial fd and your CAN socket (Chapter 08). One event loop, every I/O source, because they're all just descriptors.</p>
+
+      <p>The socket-specific calls are a small, learnable set. <code>socket(domain, type, proto)</code> creates the endpoint; <code>bind()</code> nails it to a local address/port; <code>connect()</code> sets the peer (mandatory for TCP, optional-but-useful for UDP); <code>send()</code>/<code>recv()</code> (or <code>sendto()</code>/<code>recvfrom()</code> for connectionless) move bytes. That's the whole API surface you need for sensor I/O.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>two type flavors</small></div>
+      <p>The <code>type</code> argument picks the delivery semantics: $\texttt{SOCK\_STREAM}$ (TCP) gives you a reliable, ordered, byte-<em>stream</em> with no message boundaries — one <code>send()</code> of 100&nbsp;bytes may arrive as two <code>recv()</code>s, so you must frame messages yourself. $\texttt{SOCK\_DGRAM}$ (UDP) gives you whole <em>datagrams</em>: each <code>recvfrom()</code> returns exactly one packet, or nothing. For sensors that publish self-contained samples, datagram boundaries are a feature, not a bug.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>a minimal UDP receiver</small></div>
+      <div class="codeblock">
+        <div class="code-head">udp_recv.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;arpa/inet.h&gt;
+#include &lt;string.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;unistd.h&gt;
+
+int main(void) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);   /* fd just like any file */
+    if (fd &lt; 0) { perror("socket"); return 1; }
+
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(2368);             /* listen port, network byte order */
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);  /* any local interface */
+
+    if (bind(fd, (struct sockaddr *)&amp;addr, sizeof addr) &lt; 0) {
+        perror("bind"); return 1;
+    }
+
+    char buf[2048];
+    struct sockaddr_in src; socklen_t slen = sizeof src;
+    for (;;) {
+        ssize_t n = recvfrom(fd, buf, sizeof buf, 0,
+                             (struct sockaddr *)&amp;src, &amp;slen);
+        if (n &lt; 0) { perror("recvfrom"); break; }
+        printf("got %zd bytes from %s\n", n, inet_ntoa(src.sin_addr));
+    }
+    close(fd);
+    return 0;
+}
+</code></pre>
+      </div>
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — byte order &amp; partial TCP reads</div>
+        <p>Ports and addresses go on the wire <strong>big-endian</strong>; forget <code>htons()</code> and you'll bind to a port nobody is sending to. And never assume a TCP <code>recv()</code> returns a whole message — it returns "whatever's buffered now." Loop until you've read your declared length, exactly like the robust read loop from Chapter 01.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="routing-table"><span class="sec-no">3</span>Interfaces, addresses &amp; the routing table</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>which door does a packet leave by</small></div>
+      <p>When you <code>send()</code> to an address, the kernel has to decide <em>which interface</em> the packet leaves through. That decision is the <strong>routing table</strong>: an ordered set of rules matching destination prefixes to an outgoing interface and next hop. The <code>ip</code> tool (from iproute2 — forget <code>ifconfig</code>) is how you read and write it.</p>
+
+      <div class="codeblock">
+        <div class="code-head">terminal <span class="lang">bash</span></div>
+<pre><code class="language-bash"># interfaces and their addresses
+ip -brief addr        # eth0  UP  192.168.1.50/24
+                      # wlan0 UP  10.42.0.7/24
+
+# the routing table, longest-prefix wins within a metric
+ip route
+# default via 192.168.1.1 dev eth0  proto dhcp  metric 100
+# default via 10.42.0.1   dev wlan0 proto dhcp  metric 600
+# 192.168.1.0/24 dev eth0  proto kernel scope link src 192.168.1.50
+# 10.42.0.0/24   dev wlan0 proto kernel scope link src 10.42.0.7
+
+# ask the kernel exactly how it would route a specific destination:
+ip route get 8.8.8.8
+# 8.8.8.8 via 192.168.1.1 dev eth0 src 192.168.1.50
+</code></pre>
+      </div>
+
+      <p>Two rules govern every lookup. First, <strong>longest-prefix match</strong>: a packet to <code>192.168.1.99</code> matches the <code>192.168.1.0/24</code> route (24 bits) over the <code>default</code> route (0 bits), so it goes out <code>eth0</code> directly. Second, the <strong>default route</strong> (<code>0.0.0.0/0</code>, prefix length 0) is the catch-all for everything not on a directly-connected subnet — it's where "the internet" and any host you don't have a specific route for goes.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>metrics break ties</small></div>
+      <p>When two routes have the <em>same</em> prefix length, the <strong>metric</strong> (lower = preferred) breaks the tie. With two default routes, the kernel uses the one with the smaller metric for all non-local traffic. Formally, the chosen route for destination $d$ is</p>
+      <div class="math-box">$$ \text{route}(d) = \operatorname*{arg\,min}_{r\,:\,d\in\text{prefix}(r)}\;\bigl(-\text{plen}(r),\; \text{metric}(r)\bigr) $$</div>
+      <p>i.e. maximize prefix length first, then minimize metric. The negative sign just says "longer prefix wins"; among equal-length matches, the smaller metric wins. This formula is the entire reason the next section is a hazard.</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="default-route-theft"><span class="sec-no">4</span>Default-route theft</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the silent killer</small></div>
+      <p>Here is the failure that costs robotics teams hours. Your USV runs fine on Ethernet with <code>default via 192.168.1.1 dev eth0 metric 100</code>. You plug in WiFi — or it auto-reconnects — and its DHCP lease arrives carrying a default gateway and a metric. If that metric is <em>lower</em> than your Ethernet's, the WiFi default route wins, and suddenly all non-local traffic leaves by <code>wlan0</code>. Your SSH session over Ethernet may survive (it's an established connection to a directly-connected subnet), but any new connection to a host reached via the default route now goes out the wrong door — or nowhere, if WiFi can't actually reach it.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — DHCP installs whatever it's told</div>
+        <p>A DHCP client doesn't know your intent. If the WiFi AP's DHCP server hands out a default gateway and your client installs it at a low metric (NetworkManager's default for WiFi is often <strong>600</strong>, but a misconfigured profile or a wired-style metric can be lower), it can outrank your Ethernet's <strong>100</strong> — or, worse, both land at the same metric and routing becomes nondeterministic between boots.</p>
+      </div>
+
+      <p>The fix is to make the route order <em>deterministic and yours</em>. Pin metrics so the link you trust always wins, or strip the default route from the link that shouldn't carry general traffic. On the Orin we want Ethernet (carrying the LiDAR and the route to the rest of the boat's network) to own a low metric, and WiFi (just SSH from the shore laptop) to either have a high metric or no default route at all.</p>
+
+      <div class="codeblock">
+        <div class="code-head">netplan: deterministic metrics <span class="lang">bash</span></div>
+<pre><code class="language-bash"># /etc/netplan/01-usv.yaml  — Ethernet wins the default route
+network:
+  version: 2
+  ethernets:
+    eth0:
+      dhcp4: true
+      dhcp4-overrides:
+        route-metric: 100          # low metric → preferred default
+  wifis:
+    wlan0:
+      dhcp4: true
+      dhcp4-overrides:
+        route-metric: 700          # high metric → never the default if eth0 is up
+        use-routes: false          # or: ignore WiFi-supplied routes entirely
+      access-points:
+        "usv-shore": {}
+
+# apply and verify the order is what you intended:
+sudo netplan apply
+ip route | grep default
+# default via 192.168.1.1 dev eth0  metric 100   &lt;- wins
+# default via 10.42.0.1   dev wlan0 metric 700
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Debug it like a senior</div>
+        <p>Don't guess — ask the kernel. <code>ip route get &lt;dest&gt;</code> tells you the exact interface and source address a packet to that destination will use, right now. If it says <code>dev wlan0</code> when you expected <code>eth0</code>, you've found your theft. <code>ip monitor route</code> will even print routing-table changes live, so you can catch the moment DHCP rewrites it.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="two-nic-coexistence"><span class="sec-no">5</span>Two-NIC coexistence on a USV</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>roles, not just links</small></div>
+      <p>The clean architecture assigns each interface a <em>role</em> and keeps their traffic on separate physical controllers. On the boat: <strong>Ethernet</strong> is the heavy, deterministic sensor link (LiDAR, plus the rest of the wired network); <strong>WiFi</strong> is the human control/telemetry link (SSH, a low-rate status feed). They sit on different subnets, so each subnet route is directly-connected and unambiguous — only the <em>default</em> route is contested, which is exactly the problem §4 solved.</p>
+
+      <div class="mermaid">
+flowchart LR
+    L["LiDAR<br/>50 Mb/s UDP"] --> E["eth0<br/>GbE · metric 100"]
+    NET["boat LAN"] --- E
+    E --> ORIN["AGX Orin<br/>routing + control"]
+    ORIN --> WL["wlan0<br/>WiFi · metric 700"]
+    WL -.-> SHORE["shore laptop<br/>SSH only"]
+</div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The design rule</div>
+        <p>Separate subnets remove ambiguity on direct traffic; deterministic metrics remove ambiguity on the default route; and putting heavy data on the wire keeps the lossy, jittery medium (WiFi) carrying only what can tolerate it. Three independent decisions, each closing a class of failure.</p>
+      </div>
+
+      <p>One subtlety: with two interfaces, a packet sourced from <code>eth0</code>'s address but routed out <code>wlan0</code> (or vice versa) can be silently dropped by <strong>reverse-path filtering</strong> (<code>rp_filter</code> in <code>/proc/sys/net/ipv4/conf/*/rp_filter</code>). If you deliberately need asymmetric routing, you must loosen it (mode 2) or use policy routing (<code>ip rule</code>) to keep each interface's replies on its own link. For our role-separated design we don't need asymmetry, which is one more reason to prefer it.</p>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="wifi-shared-medium"><span class="sec-no">6</span>WiFi: a shared half-duplex medium</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>why WiFi jitters and Ethernet doesn't</small></div>
+      <p>Switched Ethernet is <strong>full-duplex</strong>: each port has a dedicated pair, TX and RX run simultaneously, no one else is on your wire. WiFi is the opposite — every station on a channel shares <em>one</em> half-duplex medium and must take turns. The arbitration is <strong>CSMA/CA</strong>: listen, and if the air is busy, back off a random interval and try again. Add a second talker and the air gets contended; latency stops being a constant and becomes a <em>distribution</em> with a long tail. That tail is jitter, and a control loop hates jitter far more than it hates a slightly higher mean.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>where the latency goes</small></div>
+      <p>On a contended channel, expected access delay rises sharply as offered load $\rho$ approaches the medium's effective capacity. A simple queueing intuition (treat the channel as one server) gives mean latency that blows up as utilization nears 1:</p>
+      <div class="math-box">$$ \mathbb{E}[T] \;\approx\; T_{\text{tx}} + \frac{T_{\text{tx}}\,\rho}{1-\rho}, \qquad \rho = \frac{\lambda}{\mu} $$</div>
+      <p>where $\lambda$ is arrival rate, $\mu$ the service rate, and $T_{\text{tx}}$ the bare transmit time. Two effects compound on WiFi: $\mu$ itself <em>shrinks</em> as more stations contend (airtime lost to backoff and collisions), and the variance — not just the mean — grows. Watch it live in the sim below.</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>📡</span> Latency vs load — Ethernet (full-duplex) vs WiFi (shared)</div>
+        <canvas id="sim-net"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What to notice</div>
+        <p>The green Ethernet curve stays flat and low almost all the way to line rate — a dedicated full-duplex link barely cares about offered load until it's nearly saturated. The orange WiFi curve sits higher even when idle and <em>climbs steeply</em> well before "100%," and adding stations drags its goodput cap (the knee) leftward. That's the whole argument for keeping the 50&nbsp;Mb/s LiDAR on Ethernet: on WiFi it would push you onto the steep part of the curve, where latency and jitter explode. WiFi gets SSH; the wire gets the data.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="buffers-bdp"><span class="sec-no">7</span>Socket buffers, backpressure &amp; the BDP</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>buffers are a trade, not a free win</small></div>
+      <p>Between the wire and your <code>recv()</code> sits a per-socket receive buffer (kernel limit <code>sk_rcvbuf</code>, tunable via <code>SO_RCVBUF</code>). It absorbs bursts so a momentary scheduling hiccup in your reader doesn't drop packets. But a buffer that's too big is its own disease: <strong>bufferbloat</strong>. Oversized queues hold stale packets, so by the time a datagram reaches you it may describe a world that's seconds out of date — useless for control. The right size is "big enough for your worst burst, no bigger."</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>bandwidth-delay product</small></div>
+      <p>The buffer a <em>throughput</em>-bound (TCP) flow needs to keep the pipe full is the <strong>bandwidth-delay product</strong> — how many bytes are "in flight" on the link at once:</p>
+      <div class="math-box">$$ \text{BDP} = \text{bandwidth} \times \text{RTT} $$</div>
+      <p>For a 1&nbsp;Gb/s link with a 1&nbsp;ms round trip: $\text{BDP} = 10^{9}\,\text{bit/s} \times 10^{-3}\,\text{s} = 10^{6}$ bits $= 125\,000$ bytes $\approx 122$&nbsp;KiB. A TCP window smaller than the BDP throttles throughput; much larger just adds latency. For a <em>latency</em>-bound sensor stream the logic flips — you want the buffer just large enough to ride out your reader's worst stall, by Little's law $L = \lambda W$: at $\lambda = 5\,000$ packets/s, tolerating a $W = 2$&nbsp;ms reader stall means queuing up to $L = 10$ packets, so size the buffer for that, not for a fat pipe.</p>
+
+      <div class="codeblock">
+        <div class="code-head">tune SO_RCVBUF <span class="lang">C</span></div>
+<pre><code class="language-c">int rcvbuf = 4 * 1024 * 1024;   /* 4 MiB request */
+setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &amp;rcvbuf, sizeof rcvbuf);
+/* the kernel doubles your request (bookkeeping) and caps it at
+   net.core.rmem_max — raise that sysctl if you need more:
+   sysctl -w net.core.rmem_max=8388608  */
+
+socklen_t len = sizeof rcvbuf;
+getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &amp;rcvbuf, &amp;len);
+/* read it back: this is what you actually got, not what you asked for */
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — UDP has no backpressure</div>
+        <p>TCP applies backpressure: if your reader is slow, the receive window shrinks and the sender is told to slow down. <strong>UDP does not.</strong> If the socket buffer fills, the kernel just <em>drops</em> packets and bumps the <code>RcvbufErrors</code> counter in <code>/proc/net/snmp</code>. For a high-rate LiDAR that means silently missing scans. Size <code>SO_RCVBUF</code> for your burst, read fast (epoll, Ch 08), and monitor that counter.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="udp-vs-tcp"><span class="sec-no">8</span>UDP vs TCP for sensor streams</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>pick the right failure mode</small></div>
+      <p>The choice isn't "reliable vs unreliable" — it's "which failure do you prefer." TCP guarantees delivery and order by <em>retransmitting</em> lost segments, which means a single dropped packet stalls <em>everything behind it</em> (head-of-line blocking) until the retransmit arrives. For a sensor publishing fresh state at high rate, a retransmitted old sample is worthless; you'd rather skip it and use the next fresh one. That's UDP's model: lose a packet, move on, no stall.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Property</th><th>UDP (datagram)</th><th>TCP (stream)</th></tr></thead>
+        <tbody>
+          <tr><td>Delivery</td><td>best-effort, may drop</td><td>reliable, retransmits</td></tr>
+          <tr><td>Order</td><td>not guaranteed</td><td>strictly in order</td></tr>
+          <tr><td>Boundaries</td><td>preserved (1 datagram = 1 recv)</td><td>none (you must frame)</td></tr>
+          <tr><td>On loss</td><td>gap, then fresh data</td><td>stall until retransmit (HOL)</td></tr>
+          <tr><td>Backpressure</td><td>none (kernel drops)</td><td>flow control via window</td></tr>
+          <tr><td>Best for</td><td>high-rate fresh samples (LiDAR, IMU, video)</td><td>commands, config, logs (must arrive)</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — the Orin's split</div>
+        <p>On the USV: the LiDAR streams <strong>UDP</strong> — a missed scan is irrelevant next cycle, and we never want a retransmit to stall the freshest frame. Mission waypoints, parameter updates, and the SSH session ride <strong>TCP</strong> — those must arrive, exactly and in order, and the data volume is tiny so retransmit latency is a non-issue. Same socket API, opposite guarantees, each matched to its job.</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io09-default-theft">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">Your Orin has <code>default via 192.168.1.1 dev eth0 metric 100</code> working fine. WiFi reconnects and DHCP installs <code>default via 10.42.0.1 dev wlan0 metric 50</code>. New connections to hosts reached via the default route suddenly fail. What happened?</div>
+        <ul class="ex-options">
+          <li data-correct="false">The Ethernet route was deleted by the kernel because two defaults can't coexist.</li>
+          <li data-correct="true">Both are <code>0.0.0.0/0</code>, so the lower metric (50, wlan0) wins the tie and now carries all non-local traffic — out an interface that can't reach those hosts.</li>
+          <li data-correct="false">WiFi has a longer prefix than Ethernet, so longest-prefix match sends traffic to wlan0.</li>
+          <li data-correct="false">The receive buffer overflowed and the kernel rerouted traffic to recover.</li>
+        </ul>
+        <div class="ex-explain">Both default routes have prefix length 0, so longest-prefix match is a tie; the <strong>metric</strong> breaks it and lower wins. WiFi's 50 beats Ethernet's 100, stealing the default route. Fix it by pinning Ethernet to a lower metric than WiFi (or stripping WiFi's default with <code>use-routes: false</code>). Diagnose with <code>ip route get &lt;dest&gt;</code>.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io09-bdp" data-answer="125000" data-tol="500">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">A TCP flow runs over the Orin's 1&nbsp;Gb/s ($10^9$ bit/s) Ethernet link to a host with a 1&nbsp;ms round-trip time. What is the bandwidth-delay product in <strong>bytes</strong>? (Hint: $\text{BDP} = \text{bandwidth} \times \text{RTT}$, then convert bits to bytes.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">bytes</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$\text{BDP} = 10^9\,\text{bit/s} \times 10^{-3}\,\text{s} = 10^6$ bits. Divide by 8: $10^6 / 8 = 125\,000$ bytes ($\approx 122$&nbsp;KiB). A TCP window below this throttles throughput; far above it just adds queueing latency (bufferbloat).</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io09-nonblock-udp">
+        <div class="ex-head"><span class="badge">Q3</span> Coding challenge — read the route, then a non-blocking UDP socket</div>
+        <div class="ex-q">First, give the one command that asks the kernel exactly which interface a packet to <code>8.8.8.8</code> will use. Then write the C to create a UDP socket, set it <code>O_NONBLOCK</code>, <code>bind()</code> to a port, and drain it in a loop that returns cleanly on <code>EAGAIN</code> (so it can live inside an epoll loop, Ch 08).</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body"><code>ip route get</code> takes a destination. For non-blocking, fetch flags with <code>fcntl(fd, F_GETFL)</code>, OR in <code>O_NONBLOCK</code>, set them back. A non-blocking <code>recvfrom()</code> with nothing to read returns <code>-1</code> with <code>errno == EAGAIN</code> (a.k.a. <code>EWOULDBLOCK</code>) — that's "drained," not an error.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p>Read the route the kernel would actually pick:</p>
+          <div class="codeblock"><div class="code-head">terminal <span class="lang">bash</span></div><pre><code class="language-bash">ip route get 8.8.8.8
+# 8.8.8.8 via 192.168.1.1 dev eth0 src 192.168.1.50</code></pre></div>
+          <div class="codeblock"><div class="code-head">nb_udp.c <span class="lang">C</span></div><pre><code class="language-c">#include &lt;arpa/inet.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;string.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;unistd.h&gt;
+
+int main(void) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd &lt; 0) { perror("socket"); return 1; }
+
+    int fl = fcntl(fd, F_GETFL, 0);            /* set non-blocking */
+    fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port   = htons(2368);
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bind(fd, (struct sockaddr *)&amp;a, sizeof a) &lt; 0) {
+        perror("bind"); return 1;
+    }
+
+    /* in a real app this runs when epoll says fd is readable */
+    char buf[2048];
+    for (;;) {
+        ssize_t n = recvfrom(fd, buf, sizeof buf, 0, NULL, NULL);
+        if (n &gt;= 0) {
+            /* process the datagram of n bytes here */
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) break;  /* drained */
+        if (errno == EINTR) continue;                        /* retry */
+        perror("recvfrom"); break;                           /* real error */
+    }
+    close(fd);
+    return 0;
+}</code></pre></div>
+          <p>The loop reads every queued datagram, then exits on <code>EAGAIN</code> when the socket buffer is empty — exactly the edge-triggered drain pattern epoll wants. Handle <code>EINTR</code> (interrupted syscall) by retrying, just like the robust read loops from Chapter 01.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>A packet's path is NIC DMA &rarr; hard IRQ &rarr; NAPI softirq &rarr; IP/UDP/TCP demux &rarr; socket buffer &rarr; <code>recv()</code>. Sockets are file descriptors, so they live in the same fd table and epoll loop as everything else. The routing table picks the exit interface by longest-prefix match, then metric — which is why a second NIC's low-metric DHCP default route can steal your traffic; pin metrics deterministically and put heavy data on full-duplex Ethernet, leaving jittery shared-medium WiFi for SSH. Size <code>SO_RCVBUF</code> for your worst burst (not bigger — bufferbloat), use the BDP for TCP throughput, and pick UDP for fresh-sample sensor streams where a retransmit would only deliver stale data. Next: CAN and SocketCAN — networking semantics on a bus built for real-time actuators.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+<script src="../assets/io-sim.js"></script>
+<script>EM.ioDemo.netLink("sim-net");</script>
+</body>
+</html>

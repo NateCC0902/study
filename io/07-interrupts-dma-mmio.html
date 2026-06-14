@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>How Data Moves: Interrupts, DMA &amp; MMIO — Linux I/O for Robotics</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="07-interrupts-dma-mmio">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · Ch 07</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · Chapter 07 · How It Moves</div>
+        <h1>How Data Moves: Interrupts, DMA &amp; MMIO</h1>
+        <p>A device has bytes. Your program wants them. Between those two facts lives the single most important performance decision in robotics I/O: <em>who actually copies the data</em>. Get it wrong and a chatty sensor starves your control loop. Get it right and a 100&nbsp;Mb/s LiDAR barely registers on <code>top</code>.</p>
+        <div class="meta"><span>⏱ ~40 min</span><span>🧠 PIO / IRQ / DMA</span><span>⚡ /proc/interrupts</span><span>∑ CPU% per IRQ</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="three-ways"><span class="sec-no">1</span>Three ways to move a byte</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>There are exactly three mechanisms a CPU can use to get data out of a device's registers and into memory. Everything else — coalescing, NAPI, ring buffers — is an optimization layered on top of these three.</p>
+      <ol>
+        <li><strong>Programmed I/O (PIO):</strong> the CPU itself reads each word from a device register and writes it to memory, in a loop. The CPU <em>is</em> the data path. Simple, and a catastrophe at high rates.</li>
+        <li><strong>Interrupt-driven I/O:</strong> the CPU goes off and does other work; when the device has data ready it raises an <strong>IRQ</strong> (interrupt request) on a physical line. The CPU stops what it's doing, runs a handler, copies the data, and resumes. No busy-waiting — but still the CPU copying.</li>
+        <li><strong>DMA (Direct Memory Access):</strong> a dedicated engine on the bus moves the bytes from the device straight into RAM with the CPU uninvolved. The CPU gets only <em>one</em> interrupt at the end: "your buffer is full." The CPU never touches the payload.</li>
+      </ol>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The mailbox analogy</div>
+        <p>PIO is standing at the mailbox refreshing it every second. Interrupts are a doorbell that rings when mail arrives — you do other things until it rings. DMA is hiring a courier who silently fills your inbox and taps you once it's full. As the mail rate climbs, the doorbell rings nonstop and you get nothing else done; the courier scales effortlessly.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>why PIO dies</small></div>
+      <p>Say a device delivers $R$ bytes per second and the CPU moves $w$ bytes per access. Under PIO the CPU performs</p>
+      <div class="math-box">$$ \text{accesses/s} = \frac{R}{w} $$</div>
+      <p>A 100&nbsp;Mb/s sensor is $R = 12.5$&nbsp;MB/s. With 4-byte word accesses that is $3.1\times10^{6}$ register reads <em>every second</em>, each one a slow uncached MMIO access that can stall the pipeline for hundreds of nanoseconds. The CPU does nothing else. This is why PIO is fine for a one-shot config register and fatal for a stream.</p>
+
+      <div class="mermaid">
+flowchart LR
+    DEV["Device<br/>FIFO"] -->|"PIO: CPU reads<br/>every word"| CPU1["CPU"]
+    CPU1 -->|"stores each word"| MEM1["RAM"]
+    DEV2["Device<br/>FIFO"] -->|"DMA engine<br/>moves bytes"| MEM2["RAM"]
+    DEV2 -.->|"1 completion IRQ"| CPU2["CPU"]
+</div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="mmio-volatile"><span class="sec-no">2</span>MMIO: the device looks like memory</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>registers with addresses</small></div>
+      <p>How does the CPU "read a device register" at all? On every modern SoC the answer is <strong>memory-mapped I/O</strong>. The device's control and status registers are wired onto the same physical address bus as RAM, just at a different range. Reading address <code>0x0c260000</code> doesn't hit DRAM — the memory controller routes it to a peripheral. To the CPU it's an ordinary load/store; to the hardware it's a command.</p>
+      <p>The kernel maps that physical range into a driver's virtual address space with <code>ioremap()</code>. Userspace can do the same trick on a permitted device by <code>mmap</code>-ing <code>/dev/mem</code> or a UIO node (we met UIO drivers in Ch&nbsp;04). You write a C struct pointer over the register block and access fields by name.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>and why <code>volatile</code> is mandatory</small></div>
+      <p>Here is the subtle, career-defining part. The compiler assumes memory is <em>normal</em>: if you read the same address twice with nothing writing in between, it caches the value and skips the second load. For a status register the device updates behind the compiler's back, that optimization turns a poll loop into an infinite loop. The fix is <code>volatile</code>: it forbids the compiler from caching, reordering, or eliding the access.</p>
+
+      <div class="codeblock">
+        <div class="code-head">mmio.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;fcntl.h&gt;
+#include &lt;sys/mman.h&gt;
+#include &lt;stdint.h&gt;
+
+#define STATUS_REG  0x18      /* offset within the register block */
+#define DATA_VALID  (1u &lt;&lt; 0)
+
+int fd = open("/dev/mem", O_RDWR | O_SYNC);          /* O_SYNC =&gt; uncached */
+volatile uint32_t *regs =
+    mmap(NULL, 0x1000, PROT_READ | PROT_WRITE,
+         MAP_SHARED, fd, 0x0c260000);                /* phys base, page-aligned */
+
+/* WRONG without volatile: compiler reads STATUS_REG once, loops forever. */
+while (!(regs[STATUS_REG / 4] &amp; DATA_VALID))
+    ;                                                /* spin until device sets bit */
+
+uint32_t sample = regs[0x20 / 4];                    /* read the data register */
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — <code>volatile</code> is not a memory barrier</div>
+        <p><code>volatile</code> stops the <em>compiler</em> from reordering. It does <strong>not</strong> stop the CPU or the bus from reordering, and it is not atomic. Real drivers use <code>readl()</code>/<code>writel()</code> accessors, which add the architecture's MMIO barriers so a "configure, then start" sequence actually reaches the device in order. On ARM64 (the Orin) that ordering is not free — skipping the barrier is the classic "works on x86, hangs on ARM" bug.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="interrupts-isr"><span class="sec-no">3</span>Interrupts: top half, bottom half, threaded IRQ</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the doorbell and the unwritten rule</small></div>
+      <p>An interrupt is brutal: the CPU drops whatever userspace or kernel code was running, masks further interrupts, and jumps to the driver's <strong>interrupt service routine (ISR)</strong>. While the ISR runs, that core is doing nothing else — not your control loop, not the scheduler. So there is one unwritten rule: <strong>an ISR must be short.</strong> Microseconds, not milliseconds. Never sleep, never wait on a lock that might block.</p>
+      <p>But real work — parsing a packet, waking a reader, refilling a DMA ring — isn't always short. Linux solves this with a split:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Stage</th><th>Context</th><th>Does</th><th>Constraint</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Top half</strong> (hard IRQ)</td><td>interrupt context, IRQs off</td><td>ack the device, grab data into a buffer, schedule the rest</td><td>fast, atomic, cannot sleep</td></tr>
+          <tr><td><strong>Bottom half</strong> (softirq / tasklet / workqueue)</td><td>softirq or kernel thread</td><td>the heavy lifting — protocol parsing, waking readers</td><td>can be deferred; workqueue may sleep</td></tr>
+          <tr><td><strong>Threaded IRQ</strong></td><td>dedicated kernel thread</td><td>the whole handler, but schedulable &amp; preemptible</td><td>the default on PREEMPT_RT</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="layer"><span class="step">③</span> Code <small>a threaded handler</small></div>
+      <p>The modern in-tree pattern is <code>request_threaded_irq()</code>: a tiny top half that quiets the device and returns <code>IRQ_WAKE_THREAD</code>, and a thread function that does everything else in schedulable context. This is gold for real-time robotics — you can give the IRQ thread an RT priority and it competes fairly with your control loop instead of preempting it blindly.</p>
+
+      <div class="codeblock">
+        <div class="code-head">sensor_drv.c <span class="lang">C</span></div>
+<pre><code class="language-c">/* TOP HALF: runs in hard-IRQ context. Keep it tiny. */
+static irqreturn_t sensor_hardirq(int irq, void *dev_id)
+{
+    struct sensor *s = dev_id;
+    u32 st = readl(s-&gt;base + STATUS_REG);     /* MMIO read w/ barrier */
+    if (!(st &amp; IRQ_PENDING))
+        return IRQ_NONE;                       /* not ours (shared line) */
+    writel(st, s-&gt;base + STATUS_REG);          /* ack: clear the bit */
+    return IRQ_WAKE_THREAD;                    /* defer the real work */
+}
+
+/* BOTTOM HALF: runs in a kernel thread; may sleep, take mutexes. */
+static irqreturn_t sensor_thread(int irq, void *dev_id)
+{
+    struct sensor *s = dev_id;
+    parse_and_queue(s);                        /* heavy work, safely */
+    wake_up_interruptible(&amp;s-&gt;readq);          /* unblock read() */
+    return IRQ_HANDLED;
+}
+
+request_threaded_irq(s-&gt;irq, sensor_hardirq, sensor_thread,
+                     IRQF_SHARED, "sensor", s);
+</code></pre>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="proc-interrupts"><span class="sec-no">4</span>/proc/interrupts and IRQ affinity</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>where interrupts land</small></div>
+      <p>Every interrupt is delivered to <em>a</em> CPU core. On a multi-core SoC like the Orin (12 Cortex-A78AE cores) that choice matters enormously: if a high-rate NIC and your control loop both land on core 0, the NIC's interrupt storm steals cycles from the loop. The cure is <strong>SMP affinity</strong> — pinning an IRQ to a core (or set of cores) you've reserved for it.</p>
+      <p>Start by reading the live tally. <code>/proc/interrupts</code> has one row per IRQ, one column per CPU, plus the controller and device name:</p>
+
+      <div class="codeblock">
+        <div class="code-head">shell <span class="lang">bash</span></div>
+<pre><code class="language-bash"># one row per IRQ; columns are per-CPU counts
+cat /proc/interrupts
+#            CPU0     CPU1     CPU2     CPU3
+#  56:    1048576        0        0        0   GICv3  72 Edge    eth0
+#  58:        412        0        0        0   GICv3  98 Level   nvme0q0
+#  61:       2048        0       17        0   GICv3 104 Edge    can0
+
+# watch the rate live (delta per second)
+watch -n1 'grep -E "eth0|nvme" /proc/interrupts'
+
+# which core is IRQ 56 allowed on? (bitmask, hex)
+cat /proc/irq/56/smp_affinity        # e.g. fff = any of 12 cores
+cat /proc/irq/56/smp_affinity_list   # human form, e.g. 0-11</code></pre>
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>pin the IRQ</small></div>
+      <p>To move IRQ 56 (eth0) onto core 3 alone, write the bitmask. Core 3 is bit 3, so the mask is <code>8</code>. Use <code>smp_affinity_list</code> if you'd rather name cores. <strong>Note:</strong> on most systems <code>irqbalance</code> runs as a daemon and will happily undo your pin — stop or mask it first for a deterministic setup.</p>
+
+      <div class="codeblock">
+        <div class="code-head">shell <span class="lang">bash</span></div>
+<pre><code class="language-bash">sudo systemctl stop irqbalance            # stop it fighting you
+
+echo 8     | sudo tee /proc/irq/56/smp_affinity        # core 3 (bit 3)
+echo 3     | sudo tee /proc/irq/56/smp_affinity_list   # same, by name
+
+# pair it with isolating the control-loop core from the scheduler:
+#   kernel cmdline: isolcpus=2 nohz_full=2 rcu_nocbs=2
+# then run the 20 Hz loop pinned to core 2:
+taskset -c 2 ./control_loop</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> The pattern that works</div>
+        <p>Sensor IRQs on a couple of "housekeeping" cores; the control loop alone on an <code>isolcpus</code> core with affinity locked to it. Now a LiDAR burst can hammer its core all it wants — the loop's core never sees the interrupt.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="dma-coherent-streaming"><span class="sec-no">5</span>DMA: descriptors, coherent vs streaming, and the cache trap</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>the courier needs an address</small></div>
+      <p>DMA hands the data path to an engine, but that engine speaks <em>physical</em> (or IOMMU-mapped bus) addresses, not the virtual addresses your driver uses. So the driver must (1) allocate a buffer, (2) get its DMA address, (3) program that address plus a length into the engine via MMIO, (4) start it, and (5) handle one completion IRQ. For streams the buffer is usually a <strong>ring of descriptors</strong> so the engine keeps filling slots while you drain earlier ones.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>the whole point</small></div>
+      <p>Recall §1's PIO cost of $R/w$ accesses per second. DMA collapses the CPU's per-stream interrupt cost to roughly one IRQ per <em>buffer</em>, not per word. If the engine fills a buffer of $B$ bytes before interrupting, the interrupt rate drops to</p>
+      <div class="math-box">$$ f_{\text{IRQ}}^{\text{DMA}} = \frac{R}{B} \quad\ll\quad f_{\text{IRQ}}^{\text{PIO/word}} = \frac{R}{w} $$</div>
+      <p>For $R=12.5$&nbsp;MB/s and a $B=64$&nbsp;KiB buffer that's $\approx 190$ interrupts/s instead of millions of CPU copies. The sim below makes this concrete.</p>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>coherent vs streaming</small></div>
+      <p>There are two ways to set up the buffer, and the difference is all about the cache:</p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Mapping</th><th>API</th><th>Cache</th><th>Use for</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Coherent</strong> (consistent)</td><td><code>dma_alloc_coherent()</code></td><td>kept coherent by HW/uncached; no manual sync</td><td>long-lived rings, descriptor tables</td></tr>
+          <tr><td><strong>Streaming</strong></td><td><code>dma_map_single()</code> / <code>dma_map_sg()</code></td><td>cached; <em>you</em> sync before/after</td><td>one-shot transfers of existing buffers</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the cache coherency trap (very real on ARM64)</div>
+        <p>With a streaming map, the CPU's cache and the DMA engine see memory differently. Before the device reads your buffer you must <code>dma_sync_single_for_device()</code> (flush dirty cache lines out); after the device writes, you must <code>dma_sync_single_for_cpu()</code> (invalidate stale lines) <em>before</em> reading. Skip the sync and you read <strong>stale cached data</strong> while fresh bytes sit in RAM — an intermittent, alignment-dependent corruption that x86's snooping hardware often hides but the Orin will not. This bug eats weeks. An IOMMU (SMMU on Tegra) sits in the path and remaps/bounds the engine's addresses, but it does not relieve you of cache sync.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="coalescing-napi"><span class="sec-no">6</span>Coalescing, NAPI, and the latency–throughput knob</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>even one IRQ per packet is too many</small></div>
+      <p>DMA gives you one IRQ per buffer — but a busy NIC receiving 100k packets/s with one DMA-filled descriptor each would still fire 100k interrupts/s. Each interrupt costs context save/restore, cache pollution, and a trip through the handler. Two mechanisms tame this:</p>
+      <ul>
+        <li><strong>Interrupt coalescing:</strong> the NIC waits until it has accumulated <em>N</em> packets <em>or</em> a timeout <em>T</em> elapses, then fires one IRQ for the batch. Fewer interrupts, lower CPU — at the cost of up to $T$ extra latency. This is a direct throughput-vs-latency dial, set via <code>ethtool -C</code>.</li>
+        <li><strong>NAPI:</strong> when interrupts start storming, the driver <em>disables</em> the RX interrupt and switches to <strong>polling</strong> the DMA ring in a softirq, draining many packets per poll. When the ring drains, it re-enables the interrupt. Best of both: interrupt-driven when idle (low latency), poll-driven under load (no storm).</li>
+      </ul>
+
+      <div class="layer"><span class="step">③</span> Code <small>tune coalescing</small></div>
+      <div class="codeblock">
+        <div class="code-head">shell <span class="lang">bash</span></div>
+<pre><code class="language-bash"># see current coalescing settings for the LiDAR NIC
+ethtool -c eth0
+#   rx-usecs: 50        (wait up to 50 µs to batch RX IRQs)
+#   rx-frames: 64       (or until 64 frames arrive)
+
+# favor THROUGHPUT (batch harder; CPU drops, latency rises):
+sudo ethtool -C eth0 rx-usecs 100 rx-frames 128
+
+# favor LATENCY (fire sooner; more IRQs, more CPU):
+sudo ethtool -C eth0 rx-usecs 10  rx-frames 8
+
+# count how hard NAPI is working / drops under load:
+ethtool -S eth0 | grep -E "rx_packets|rx_dropped|napi"</code></pre>
+      </div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> The CPU budget of an interrupt</div>
+        <p>If each interrupt (entry + handler + exit) costs $c$ seconds of CPU and you take $f_{\text{IRQ}}$ of them per second, the steady-state CPU fraction is $\;\text{CPU} = f_{\text{IRQ}}\cdot c$. With $c \approx 3\,\mu\text{s}$ and 100k IRQ/s that's $0.30 = 30\%$ of a core gone to overhead alone. Coalesce to 5k IRQ/s and it's $1.5\%$. <strong>That recovered core is your control loop's headroom.</strong></p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="sim-section"><span class="sec-no">7</span>See it: CPU cost of PIO vs IRQ vs DMA</h2>
+      <p>This is the whole chapter in one picture. Drag the transfer size, word size, and the IRQ FIFO depth (how many words the device buffers before each interrupt) and watch the CPU's workload for each scheme. PIO scales with bytes; IRQ scales with bytes-over-FIFO; DMA is flat at one.</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>🔀</span> Data movement: CPU operations per transfer</div>
+        <canvas id="sim-move"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What to notice</div>
+        <p>PIO's bar (red) grows linearly with the transfer — it's literally the CPU copying every word, and it dwarfs the others by orders of magnitude. Deepening the IRQ FIFO slides the orange bar left: a bigger hardware FIFO means fewer interrupts for the same data (that's coalescing in hardware). DMA (green) stays pinned at <strong>1</strong> no matter how large the transfer — the CPU's cost is constant because the engine, not the CPU, moves the bytes. The gap between green and the rest is the CPU headroom you're buying.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="real-lidar"><span class="sec-no">8</span>Real case: high-rate LiDAR on the AGX Orin USV</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>this is the whole point</small></div>
+      <p>Our USV's spinning LiDAR streams point clouds over Gigabit Ethernet — roughly $R \approx 100$&nbsp;Mb/s of UDP, tens of thousands of packets per second at full spin. The Jetson AGX Orin also runs the 20&nbsp;Hz heading-and-thrust control loop that absolutely cannot stutter (every chapter of the PID course depends on that $dt=50$&nbsp;ms being honest).</p>
+      <p>If the NIC interrupted per packet on the control-loop core, the loop would miss deadlines under LiDAR load. The fix stacks every idea in this chapter:</p>
+      <ul>
+        <li><strong>DMA:</strong> the Orin's Ethernet controller DMAs frames straight into a ring in RAM. The CPU never copies a packet body.</li>
+        <li><strong>Coalescing + NAPI:</strong> under the LiDAR storm the driver polls the ring in softirq, collapsing ~30k+ IRQ/s into a few thousand batched wakeups.</li>
+        <li><strong>Affinity + isolation:</strong> <code>eth0</code>'s IRQ and its NAPI softirq are pinned to a housekeeping core; the control loop owns an <code>isolcpus</code> core by itself.</li>
+      </ul>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — the numbers that let it ship</div>
+        <p>Per-packet IRQs at 30k/s with $c\approx3\,\mu$s would burn $\sim$9% of a core just on interrupt overhead, spiking the loop core's latency. After DMA + coalescing to $\sim$3k batched IRQ/s on a <em>separate</em> core, the control loop's core shows near-zero interrupt activity in <code>/proc/interrupts</code> and holds its 50&nbsp;ms period with microsecond jitter. Same LiDAR, same data — the difference is entirely <em>who moves the bytes and where the interrupts land.</em></p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io07-why-dma">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">A sensor streams 12.5&nbsp;MB/s continuously. Why is DMA the right choice over interrupt-per-word PIO for the data path?</div>
+        <ul class="ex-options">
+          <li data-correct="false">DMA is faster per byte than the CPU's memory copy.</li>
+          <li data-correct="true">DMA moves the payload with a dedicated engine, so the CPU spends ~1 interrupt per buffer instead of millions of register reads per second — freeing it for the control loop.</li>
+          <li data-correct="false">DMA avoids using RAM, so there is no memory pressure.</li>
+          <li data-correct="false">DMA does not require the <code>volatile</code> keyword.</li>
+        </ul>
+        <div class="ex-explain">The win isn't raw copy speed — it's <em>offload</em>. PIO makes the CPU the data path ($R/w \approx 3.1$M accesses/s here); DMA reduces the CPU's involvement to programming descriptors and fielding one completion IRQ per buffer. The recovered CPU cycles are what keep the 20&nbsp;Hz loop on time.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io07-cpu-percent" data-answer="9.0" data-tol="0.5">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">A NIC receives 30,000 packets/s and fires one interrupt per packet. Each interrupt costs $c = 3\,\mu\text{s}$ of CPU (entry + handler + exit). What percentage of a single core does interrupt handling consume? (Hint: $\text{CPU} = f_{\text{IRQ}}\cdot c$, then ×100.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">% of a core</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$\text{CPU} = 30000 \times 3\times10^{-6}\,\text{s} = 0.09 = 9.0\%$ of one core — just on interrupt overhead, before any useful work. Coalescing to 3,000 batched IRQ/s drops it to $0.9\%$. That recovered headroom is exactly why we coalesce and pin affinity off the control-loop core.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io07-affinity">
+        <div class="ex-head"><span class="badge">Q3</span> Hands-on — find an IRQ and pin it</div>
+        <div class="ex-q">On the Orin, find the IRQ number for the Ethernet interface <code>eth0</code> from <code>/proc/interrupts</code>, then pin it to core 3 alone and confirm. Account for the daemon that would otherwise undo your change.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">The IRQ number is the leftmost column of the row whose name (rightmost field) is <code>eth0</code>. SMP affinity lives in <code>/proc/irq/&lt;N&gt;/smp_affinity</code> as a CPU bitmask in hex — core 3 is bit 3. And remember <code>irqbalance</code>.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <div class="codeblock"><div class="code-head">shell <span class="lang">bash</span></div>
+<pre><code class="language-bash"># 1) find the IRQ number for eth0 (e.g. it prints "56")
+grep eth0 /proc/interrupts | awk -F: '{print $1}' | tr -d ' '
+
+# 2) stop the balancer so the pin sticks
+sudo systemctl stop irqbalance
+
+# 3) pin IRQ 56 to core 3 only (bit 3 =&gt; mask 0x8)
+echo 8 | sudo tee /proc/irq/56/smp_affinity
+#   or the readable form:
+echo 3 | sudo tee /proc/irq/56/smp_affinity_list
+
+# 4) confirm, then verify counts now climb only under CPU3
+cat /proc/irq/56/smp_affinity_list      # =&gt; 3
+watch -n1 'grep eth0 /proc/interrupts'</code></pre>
+          </div>
+          <p>The interrupt count should now increment only in the CPU3 column. Keep this core distinct from the one running your <code>isolcpus</code>-pinned control loop, and the LiDAR storm can never steal the loop's cycles.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>Three ways to move bytes: <strong>PIO</strong> (CPU copies every word, $R/w$ accesses/s — fatal for streams), <strong>interrupts</strong> (a doorbell; ISR top half stays tiny, real work goes to a bottom half or threaded IRQ), and <strong>DMA</strong> (an engine moves the payload, the CPU gets ~one IRQ per buffer). Devices appear as memory via <strong>MMIO</strong>, which is why register access needs <code>volatile</code> plus real barriers. <code>/proc/interrupts</code> shows where IRQs land; <code>/proc/irq/N/smp_affinity</code> pins them off your control-loop core. DMA streaming maps demand <strong>cache sync</strong> on ARM64 or you read stale data. <strong>Coalescing</strong> and <strong>NAPI</strong> trade a little latency for a lot of CPU headroom — exactly what keeps the Orin's 20&nbsp;Hz loop on time under a LiDAR flood. Next: when one thread must watch many fds at once — <code>poll</code>, <code>epoll</code>, and <code>io_uring</code>.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+<script src="../assets/io-sim.js"></script>
+<script>EM.ioDemo.dataMovement("sim-move");</script>
+</body>
+</html>

@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>CAN 與 SocketCAN — 機器人的 Linux I/O</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="10-can-socketcan">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · 第 10 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · 第 10 章 · 現場匯流排</div>
+        <h1>CAN 與 SocketCAN：驅動致動器的那條線</h1>
+        <p>序列埠與乙太網路搬的是<em>資料</em>。而當一個推進器、一顆舵機、一個電池監控器全都得共用兩條線、永不碰撞、而且在某個節點電壓驟降（brown out）時還得繼續工作，你伸手去拿的就是 CAN。在 Linux 上最棒的一點是：它會以一個網路介面（network interface）的身分出現，所以你用 socket 與 <code>ip</code> 去驅動它，而不是某個專屬驅動程式（driver）。本章帶你從線上的差動訊號對（differential pair）一路爬到 <code>candump can0</code>。</p>
+        <div class="meta"><span>⏱ 約 40 分鐘</span><span>🧠 仲裁</span><span>⚡ SocketCAN 啟用</span><span>∑ 匯流排負載</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="why-can"><span class="sec-no">1</span>機器人為什麼需要 CAN</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先把畫面建起來</small></div>
+      <p>你已經有了 UART（第 06 章）與乙太網路（第 09 章）。為什麼還要加第三條匯流排（bus）？因為致動器（actuator）的問題跟感測器不一樣。GPS 只是一直串流；一個位元組晚到了，誰在乎。但是一個馬達控制器、一顆轉向舵機、一個電力監控器，全都在<em>同樣</em>兩條線上講話，而且一直講，那句寫著「緊急停止」的訊息必須在線上贏過那句寫著「電池剩 84%」的訊息。CAN——Controller Area Network，誕生於 1980 年代的汽車業——就是為了這件事而生的：多節點、共用一對線、確定性優先權，並且在匯流排上有東西掛掉時也能優雅地撐住。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話的模型</div>
+        <p>CAN 是一條<strong>共用的兩線廣播匯流排，訊息 ID 最低的那個永遠贏得線權</strong>——而且它贏的時候<em>不會</em>毀掉輸的那一方。光是這一個特性，就在一對便宜的雙絞線上給了你無碰撞、依優先權排序、多主機（multi-master）的訊息傳遞。</p>
+      </div>
+
+      <p>注意 CAN <em>不是</em>什麼：它不是寄給某個節點的。一個 CAN 訊框（frame）沒有目的地欄位。每個節點都聽得到每一個訊框，再依 11 位元（或 29 位元）的<strong>識別碼（identifier）</strong>自己決定要不要管。這個 ID 同時是訊息的<em>名字</em>，也是它的<em>優先權</em>。記住這個念頭——它一次解釋了仲裁（arbitration）、硬體濾波，還有匯流排負載。</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 實際案例——USV 致動器匯流排</div>
+        <p>在我們的 Jetson AGX Orin USV 上，重型感測器（光達、相機）走乙太網路與 USB。而<em>致動器</em>——雙推進器電子調速器（ESC）、舵／方位角伺服機，還有電池管理系統（BMS）——掛在單一一條 500&nbsp;kbit/s 的 CAN 匯流排上。另外，船用儀器（GPS 羅盤、深度、風速）講的是 NMEA&nbsp;2000，那其實就是跑在更粗的接頭上、速率 250&nbsp;kbit/s 的 CAN。兩個實體 CAN 區段，一套心智模型。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="physical-layer"><span class="sec-no">2</span>實體層：兩條線、一個顯性位元</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>線上到底有什麼</small></div>
+      <p>CAN 是一條<strong>差動（differential）</strong>匯流排：兩個訊號，CAN&nbsp;High（CANH）與 CAN&nbsp;Low（CANL）。接收端看的是兩者的<em>差</em> $V_{\text{diff}} = V_{\text{CANH}} - V_{\text{CANL}}$，而不是絕對電壓。這就是為什麼 CAN 能在塞滿馬達雜訊的引擎室或船殼裡活下來：一個突波同時打在兩條線上、量大致相等，相減時就抵消了。這跟讓乙太網路雙絞線那麼穩健的，是同一個共模拒斥（common-mode rejection）招式。</p>
+
+      <p>匯流排剛好只有兩種狀態，它們的名字很重要：</p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>狀態</th><th>邏輯位元</th><th>$V_{\text{diff}}$（高速 CAN）</th><th>由誰驅動</th></tr></thead>
+        <tbody>
+          <tr><td><strong>顯性（dominant）</strong></td><td>0</td><td>約 2&nbsp;V（CANH≈3.5&nbsp;V，CANL≈1.5&nbsp;V）</td><td>有收發器（transceiver）主動把這對線撐開</td></tr>
+          <tr><td><strong>隱性（recessive）</strong></td><td>1</td><td>約 0&nbsp;V（兩者皆 ≈2.5&nbsp;V）</td><td>沒人驅動；電阻讓這對線一起回到中位</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 顯性贏過隱性——是物理上的</div>
+        <p>這是一個線接及閘（wired-AND）。只要<em>有任何一個</em>節點驅動顯性（0），而其他人停在隱性（1），整條匯流排都讀成 0。一個隱性位元永遠無法蓋過一個顯性位元。這不是軟體規則——這是收發器物理上實際做的事。CAN 一切聰明的招數，都是從這一個事實流出來的。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>端接與 60 歐姆測試</small></div>
+      <p>這對線是一條傳輸線（transmission line），所以它必須在<em>兩端</em>都用 $120\,\Omega$ 電阻端接（terminate）以消除反射。這兩個端接電阻在匯流排兩端並聯，所以在一條關閉電源、健康的匯流排上，用歐姆計量會讀到：</p>
+      <div class="math-box">$$ R_{\text{bus}} = \frac{R_1 \, R_2}{R_1 + R_2} = \frac{120 \cdot 120}{120 + 120} = 60\;\Omega $$</div>
+      <p>這是你手上最有用的一項現場測試。把匯流排斷電，用三用電表量 CANH 對 CANL：</p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>讀數</th><th>診斷</th></tr></thead>
+        <tbody>
+          <tr><td>≈ 60&nbsp;Ω</td><td>健康——兩個端接電阻都在。</td></tr>
+          <tr><td>≈ 120&nbsp;Ω</td><td>少了一個端接——短又慢時或許還能跑，但一拉高速度／拉長線就掛。</td></tr>
+          <tr><td>≈ 40&nbsp;Ω</td><td>有三個端接——有人在中間又加了一個。把它拿掉。</td></tr>
+          <tr><td>開路／非常高</td><td>兩個端接都不見，或有一條線斷了。</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——端接電阻裝在兩端，不是每個節點</div>
+        <p>端接屬於<em>匯流排</em>，不屬於節點。剛好兩個，分別在兩個實體最末端。USV 上常見的失敗：每塊開發板出貨時都帶一個可用跳線啟用的 120&nbsp;Ω 端接電阻，你接上四個節點，現在匯流排讀到 30&nbsp;Ω、跑不了 500k。把內側節點的跳線拔掉。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="arbitration"><span class="sec-no">3</span>仲裁：最低 ID 獲勝，且不碰撞</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>逐位元邊送邊聽</small></div>
+      <p>優雅的部分來了。多個節點可能在同一個位元時槽裡同時開始發送。每個節點在送出自己識別碼的某一個位元時，<em>也同時在聽匯流排</em>。如果某節點送的是隱性（1），但讀回來卻是顯性（0），它就知道有個帶著更高優先權訊息的人也在講話——於是它立刻、安靜地退讓，變成接收端。那個送顯性的節點根本沒察覺有過一場較量；它的訊框毫不中斷地繼續下去。</p>
+
+      <p>因為顯性＝0 會贏，所以 ID 的<strong>數值最小</strong>的那個訊息贏得仲裁。較低的 ID ＝較多的前導顯性位元＝較高的優先權。沒有碰撞、沒有重送贏家、沒有浪費的匯流排時間。輸家就在匯流排再次空閒時重試。</p>
+
+      <div class="mermaid">
+sequenceDiagram
+    participant A as 節點 A id 0x100
+    participant Bus as 匯流排
+    participant B as 節點 B id 0x101
+    Note over A,B: 識別碼位元 10..1 至此相同
+    A->>Bus: 位元 0 = 0（顯性）
+    B->>Bus: 位元 0 = 1（隱性）
+    Note over B: 讀回 0、不是 1 → 落敗、退讓
+    A->>Bus: 渾然不覺地送完整個訊框
+    Note over B: 等到空閒、重試
+</div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——絕不重用同一個 ID</div>
+        <p>兩個節點用同一個 ID 但不同的資料去發送，<em>不會</em>乾淨地仲裁——它們會一起贏得仲裁，然後在資料欄位裡碰撞，觸發一個位元錯誤與重送風暴。匯流排上的每個發送端都必須擁有一組唯一的 ID。NMEA&nbsp;2000 用一套動態的位址宣告（address-claim）程序解決這件事，而它的核心，就是這個一模一樣的「最低 ID 獲勝」遊戲。</p>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 實際案例——USV 上的優先權</div>
+        <p>我們把推進器<em>命令</em>訊框指定為匯流排上最低的 ID，BMS 的過電流／故障訊框更低，而慢速遙測（溫度、韌體版本）則給最高的 ID。當匯流排在一次激烈操船時變得很忙，安全關鍵的流量會在線上把那些閒聊硬擠到一旁。優先權是你在 ID 對照表裡做一次的接線決定。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="frame-anatomy"><span class="sec-no">4</span>訊框結構與位元填充</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>數位元</small></div>
+      <p>一個經典 CAN <strong>資料訊框（data frame）</strong>（標準格式，11 位元 ID）不只有它的酬載（payload）。線上各欄位依序為：</p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>欄位</th><th>位元</th><th>用途</th></tr></thead>
+        <tbody>
+          <tr><td>SOF</td><td>1</td><td>訊框起始（顯性）——喚醒大家、同步時脈。</td></tr>
+          <tr><td>Identifier</td><td>11</td><td>名字＋優先權（仲裁欄位）。</td></tr>
+          <tr><td>RTR + IDE + r0</td><td>3</td><td>遠端／資料旗標、延伸 ID 旗標、保留位元。</td></tr>
+          <tr><td>DLC</td><td>4</td><td>資料長度碼：0–8 個酬載位元組。</td></tr>
+          <tr><td>Data</td><td>$8 \times p$</td><td>$p$ 個酬載位元組，$0 \le p \le 8$。</td></tr>
+          <tr><td>CRC + delimiter</td><td>16</td><td>15 位元 CRC ＋ 1 個隱性分隔位元。</td></tr>
+          <tr><td>ACK + delimiter</td><td>2</td><td>接收端把這位元拉成顯性以確認。</td></tr>
+          <tr><td>EOF</td><td>7</td><td>訊框結束（隱性）。</td></tr>
+          <tr><td>IFS</td><td>3</td><td>下一個訊框之前的訊框間隔。</td></tr>
+        </tbody>
+      </table></div>
+
+      <p>把固定開銷加總起來，你就得到一條乾淨的公式，算出一個攜帶 $p$ 個酬載位元組的標準 11 位元訊框的標稱（nominal）訊框長度：</p>
+      <div class="math-box">$$ N_{\text{nominal}}(p) = 47 + 8p \quad\text{bits} \qquad\Rightarrow\qquad N_{\text{nominal}}(8) = 47 + 64 = 111\ \text{bits} $$</div>
+
+      <p>但線上實際走的位元<em>比這還多</em>，因為有<strong>位元填充（bit-stuffing）</strong>。CAN 沒有獨立的時脈線；接收端是從資料的邊緣（edge）裡回復時序的。在連續 5 個相同位元之後，發送端插入一個相反的「填充」位元以保證有一個邊緣，接收端再安靜地把它剝掉。填充套用在從 SOF 一路到 CRC 的所有東西上——也就是 $34 + 8p$ 個可填充位元——所以最壞情況多出：</p>
+      <div class="math-box">$$ N_{\text{stuff,max}}(p) = \left\lfloor \frac{34 + 8p - 1}{4} \right\rfloor, \qquad N_{\text{worst}}(p) = N_{\text{nominal}}(p) + N_{\text{stuff,max}}(p) $$</div>
+      <p>對 $p = 8$：$\lfloor (34+64-1)/4 \rfloor = \lfloor 97/4 \rfloor = 24$ 個額外位元，所以最壞情況 $= 111 + 24 = 135$ 個位元在線上。這份變動性，正是為什麼 CAN 給高優先權訊框的是<em>有上界的延遲（bounded latency）</em>，而不是固定延遲——那個最壞情況上界假設你前面所有東西都吃到最壞情況的填充。（這些常數——$47+8p$ 與那個填充的下取整——正是下方模擬計算的東西，所以它的數字會跟這些對得起來。）</p>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="socketcan"><span class="sec-no">5</span>SocketCAN：把 CAN 當網路介面</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>Linux 的設計抉擇</small></div>
+      <p>Linux 在這裡掙到了它的飯碗。其他作業系統給你的是一份廠商 SDK，外加每顆 CAN 晶片一個字元裝置（character device）。Linux 則把一個 CAN 控制器模型化成一個<strong>網路介面</strong>——<code>can0</code>，就排在 <code>ip link</code> 裡 <code>eth0</code> 和 <code>wlan0</code> 旁邊。你在新的位址族（address family）<code>AF_CAN</code> 裡開一個 socket，把它綁定（bind）到 <code>can0</code>，然後 <code>read()</code>／<code>write()</code> 固定大小的 <code>struct can_frame</code> 紀錄。你早就會的所有工具——<code>ip</code>、socket、<code>tcpdump</code> 風格的封包嗅探器——通通能用。整個構想就是這樣：CAN 只是又一個網路。</p>
+
+      <div class="mermaid">
+flowchart LR
+    APP["你的程式<br/>socket(AF_CAN)"] --> SC["SocketCAN 核心<br/>can / can-raw"]
+    SC --> DRV["控制器驅動<br/>如 mttcan / mcp251xfd"]
+    DRV --> XCV["CAN 收發器"]
+    XCV --> WIRE["CANH / CANL 匯流排"]
+</div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>每一行都讀</small></div>
+      <p>如果你寫過 UDP，一個原始（raw）CAN socket 幾乎熟悉到無聊。唯一的轉折是透過 <code>SIOCGIFINDEX</code> 以介面<em>索引（index）</em>來綁定：</p>
+      <div class="codeblock">
+        <div class="code-head">can_rx.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;linux/can.h&gt;
+#include &lt;linux/can/raw.h&gt;
+#include &lt;net/if.h&gt;
+#include &lt;sys/ioctl.h&gt;
+#include &lt;sys/socket.h&gt;
+#include &lt;string.h&gt;
+#include &lt;unistd.h&gt;
+#include &lt;stdio.h&gt;
+
+int main(void) {
+    int s = socket(PF_CAN, SOCK_RAW, CAN_RAW);   // AF_CAN raw socket
+    struct ifreq ifr;
+    strcpy(ifr.ifr_name, "can0");
+    ioctl(s, SIOCGIFINDEX, &amp;ifr);                 // resolve can0 -&gt; index
+
+    struct sockaddr_can addr = {0};
+    addr.can_family  = AF_CAN;
+    addr.can_ifindex = ifr.ifr_ifindex;
+    bind(s, (struct sockaddr *)&amp;addr, sizeof(addr));
+
+    struct can_frame f;
+    while (read(s, &amp;f, sizeof(f)) == (ssize_t)sizeof(f)) {
+        printf("id=%03X dlc=%u  ", f.can_id &amp; CAN_SFF_MASK, f.can_dlc);
+        for (int i = 0; i &lt; f.can_dlc; i++) printf("%02X ", f.data[i]);
+        printf("\n");
+    }
+    close(s);
+    return 0;
+}
+</code></pre>
+      </div>
+
+      <p>讀取是以<strong>整個訊框</strong>為單位，不是位元組串流——不像序列埠那章要跳那支「部分讀取（partial-read）」的舞，因為 <code>read()</code> 要嘛回傳剛好一個 <code>struct can_frame</code>，要嘛什麼都不回。你也可以用 <code>setsockopt(s, SOL_CAN_RAW, CAN_RAW_FILTER, ...)</code> 把硬體<strong>濾波器（filter）</strong>推進核心，讓控制器只在你在乎的那些 ID 上叫醒你——當你坐在一條繁忙的 NMEA&nbsp;2000 骨幹上、只想要航向那個 PGN 時，這是必備的。</p>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="bring-up"><span class="sec-no">6</span>啟用、位元時序與取樣點</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>設定這個介面</small></div>
+      <p>一個 SocketCAN 介面開機時是<em>關閉（down）</em>的、而且沒有位元率（bitrate）。你用設定乙太網路時同一支 <code>ip link</code> 去設定它，然後把它啟用：</p>
+      <div class="codeblock">
+        <div class="code-head">can-up.sh <span class="lang">bash</span></div>
+<pre><code class="language-bash"># configure can0: 500 kbit/s, auto-recover 100 ms after bus-off
+sudo ip link set can0 type can bitrate 500000 restart-ms 100
+sudo ip link set up can0
+
+# verify state, bitrate, sample point, and error counters
+ip -details -statistics link show can0
+
+# live sniff and decode every frame on the bus
+candump can0
+
+# send one frame: id 0x123, payload DE AD BE EF
+cansend can0 123#DEADBEEF
+
+# offered-load / frame-rate statistics for the running bus
+canbusload can0@500000
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——你不能重新設定一個運作中的介面</div>
+        <p>如果連結是啟用的，<code>ip link set ... type can bitrate ...</code> 會以 <code>RTNETLINK answers: Device or resource busy</code> 失敗。先把它關閉（<code>sudo ip link set down can0</code>），改位元率，再把它啟用回來。而且匯流排上的每個節點都必須用<em>同一個</em>位元率——一個 250k 的節點掛在 500k 匯流排上，會讓所有人都跳錯誤。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>位元時間與取樣點</small></div>
+      <p>一個位元不是在它的正中央取樣的。CAN 把每個位元切成數個時間量子（time quanta），分組成若干區段，控制器在<strong>取樣點（sample point）</strong>讀匯流排——也就是在做出判定前已經過去的那一段位元比例：</p>
+      <div class="math-box">$$ \text{sample point} = \frac{T_{\text{sync}} + T_{\text{seg1}}}{T_{\text{sync}} + T_{\text{seg1}} + T_{\text{seg2}}} $$</div>
+      <p>對高速 CAN，建議的取樣點是位元的約 87.5%。為什麼這麼晚？因為仲裁需要訊號在<em>一個位元時間之內</em>傳播到遠端端接電阻再傳回來，這樣節點才能在取樣前讀到自己送出去的位元。那趟來回，就是在某個給定位元率下限制匯流排長度的東西：1&nbsp;Mbit/s 的上限大約在 40&nbsp;m，而 250k（NMEA&nbsp;2000）能輕鬆橫跨約 250&nbsp;m。核心會替你從位元率與控制器時脈算出區段切分；你通常只在混入一些龜毛的第三方節點時才會去覆寫它（<code>sample-point 0.875</code>）。</p>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="errors-fd"><span class="sec-no">7</span>錯誤狀態、bus-off 與 CAN-FD</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>會自我糾察的匯流排</small></div>
+      <p>CAN 節點不是被動的。每個控制器都維護兩個計數器——傳送錯誤計數器（TEC）與接收錯誤計數器（REC）——每偵測到一個錯誤就把它加上去，成功時再減下來。這些計數器驅動一個狀態機（state machine），那正是 CAN 故障圍堵（fault containment）的核心：</p>
+
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> ErrorActive
+    ErrorActive --> ErrorPassive: TEC 或 REC &gt; 127
+    ErrorPassive --> ErrorActive: 計數器降到 &lt; 128
+    ErrorPassive --> BusOff: TEC &gt; 255
+    BusOff --> ErrorActive: restart-ms 計時器
+</div>
+
+      <p><strong>error-active（錯誤主動）</strong>是正常狀態：節點可以大聲地發出錯誤訊號（主動錯誤旗標）。在 TEC&gt;127 時它降到 <strong>error-passive（錯誤被動）</strong>——仍在講話，但客客氣氣地講，這樣一個喋喋不休的故障節點就無法宰制整條匯流排。在 TEC&gt;255 時它進入 <strong>bus-off（匯流排離線）</strong>：它完全從匯流排上斷開。這就是安全閥——一個短路或發瘋的節點是把<em>它自己</em>移除，而不是把整條匯流排卡死。</p>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> restart-ms 是你的自動恢復機制</div>
+        <p>預設情況下，一個 bus-off 的介面會一直死著，直到你手動把它重啟。我們在啟用時設的 <code>restart-ms 100</code> 告訴核心：在 bus-off 之後 100&nbsp;ms 自動重新啟用控制器。在 USV 上，這代表一個瞬間的接線小毛病會自我復原，而不是讓推進器控制癱瘓到有人去重開電源為止。用 <code>ip -details -statistics link show can0</code> 盯著那些計數器——一個一直往上爬的 <code>bus-off</code> 計數，就是你那個接觸不良接頭的早期警訊。</p>
+      </div>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>CAN-FD 與 NMEA 2000</small></div>
+      <p><strong>CAN-FD</strong>（Flexible Data-rate，彈性資料率）保留同樣的仲裁，但在仲裁<em>之後</em>切換到更快的位元率，並允許最多 64 位元組的酬載。你用一個標稱位元率加一個資料位元率把它啟用：<code>sudo ip link set can0 type can bitrate 500000 dbitrate 2000000 fd on</code>。一樣的 socket、一樣的工具——<code>candump</code> 只是顯示更長的訊框。<strong>NMEA&nbsp;2000</strong>，那個船用標準，就是純粹的經典 CAN，跑在 250&nbsp;kbit/s、帶 29 位元延伸 ID、有一套定義好的接頭／供電方案，以及一份固定的 PGN 訊息目錄（航向、位置、深度、風速）。對 Linux 來說，它只是又一個 250k 的 <code>can0</code>——你在使用者空間（user space）裡把那些 PGN 解碼。</p>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="bus-load"><span class="sec-no">8</span>替匯流排算尺寸：負載與即時量表</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>匯流排負載百分比</small></div>
+      <p>匯流排負載是訊框消耗掉的線上時間所佔的比例。當每秒有 $f$ 個訊框、每個 $N$ 個位元、位元率為 $B$：</p>
+      <div class="math-box">$$ \text{load} = \frac{f \cdot N}{B} \times 100\% $$</div>
+      <p>把標稱負載維持在約 50–70% 以下。超過這個值，最壞情況的位元填充加上重送會把你推向飽和（saturation），低優先權的訊框開始挨餓。玩玩那個量表——拖動位元率、訊框率與酬載，看著綠／黃／紅區。那條虛線標記是最壞情況填充後的負載。</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>🚦</span> CAN 匯流排負載量表（位元率 × 訊框率 × 酬載）</div>
+        <canvas id="sim-can"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 該注意的地方</div>
+        <p>負載與訊框率成<em>線性</em>，並（透過 $47+8p$）大致與酬載成正比，而與位元率成<em>反比</em>——所以把位元率加倍，負載就減半。看著那條虛線最壞情況標記，隨著酬載變大而從實心的標稱長條拉開：那個間隙就是位元填充，也是你必須留下的餘裕。一條讀到 65% 標稱的匯流排，最壞情況可能衝到 80% 以上。要照最壞情況算尺寸，不是照平均——這正是你當初替致動器選 CAN 的全部理由。</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>換你了</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io10-arbitration-winner">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">三個節點在同一個時槽裡開始發送，標準 ID 分別為 <code>0x2A0</code>、<code>0x180</code>、<code>0x181</code>。哪個節點贏得仲裁並繼續發送？</div>
+        <ul class="ex-options">
+          <li data-correct="false">ID 為 <code>0x2A0</code> 的節點——數字最大、優先權最高。</li>
+          <li data-correct="true">ID 為 <code>0x180</code> 的節點——數值最低的 ID 獲勝。</li>
+          <li data-correct="false">ID 為 <code>0x181</code> 的節點——它先送的。</li>
+          <li data-correct="false">三個都碰撞，每個節點在退避（backoff）後重送。</li>
+        </ul>
+        <div class="ex-explain">顯性（0）逐位元蓋過隱性（1），所以最小的 ID 有最多的前導顯性位元、因而獲勝。<code>0x180</code> 與 <code>0x181</code> 一路相同直到最後一個位元，那裡 <code>0x180</code> 送 0、<code>0x181</code> 送 1；<code>0x181</code> 讀回 0、落敗、退讓。<code>0x2A0</code> 更早就分歧了。贏家從不察覺有過較量；輸家在下一次空閒時重試。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io10-bus-load" data-answer="22.2" data-tol="0.5">
+        <div class="ex-head"><span class="badge">Q2</span> 算一算</div>
+        <div class="ex-q">一條 500&nbsp;kbit/s 的匯流排每秒承載 1000 個訊框，每個都是帶 8 位元組酬載的標準 11 位元訊框。用標稱長度 $N = 47 + 8p$ 與 $\text{load} = fN/B \times 100\%$，標稱匯流排負載是多少<strong>百分比</strong>？</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">%</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$N = 47 + 8\times 8 = 111$ 個位元。$\text{load} = (1000 \times 111)/500000 \times 100 = 111000/500000 \times 100 = 22.2\%$。餘裕很充裕——即便最壞情況填充（$135$ 個位元 → $27\%$）也穩穩低於 50%。在這些設定下，這對得上上方量表的綠區。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io10-socketcan-bringup">
+        <div class="ex-head"><span class="badge">Q3</span> 動手做——啟用並嗅探一條 CAN 匯流排</div>
+        <div class="ex-q">你在 USV 上有一個全新的 <code>can0</code>。寫出這些命令：把它設成 500&nbsp;kbit/s、帶 100&nbsp;ms 的 bus-off 自動恢復、啟用它、觀看即時流量，並送出一個 ID 為 <code>0x123</code>、酬載位元組為 <code>DE AD BE EF</code> 的測試訊框。然後說說你會怎麼確認它真的送出去了。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">設定是一個 <code>ip link set ... type can</code> 呼叫；介面開機是關閉的，所以你需要第二個 <code>set up</code>。嗅探器與發送器是 <code>can-utils</code> 裡的 <code>candump</code> ／ <code>cansend</code>。</div></details>
+        <details class="ex-acc"><summary>看一個解答</summary><div class="acc-body">
+          <div class="codeblock"><div class="code-head">啟用 + 測試 <span class="lang">bash</span></div>
+<pre><code class="language-bash"># 1. configure bitrate + auto-recover, then bring the link up
+sudo ip link set can0 type can bitrate 500000 restart-ms 100
+sudo ip link set up can0
+
+# 2. confirm: state should read ERROR-ACTIVE, bitrate 500000
+ip -details -statistics link show can0
+
+# 3. in one terminal, watch the bus
+candump can0
+
+# 4. in another terminal, inject one frame
+cansend can0 123#DEADBEEF
+</code></pre></div>
+          <p>那個注入的訊框會在 <code>candump</code> 視窗裡以 <code>can0  123  [4]  DE AD BE EF</code> 出現。因為 SocketCAN 預設會把本地送出的訊框回送（echo）給其他 socket，所以就算沒有別的節點在場，你也看得到自己的 <code>cansend</code>。如果什麼都沒出現、而且 <code>ip -details</code> 裡的 TX 錯誤計數器往上爬，你就是沒收到 ACK——意思是沒有第二個節點在確認，或者端接／位元率錯了。那個區別（訊框被回送、但沒有真正的 ACK），正是為什麼 60&nbsp;Ω 測試與位元率匹配很要緊。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章回顧</div>
+        <p>CAN 是一條共用、差動、兩線的廣播匯流排，兩端各以 $120\,\Omega$ 端接（那個 60&nbsp;Ω 測試）。顯性位元在物理上贏過隱性位元，所以<strong>最低 ID 贏得仲裁</strong>而且不碰撞。一個標準訊框是 $47 + 8p$ 個位元再加上最壞情況的位元填充，而匯流排負載是 $fN/B$——把它維持在約 50–70% 以下。Linux 把 CAN 暴露成一個網路介面：開一個 <code>AF_CAN</code> socket，用 <code>ip link set can0 type can bitrate 500000 restart-ms 100</code> 把它啟用，再用 <code>candump</code> 嗅探。錯誤計數器驅動 error-active → passive → bus-off，而 <code>restart-ms</code> 會自動恢復。CAN-FD 加上了速度與 64 位元組酬載；NMEA&nbsp;2000 就是給船用儀器、跑在 250k 的 CAN。下一章：把這一切變成即時且穩健的。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+<script src="../../assets/io-sim.js"></script>
+<script>EM.ioDemo.canLoad("sim-can");</script>
+</body>
+</html>

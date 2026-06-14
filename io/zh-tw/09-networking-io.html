@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>網路 I/O：從網卡到 socket — 機器人的 Linux I/O</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="09-networking-io">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · 第 09 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · 第 09 章 · 網路</div>
+        <h1>網路 I/O：從網卡到你的 socket</h1>
+        <p>網路卡（NIC）不過是另一種裝置：它用 DMA 把位元組搬進 RAM，再發出中斷（interrupt）——但它之上還疊著一整套堆疊：驅動程式、軟中斷（softirq）、協定各層、socket 緩衝區。而當你在機器人上再插上第二張網卡的那一刻，一台安靜的 DHCP 伺服器就可能偷走你的預設路由（default route），悄無聲息地殺掉你賴以維生的那條鏈路。我們會把一個封包從頭追到尾，再讓兩張網卡在一艘 USV 上共存而互不踩踏。</p>
+        <div class="meta"><span>⏱ 約 40 分鐘</span><span>🧠 封包路徑</span><span>⚡ ip route</span><span>∑ 頻寬延遲積</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="packet-journey"><span class="sec-no">1</span>封包的旅程：從網卡到 recv()</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>跟著一個訊框走</small></div>
+      <p>你在第 07 章學到關於中斷與 DMA 的一切，在這裡都能直接套用——網卡正是那一類裝置。當一個訊框（frame）抵達線路時，網卡不會一個位元組一個位元組地交給 CPU。它用 <strong>DMA</strong> 把整個訊框搬進 RAM 裡一圈預先配置好的核心緩衝區，然後發出一個<strong>中斷</strong>說「有新郵件了」。從這一刻起，核心便沿著協定各層把訊框往上送，直到酬載（payload）落進某個 socket 專屬的緩衝區，你那個被阻塞的 <code>recv()</code> 才終於回傳。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 一句話講完整套堆疊</div>
+        <p>網卡用 DMA 把訊框搬進 RAM 並發出中斷；一個<strong>軟中斷（softirq）</strong>排空接收環（NAPI），IP/UDP/TCP 各層剝掉表頭並依埠號（port）解多工（demultiplex），酬載被排進對應 socket 的接收緩衝區，核心再喚醒任何睡在 <code>recv()</code> 裡的人。從硬體到使用者空間（user space），除了最後那一次，沒有任何你能避免的複製。</p>
+      </div>
+
+      <p>那條路徑上最重要的單一設計抉擇，是讓硬體中斷幾乎<em>什麼都不做</em>。一條 10&nbsp;Gb/s 的鏈路每秒可送進遠超一百萬個訊框；一個訊框配一次中斷會把 CPU 燒熔。所以驅動程式採用 <strong>NAPI</strong>：硬中斷只負責排程一個軟中斷（<code>NET_RX_SOFTIRQ</code>）並遮蔽後續的 RX 中斷，接著由軟中斷成批<em>輪詢（polling）</em>那圈環，直到把它排空。這正是第 07 章中斷對輪詢的取捨，用在最要緊的地方。你可以在 <code>/proc/net/softnet_stat</code> 觀察軟中斷預算的花用——第三欄是「環還沒清空、預算就用罄」的次數，那是接收路徑超載的早期警訊。</p>
+
+      <div class="mermaid">
+flowchart TB
+    W["線路 / PHY"] --> N["網卡<br/>DMA 進 RX 環"]
+    N -->|"硬中斷"| H["驅動 ISR<br/>排程軟中斷"]
+    H --> S["NET_RX_SOFTIRQ<br/>NAPI 輪詢環"]
+    S --> IP["IP 層<br/>路由、重組"]
+    IP --> L4["UDP / TCP<br/>依埠號解多工"]
+    L4 --> SB["socket 接收緩衝區<br/>sk_rcvbuf"]
+    SB -->|"喚醒"| R["recv() 回傳<br/>複製到使用者空間"]
+</div>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>取自 AGX Orin</small></div>
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 實際案例 — Orin 的 GbE 上的 LiDAR</div>
+        <p>我們的 32 線 LiDAR 在一次密集掃描中，會以約 5,000 packets/s、每個約 1.2&nbsp;KB 的資料包，往 Orin 的 gigabit 埠推送約 50&nbsp;Mb/s 的 UDP 封包。少了 NAPI 批次處理與中斷合併（IRQ coalescing，第 07 章），那就是一場軟中斷風暴。有了它們，一顆核心只花百分之幾的時間就能在每次中斷裡排空成串訊框，而 20&nbsp;Hz 的控制迴圈也保住了它的週期。用 <code>cat /proc/interrupts | grep eth</code> 檢查那個中斷，並確認它被釘在一顆你不會用來跑控制迴圈的核心上。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="sockets-are-fds"><span class="sec-no">2</span>Socket 就是檔案描述子</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>同一招 VFS 把戲</small></div>
+      <p>第 01 章告訴你萬物皆檔案。socket 是最乾淨的證明：<code>socket()</code> 回傳一個 <code>int</code> 檔案描述子（file descriptor），它就活在與你開啟的檔案、序列埠完全相同的那張 fd 表裡。你可以對它 <code>read()</code>／<code>write()</code>、<code>close()</code> 它、用 <code>fcntl(fd, F_SETFL, O_NONBLOCK)</code> 設成非阻塞——而且關鍵的是，把它跟你的 GPS 序列 fd、你的 CAN socket（第 08 章）一起交給 <code>epoll</code>。一個事件迴圈，涵蓋每一個 I/O 來源，因為它們全都只是描述子。</p>
+
+      <p>socket 專屬的呼叫是一組小而可學的集合。<code>socket(domain, type, proto)</code> 建立端點；<code>bind()</code> 把它釘到一個本地位址／埠；<code>connect()</code> 設定對端（peer，TCP 必須、UDP 可選但好用）；<code>send()</code>／<code>recv()</code>（或無連線用的 <code>sendto()</code>／<code>recvfrom()</code>）搬移位元組。這就是你做感測器 I/O 所需的整個 API 表面。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>兩種型別風味</small></div>
+      <p><code>type</code> 引數決定了傳遞語意：$\texttt{SOCK\_STREAM}$（TCP）給你一條可靠、有序、無訊息邊界的位元組<em>串流</em>——一次送出 100&nbsp;bytes 的 <code>send()</code> 可能會分成兩次 <code>recv()</code> 抵達，所以你得自己把訊息切框（frame）。$\texttt{SOCK\_DGRAM}$（UDP）給你完整的<em>資料包（datagram）</em>：每次 <code>recvfrom()</code> 剛好回傳一個封包，或什麼都沒有。對於發布自成一體樣本的感測器來說，資料包邊界是個特性，不是缺陷。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>一個最小 UDP 接收器</small></div>
+      <div class="codeblock">
+        <div class="code-head">udp_recv.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;arpa/inet.h&gt;
+#include &lt;string.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;unistd.h&gt;
+
+int main(void) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);   /* fd just like any file */
+    if (fd &lt; 0) { perror("socket"); return 1; }
+
+    struct sockaddr_in addr = {0};
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(2368);             /* listen port, network byte order */
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);  /* any local interface */
+
+    if (bind(fd, (struct sockaddr *)&amp;addr, sizeof addr) &lt; 0) {
+        perror("bind"); return 1;
+    }
+
+    char buf[2048];
+    struct sockaddr_in src; socklen_t slen = sizeof src;
+    for (;;) {
+        ssize_t n = recvfrom(fd, buf, sizeof buf, 0,
+                             (struct sockaddr *)&amp;src, &amp;slen);
+        if (n &lt; 0) { perror("recvfrom"); break; }
+        printf("got %zd bytes from %s\n", n, inet_ntoa(src.sin_addr));
+    }
+    close(fd);
+    return 0;
+}
+</code></pre>
+      </div>
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱 — 位元組序與 TCP 的不完整讀取</div>
+        <p>埠號與位址在線路上是<strong>大端序（big-endian）</strong>；忘了 <code>htons()</code>，你就會綁到一個沒人在傳的埠。還有，永遠別假設 TCP 的 <code>recv()</code> 會回傳一整則訊息——它回傳的是「此刻緩衝區裡有的東西」。要迴圈讀到你宣告的長度為止，就跟第 01 章那個穩健讀取迴圈一模一樣。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="routing-table"><span class="sec-no">3</span>介面、位址與路由表</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>封包從哪道門出去</small></div>
+      <p>當你 <code>send()</code> 到一個位址時，核心必須決定封包要從<em>哪個介面</em>離開。那個決定就是<strong>路由表（routing table）</strong>：一組有序的規則，把目的前綴（prefix）對應到一個出口介面與下一跳（next hop）。<code>ip</code> 工具（出自 iproute2——忘掉 <code>ifconfig</code> 吧）就是你讀寫它的方式。</p>
+
+      <div class="codeblock">
+        <div class="code-head">terminal <span class="lang">bash</span></div>
+<pre><code class="language-bash"># interfaces and their addresses
+ip -brief addr        # eth0  UP  192.168.1.50/24
+                      # wlan0 UP  10.42.0.7/24
+
+# the routing table, longest-prefix wins within a metric
+ip route
+# default via 192.168.1.1 dev eth0  proto dhcp  metric 100
+# default via 10.42.0.1   dev wlan0 proto dhcp  metric 600
+# 192.168.1.0/24 dev eth0  proto kernel scope link src 192.168.1.50
+# 10.42.0.0/24   dev wlan0 proto kernel scope link src 10.42.0.7
+
+# ask the kernel exactly how it would route a specific destination:
+ip route get 8.8.8.8
+# 8.8.8.8 via 192.168.1.1 dev eth0 src 192.168.1.50
+</code></pre>
+      </div>
+
+      <p>兩條規則主宰著每一次查詢。第一，<strong>最長前綴匹配（longest-prefix match）</strong>：送往 <code>192.168.1.99</code> 的封包匹配 <code>192.168.1.0/24</code> 這條路由（24 位元），勝過 <code>default</code> 路由（0 位元），所以它直接從 <code>eth0</code> 出去。第二，<strong>預設路由（default route）</strong>（<code>0.0.0.0/0</code>，前綴長度 0）是一切不在直連子網（subnet）上的流量的兜底（catch-all）——「網際網路」以及任何你沒有特定路由的主機，都從這裡走。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>用權值打破平手</small></div>
+      <p>當兩條路由有<em>相同</em>的前綴長度時，<strong>權值（metric，越低越優先）</strong>打破平手。在有兩條預設路由時，核心會用權值較小的那條來處理所有非本地流量。形式上，目的地 $d$ 所選的路由是</p>
+      <div class="math-box">$$ \text{route}(d) = \operatorname*{arg\,min}_{r\,:\,d\in\text{prefix}(r)}\;\bigl(-\text{plen}(r),\; \text{metric}(r)\bigr) $$</div>
+      <p>也就是先最大化前綴長度，再最小化權值。那個負號只是說「前綴越長越贏」；在等長的匹配之間，權值較小者勝出。這條公式正是下一節之所以是個危機的全部原因。</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="default-route-theft"><span class="sec-no">4</span>預設路由竊取</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>無聲的殺手</small></div>
+      <p>這就是讓機器人團隊耗掉好幾個小時的故障。你的 USV 在乙太網路上跑得好好的，<code>default via 192.168.1.1 dev eth0 metric 100</code>。你插上 WiFi——或者它自動重連了——它的 DHCP 租約帶著一個預設閘道（gateway）與一個權值抵達。如果那個權值<em>低於</em>你乙太網路的，WiFi 預設路由就勝出，於是突然間所有非本地流量都從 <code>wlan0</code> 離開。你那條走乙太網路的 SSH 連線也許還能撐住（它是一條到直連子網的既有連線），但任何到「經由預設路由才能到達的主機」的新連線，現在都從錯誤的門出去——或者哪兒都到不了，如果 WiFi 根本搆不著它的話。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱 — DHCP 給什麼就裝什麼</div>
+        <p>DHCP 客戶端並不知道你的意圖。如果 WiFi AP 的 DHCP 伺服器發出一個預設閘道，而你的客戶端以低權值把它裝上（NetworkManager 對 WiFi 的預設常是 <strong>600</strong>，但一個設錯的設定檔、或一個有線風格的權值，可能更低），它就可能壓過你乙太網路的 <strong>100</strong>——更糟的是，兩者都落在同一個權值，於是路由在每次開機之間變得不確定。</p>
+      </div>
+
+      <p>解法是讓路由順序<em>確定且由你掌控</em>。把權值釘死，讓你信任的鏈路永遠勝出；或者把那條不該承載一般流量的鏈路上的預設路由整個拔掉。在 Orin 上我們要讓乙太網路（承載 LiDAR、以及通往船上其餘網路的路由）擁有一個低權值，而 WiFi（只是從岸上筆電 SSH）要嘛擁有高權值、要嘛根本沒有預設路由。</p>
+
+      <div class="codeblock">
+        <div class="code-head">netplan: deterministic metrics <span class="lang">bash</span></div>
+<pre><code class="language-bash"># /etc/netplan/01-usv.yaml  — Ethernet wins the default route
+network:
+  version: 2
+  ethernets:
+    eth0:
+      dhcp4: true
+      dhcp4-overrides:
+        route-metric: 100          # low metric → preferred default
+  wifis:
+    wlan0:
+      dhcp4: true
+      dhcp4-overrides:
+        route-metric: 700          # high metric → never the default if eth0 is up
+        use-routes: false          # or: ignore WiFi-supplied routes entirely
+      access-points:
+        "usv-shore": {}
+
+# apply and verify the order is what you intended:
+sudo netplan apply
+ip route | grep default
+# default via 192.168.1.1 dev eth0  metric 100   &lt;- wins
+# default via 10.42.0.1   dev wlan0 metric 700
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 像資深工程師那樣除錯</div>
+        <p>別猜——去問核心。<code>ip route get &lt;dest&gt;</code> 會告訴你此刻一個送往該目的地的封包，會用上哪個確切的介面與來源位址。如果它說 <code>dev wlan0</code>、而你以為是 <code>eth0</code>，那你就抓到竊取現行了。<code>ip monitor route</code> 甚至會即時印出路由表的變動，讓你能逮到 DHCP 改寫它的那一瞬間。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="two-nic-coexistence"><span class="sec-no">5</span>USV 上兩張網卡的共存</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>是角色，不只是鏈路</small></div>
+      <p>乾淨的架構會給每個介面指派一個<em>角色</em>，並讓它們的流量待在各自獨立的實體控制器上。在船上：<strong>乙太網路</strong>是那條沉重、確定的感測器鏈路（LiDAR，外加其餘的有線網路）；<strong>WiFi</strong>是人類的控制／遙測（telemetry）鏈路（SSH、一道低速率的狀態回饋）。它們坐落在不同的子網上，所以每條子網路由都是直連而毫不含糊的——只有<em>預設</em>路由是有爭議的，而那正是 §4 解掉的問題。</p>
+
+      <div class="mermaid">
+flowchart LR
+    L["LiDAR<br/>50 Mb/s UDP"] --> E["eth0<br/>GbE · 權值 100"]
+    NET["船上 LAN"] --- E
+    E --> ORIN["AGX Orin<br/>路由 + 控制"]
+    ORIN --> WL["wlan0<br/>WiFi · 權值 700"]
+    WL -.-> SHORE["岸上筆電<br/>只 SSH"]
+</div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 設計法則</div>
+        <p>分開的子網消除了直連流量上的含糊；確定的權值消除了預設路由上的含糊；而把沉重的資料放在有線上，讓那個有損、抖動的媒介（WiFi）只承載它扛得住的東西。三個各自獨立的決定，每一個都封掉一類故障。</p>
+      </div>
+
+      <p>有一個微妙之處：有了兩個介面，一個來源位址是 <code>eth0</code>、卻被路由出 <code>wlan0</code> 的封包（反之亦然），可能會被<strong>反向路徑過濾（reverse-path filtering，<code>rp_filter</code>，在 <code>/proc/sys/net/ipv4/conf/*/rp_filter</code>）</strong>悄悄丟棄。如果你刻意需要非對稱路由，就必須放寬它（模式 2），或改用策略路由（policy routing，<code>ip rule</code>）讓每個介面的回覆都留在自己的鏈路上。對我們這種角色分離的設計而言，我們不需要非對稱性，這又是偏好它的一個理由。</p>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="wifi-shared-medium"><span class="sec-no">6</span>WiFi：一個共享的半雙工媒介</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>為什麼 WiFi 會抖、乙太網路不會</small></div>
+      <p>交換式乙太網路是<strong>全雙工（full-duplex）</strong>：每個埠都有一對專屬線對，TX 與 RX 同時跑，你的線上沒別人。WiFi 恰恰相反——同一頻道上的每個站台共享<em>一個</em>半雙工媒介，必須輪流。其仲裁方式是 <strong>CSMA/CA</strong>：先聽，若空中忙碌，就退避（back off）一段隨機間隔後再試。多加一個說話者，空中就被爭用了；延遲不再是一個常數，而成了一個帶長尾的<em>分布</em>。那條尾巴就是抖動（jitter），而控制迴圈對抖動的厭惡，遠勝於它對稍高一點均值的厭惡。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>延遲花到哪去了</small></div>
+      <p>在一個被爭用的頻道上，當提供的負載 $\rho$ 逼近媒介的有效容量時，預期的接取延遲會急遽上升。一個簡單的排隊直覺（把頻道當成一個伺服器）給出的均值延遲，會在利用率趨近 1 時爆掉：</p>
+      <div class="math-box">$$ \mathbb{E}[T] \;\approx\; T_{\text{tx}} + \frac{T_{\text{tx}}\,\rho}{1-\rho}, \qquad \rho = \frac{\lambda}{\mu} $$</div>
+      <p>其中 $\lambda$ 是到達率，$\mu$ 是服務率，$T_{\text{tx}}$ 是純粹的傳輸時間。在 WiFi 上有兩個效應疊加：隨著更多站台爭用，$\mu$ 本身會<em>縮水</em>（空中時間因退避與碰撞而流失），而且變異數（variance）——不只是均值——也會增大。在下面的模擬裡即時看它。</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>📡</span> 延遲對負載 — 乙太網路（全雙工）對 WiFi（共享）</div>
+        <canvas id="sim-net"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 該注意的地方</div>
+        <p>綠色的乙太網路曲線幾乎一路平坦而低，直到接近線速（line rate）——一條專屬的全雙工鏈路在快飽和之前，對提供負載幾乎毫不在意。橙色的 WiFi 曲線即使閒置時也坐得更高，而且遠在「100%」之前就<em>陡峭爬升</em>，再加上更多站台會把它的吞吐上限（那個拐點 knee）往左拖。這就是把 50&nbsp;Mb/s 的 LiDAR 留在乙太網路上的全部理由：在 WiFi 上它會把你推上曲線的陡峭段，那裡延遲與抖動會爆炸。WiFi 拿 SSH；有線拿資料。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="buffers-bdp"><span class="sec-no">7</span>Socket 緩衝區、背壓與 BDP</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>緩衝區是個交易，不是白賺</small></div>
+      <p>在線路與你的 <code>recv()</code> 之間，坐著一個每 socket 的接收緩衝區（核心上限 <code>sk_rcvbuf</code>，可透過 <code>SO_RCVBUF</code> 調整）。它吸收突發（burst），好讓你的讀取者一時的排程打嗝不會丟掉封包。但一個太大的緩衝區本身就是一種病：<strong>緩衝膨脹（bufferbloat）</strong>。過大的佇列裝滿陳舊封包，於是當一個資料包抵達你手上時，它描述的可能是一個已經過時好幾秒的世界——對控制毫無用處。正確的大小是「夠裝下你最糟的突發，再大就不行」。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>頻寬延遲積</small></div>
+      <p>一個受<em>吞吐量（throughput）</em>限制的（TCP）流，要讓管線填滿所需的緩衝區，就是<strong>頻寬延遲積（bandwidth-delay product, BDP）</strong>——一條鏈路上同時有多少位元組「在途中」：</p>
+      <div class="math-box">$$ \text{BDP} = \text{bandwidth} \times \text{RTT} $$</div>
+      <p>對一條 1&nbsp;Gb/s、往返時間 1&nbsp;ms 的鏈路：$\text{BDP} = 10^{9}\,\text{bit/s} \times 10^{-3}\,\text{s} = 10^{6}$ bits $= 125\,000$ bytes $\approx 122$&nbsp;KiB。一個小於 BDP 的 TCP 視窗（window）會扼住吞吐量；大很多則只是徒增延遲。對一條受<em>延遲</em>限制的感測器串流，邏輯反過來——你要的緩衝區只要剛好大到能撐過你讀取者最糟的停頓，依小定律（Little's law）$L = \lambda W$：在 $\lambda = 5\,000$ packets/s、容忍 $W = 2$&nbsp;ms 讀取者停頓的情況下，意味著最多排隊 $L = 10$ 個封包，所以就照這個尺寸去定緩衝區，而不是去照一根肥管。</p>
+
+      <div class="codeblock">
+        <div class="code-head">tune SO_RCVBUF <span class="lang">C</span></div>
+<pre><code class="language-c">int rcvbuf = 4 * 1024 * 1024;   /* 4 MiB request */
+setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &amp;rcvbuf, sizeof rcvbuf);
+/* the kernel doubles your request (bookkeeping) and caps it at
+   net.core.rmem_max — raise that sysctl if you need more:
+   sysctl -w net.core.rmem_max=8388608  */
+
+socklen_t len = sizeof rcvbuf;
+getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &amp;rcvbuf, &amp;len);
+/* read it back: this is what you actually got, not what you asked for */
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱 — UDP 沒有背壓</div>
+        <p>TCP 會施加背壓（backpressure）：如果你的讀取者慢了，接收視窗就縮小，發送端被告知放慢。<strong>UDP 不會。</strong>如果 socket 緩衝區滿了，核心就直接<em>丟掉</em>封包，並把 <code>/proc/net/snmp</code> 裡的 <code>RcvbufErrors</code> 計數器加一。對一個高速率的 LiDAR，那意味著無聲地漏掉掃描。把 <code>SO_RCVBUF</code> 照你的突發定大小、讀得快（epoll，第 08 章），並監看那個計數器。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="udp-vs-tcp"><span class="sec-no">8</span>感測器串流該用 UDP 還是 TCP</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>挑對的故障模式</small></div>
+      <p>這個抉擇不是「可靠對不可靠」——而是「你偏好哪一種故障」。TCP 透過<em>重傳（retransmit）</em>遺失的段（segment）來保證傳遞與順序，這意味著單一個被丟的封包會卡住<em>它後面的一切</em>（隊頭阻塞，head-of-line blocking），直到重傳抵達。對一個以高速率發布新鮮狀態的感測器來說，一個重傳回來的舊樣本毫無價值；你寧可跳過它、用下一個新鮮的。那正是 UDP 的模型：丟了一個封包，往前走，不卡住。</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>性質</th><th>UDP（資料包）</th><th>TCP（串流）</th></tr></thead>
+        <tbody>
+          <tr><td>傳遞</td><td>盡力而為，可能丟</td><td>可靠，會重傳</td></tr>
+          <tr><td>順序</td><td>不保證</td><td>嚴格按序</td></tr>
+          <tr><td>邊界</td><td>保留（1 資料包 = 1 次 recv）</td><td>無（你得自己切框）</td></tr>
+          <tr><td>遇到丟失</td><td>出現缺口，然後是新鮮資料</td><td>卡住直到重傳（HOL）</td></tr>
+          <tr><td>背壓</td><td>無（核心丟棄）</td><td>透過視窗做流量控制</td></tr>
+          <tr><td>最適合</td><td>高速率的新鮮樣本（LiDAR、IMU、視訊）</td><td>命令、設定、日誌（必須抵達）</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 實際案例 — Orin 的分工</div>
+        <p>在 USV 上：LiDAR 走 <strong>UDP</strong>——漏掉一次掃描在下個週期就無關緊要，而我們絕不想要一次重傳卡住最新鮮的那一格。任務航點（waypoint）、參數更新、以及 SSH 連線走 <strong>TCP</strong>——這些必須精確且按序抵達，而資料量很小，所以重傳延遲不成問題。同一套 socket API，相反的保證，各自對上自己的工作。</p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>換你了</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io09-default-theft">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">你的 Orin 上 <code>default via 192.168.1.1 dev eth0 metric 100</code> 運作得好好的。WiFi 重連，DHCP 裝上了 <code>default via 10.42.0.1 dev wlan0 metric 50</code>。到那些「經由預設路由才能到達」的主機的新連線突然失敗了。發生了什麼事？</div>
+        <ul class="ex-options">
+          <li data-correct="false">乙太網路那條路由被核心刪掉了，因為兩條預設路由無法共存。</li>
+          <li data-correct="true">兩條都是 <code>0.0.0.0/0</code>，所以較低權值（50，wlan0）贏得平手，現在承載所有非本地流量——卻是從一個搆不著那些主機的介面出去。</li>
+          <li data-correct="false">WiFi 的前綴比乙太網路長，所以最長前綴匹配把流量送到 wlan0。</li>
+          <li data-correct="false">接收緩衝區溢位了，核心為了復原而把流量改路。</li>
+        </ul>
+        <div class="ex-explain">兩條預設路由的前綴長度都是 0，所以最長前綴匹配是平手；由<strong>權值</strong>打破它，越低越贏。WiFi 的 50 勝過乙太網路的 100，偷走了預設路由。修法是把乙太網路釘到比 WiFi 更低的權值（或用 <code>use-routes: false</code> 拔掉 WiFi 的預設路由）。用 <code>ip route get &lt;dest&gt;</code> 診斷。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io09-bdp" data-answer="125000" data-tol="500">
+        <div class="ex-head"><span class="badge">Q2</span> 算一算</div>
+        <div class="ex-q">一條 TCP 流跑在 Orin 的 1&nbsp;Gb/s（$10^9$ bit/s）乙太網路鏈路上，連到一台往返時間 1&nbsp;ms 的主機。頻寬延遲積是多少<strong>位元組（bytes）</strong>？（提示：$\text{BDP} = \text{bandwidth} \times \text{RTT}$，再把位元換算成位元組。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">bytes</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$\text{BDP} = 10^9\,\text{bit/s} \times 10^{-3}\,\text{s} = 10^6$ bits。除以 8：$10^6 / 8 = 125\,000$ bytes（$\approx 122$&nbsp;KiB）。低於此的 TCP 視窗會扼住吞吐量；遠高於此則只是徒增排隊延遲（緩衝膨脹）。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io09-nonblock-udp">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰 — 先讀路由，再寫一個非阻塞 UDP socket</div>
+        <div class="ex-q">首先，給出那一條命令：問核心一個送往 <code>8.8.8.8</code> 的封包究竟會用哪個介面。接著寫 C 來建立一個 UDP socket、把它設成 <code>O_NONBLOCK</code>、<code>bind()</code> 到一個埠，並在一個迴圈裡把它排空，遇 <code>EAGAIN</code> 乾淨地返回（這樣它就能住在一個 epoll 迴圈裡，第 08 章）。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body"><code>ip route get</code> 吃一個目的地。要設非阻塞，用 <code>fcntl(fd, F_GETFL)</code> 取得旗標，OR 上 <code>O_NONBLOCK</code>，再設回去。一個非阻塞的 <code>recvfrom()</code> 在沒東西可讀時，會回傳 <code>-1</code> 並帶 <code>errno == EAGAIN</code>（又名 <code>EWOULDBLOCK</code>）——那是「排空了」，不是錯誤。</div></details>
+        <details class="ex-acc"><summary>看一個解答</summary><div class="acc-body">
+          <p>讀出核心實際會挑的路由：</p>
+          <div class="codeblock"><div class="code-head">terminal <span class="lang">bash</span></div><pre><code class="language-bash">ip route get 8.8.8.8
+# 8.8.8.8 via 192.168.1.1 dev eth0 src 192.168.1.50</code></pre></div>
+          <div class="codeblock"><div class="code-head">nb_udp.c <span class="lang">C</span></div><pre><code class="language-c">#include &lt;arpa/inet.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;string.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;unistd.h&gt;
+
+int main(void) {
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd &lt; 0) { perror("socket"); return 1; }
+
+    int fl = fcntl(fd, F_GETFL, 0);            /* set non-blocking */
+    fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_port   = htons(2368);
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bind(fd, (struct sockaddr *)&amp;a, sizeof a) &lt; 0) {
+        perror("bind"); return 1;
+    }
+
+    /* in a real app this runs when epoll says fd is readable */
+    char buf[2048];
+    for (;;) {
+        ssize_t n = recvfrom(fd, buf, sizeof buf, 0, NULL, NULL);
+        if (n &gt;= 0) {
+            /* process the datagram of n bytes here */
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) break;  /* drained */
+        if (errno == EINTR) continue;                        /* retry */
+        perror("recvfrom"); break;                           /* real error */
+    }
+    close(fd);
+    return 0;
+}</code></pre></div>
+          <p>這個迴圈會讀出每一個排隊的資料包，然後在 socket 緩衝區空了、遇 <code>EAGAIN</code> 時退出——正是 epoll 想要的邊緣觸發（edge-triggered）排空模式。對 <code>EINTR</code>（被中斷的系統呼叫，syscall）用重試來處理，就跟第 01 章那些穩健的讀取迴圈一樣。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章回顧</div>
+        <p>一個封包的路徑是：網卡 DMA &rarr; 硬中斷 &rarr; NAPI 軟中斷 &rarr; IP/UDP/TCP 解多工 &rarr; socket 緩衝區 &rarr; <code>recv()</code>。Socket 就是檔案描述子，所以它們和其他一切都住在同一張 fd 表、同一個 epoll 迴圈裡。路由表以最長前綴匹配、再以權值來挑出口介面——這正是為什麼第二張網卡那條低權值的 DHCP 預設路由能偷走你的流量；把權值確定地釘死，把沉重的資料放在全雙工的乙太網路上，留下抖動的共享媒介 WiFi 給 SSH。把 <code>SO_RCVBUF</code> 照你最糟的突發定大小（別更大——緩衝膨脹），TCP 吞吐量用 BDP，而對於一旦重傳就只會送來陳舊資料的新鮮樣本感測器串流，選 UDP。下一章：CAN 與 SocketCAN——在一條為即時致動器（actuator）打造的匯流排（bus）上的網路語意。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+<script src="../../assets/io-sim.js"></script>
+<script>EM.ioDemo.netLink("sim-net");</script>
+</body>
+</html>

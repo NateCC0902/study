@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Devices as Files: /dev &amp; sysfs — Linux I/O for Robotics</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="02-devices-sysfs">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · Ch 02</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · Chapter 02 · Foundations</div>
+        <h1>Devices as Files: <code>/dev</code> &amp; sysfs</h1>
+        <p>Last chapter, "everything is a file" was a slogan. Now we make it concrete: a node in <code>/dev</code> is just a name carrying two integers that route every <code>read()</code> to a specific driver. Then we walk into <code>/sys</code> — the kernel's live, browsable map of every device on the board — and learn to read a link speed and toggle a GPIO with nothing but <code>cat</code> and <code>echo</code>.</p>
+        <div class="meta"><span>⏱ ~35 min</span><span>🧠 device model</span><span>⚡ sysfs hands-on</span><span>∑ dev_t bitfields</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="device-files"><span class="sec-no">1</span>Device files: a name that points at a driver</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>A device file in <code>/dev</code> is not a file. It has a name and lives in a directory, but it stores no bytes on disk — its entire payload is "which driver, which instance." When you <code>open("/dev/ttyTHS0")</code>, the kernel doesn't fetch data from a filesystem; it looks up the two numbers attached to that inode and hands your file descriptor to the driver registered for them. From there, every <code>read()</code> and <code>write()</code> is a direct line to hardware through that driver's <code>file_operations</code>.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> A device node is a phone number, not a storage box</div>
+        <p>The inode for <code>/dev/ttyUSB0</code> holds no data — only a <em>type</em> (char or block) and a pair of integers (major, minor) that say "dial this driver, extension that instance." The file API is the dial tone; the driver is who answers.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> The two types <small>char vs block</small></div>
+      <p>There are exactly two kinds of device file, and the distinction is about <em>how the kernel accesses the hardware</em>, not how fast it is:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Type</th><th><code>ls -l</code> first char</th><th>Access pattern</th><th>Goes through page cache?</th><th>Examples on the Orin</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Character</strong></td><td><code>c</code></td><td>byte stream, sequential, no fixed-size random seek</td><td>No — driver sees every byte</td><td><code>ttyTHS0</code> (UART), <code>i2c-1</code>, <code>gpiochip0</code>, <code>video0</code></td></tr>
+          <tr><td><strong>Block</strong></td><td><code>b</code></td><td>fixed-size blocks (512 B / 4 KiB), random-access, cached</td><td>Yes — kernel buffers &amp; reorders</td><td><code>mmcblk0</code> (eMMC), <code>nvme0n1</code> (NVMe SSD), <code>sda</code></td></tr>
+        </tbody>
+      </table></div>
+
+      <p>Run <code>ls -l /dev</code> and the leading letter tells you everything. A <code>c</code> means raw byte stream straight to the driver — your serial sensor, your camera, your GPIO bank. A <code>b</code> means the block layer sits in between, adding the page cache, the I/O scheduler, and readahead — your boot media and your log storage. Sensors are almost always char; storage is always block.</p>
+
+      <div class="codeblock">
+        <div class="code-head">shell — read the type column <span class="lang">bash</span></div>
+<pre><code class="language-bash">$ ls -l /dev/ttyTHS0 /dev/mmcblk0 /dev/gpiochip0
+crw-rw---- 1 root dialout 238,  0 Jun 14 09:02 /dev/ttyTHS0
+brw-rw---- 1 root disk    179,  0 Jun 14 09:02 /dev/mmcblk0
+crw------- 1 root root    254,  0 Jun 14 09:02 /dev/gpiochip0
+#^                        ^^^   ^
+#type=c/b                 major minor</code></pre>
+      </div>
+
+      <p>Notice the size column you'd expect on a regular file is replaced by <code>238, 0</code> — the <strong>major</strong> and <strong>minor</strong> numbers. That pair <em>is</em> the device. Next section: what those numbers mean and how they're packed.</p>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="major-minor"><span class="sec-no">2</span>Major, minor, and the <code>dev_t</code> bitfield</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>two numbers, two jobs</small></div>
+      <p>The <strong>major</strong> number selects the <em>driver</em> — "all character devices with major 238 belong to the Tegra HS-UART driver." The <strong>minor</strong> number selects the <em>instance</em> the driver owns — UART 0 vs UART 1, disk 0 vs disk 1. One driver registers a major and then carves the minor space among its own devices however it likes. So <code>(major, minor)</code> is a two-level address: which driver, then which thing it controls.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>how the pair is packed</small></div>
+      <p>The kernel doesn't pass two integers around — it packs them into one opaque type, <code>dev_t</code>. Internally the kernel uses a 32-bit layout: <strong>12 bits of major</strong> in the high part, <strong>20 bits of minor</strong> in the low part.</p>
+
+      <div class="math-box">$$ \texttt{dev\_t} = (\text{major} \ll 20)\ \mathbin{|}\ \text{minor} $$</div>
+
+      <p>Inverting it is just masking and shifting:</p>
+      <div class="math-box">$$ \text{major} = \texttt{dev} \gg 20, \qquad \text{minor} = \texttt{dev}\ \&\ \texttt{0xFFFFF} $$</div>
+
+      <p>The field widths set the limits directly: $2^{12} = 4096$ possible majors and $2^{20} = 1{,}048{,}576$ minors per major. That generous minor space is why a single disk driver (major 8 for SCSI/SATA) can address hundreds of disks and their partitions without ever running out.</p>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Worked example — pack and unpack</div>
+        <p>Take major 179 (the SD/MMC driver), minor 0. Pack: $179 \times 2^{20} = 179 \times 1{,}048{,}576 = 187{,}695{,}104$. Unpack a raw <code>dev_t</code> of $0\texttt{x0B300000} = 187{,}695{,}104$: shift right 20 gives $0\texttt{x0B3} = 179$; mask low 20 bits gives 0. Round-trip holds.</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Userspace uses a <em>different</em> packing — don't compute it by hand</div>
+        <p>The glibc <code>dev_t</code> exposed through <code>stat()</code> is 64-bit and splits the fields awkwardly (minor's low 8 bits, then major's bits, then the rest) for historical compatibility. The numbers <code>ls</code> prints are correct, but never reconstruct the integer with naive shifts in C — include <code>&lt;sys/sysmacros.h&gt;</code> and use <code>major()</code>, <code>minor()</code>, and <code>makedev()</code>. They paper over the layout difference for you.</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> Code <small>the macros, in C</small></div>
+      <div class="codeblock">
+        <div class="code-head">devnum.c — decode a device file's number <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;stdio.h&gt;
+#include &lt;sys/stat.h&gt;
+#include &lt;sys/sysmacros.h&gt;   /* major(), minor(), makedev() */
+
+int main(int argc, char **argv) {
+    struct stat st;
+    if (stat(argv[1], &amp;st) != 0) { perror("stat"); return 1; }
+
+    /* st_rdev holds the device number for a device file */
+    unsigned maj = major(st.st_rdev);
+    unsigned min = minor(st.st_rdev);
+    char type = S_ISCHR(st.st_mode) ? 'c'
+              : S_ISBLK(st.st_mode) ? 'b' : '?';
+
+    printf("%s: type=%c major=%u minor=%u\n", argv[1], type, maj, min);
+    return 0;   /* ./a.out /dev/mmcblk0  ->  type=b major=179 minor=0 */
+}</code></pre>
+      </div>
+      <p>Two <code>stat</code> fields matter here: <code>st_mode</code> carries the type bits (<code>S_ISCHR</code> / <code>S_ISBLK</code>), and <code>st_rdev</code> carries the packed device number — distinct from <code>st_dev</code>, which is the device the file <em>lives on</em>. Mixing those two up is a classic bug.</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="devtmpfs"><span class="sec-no">3</span>How <code>/dev</code> gets populated: devtmpfs</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>who creates the nodes?</small></div>
+      <p>Decades ago you ran <code>MAKEDEV</code> and hand-created hundreds of stale nodes in a real on-disk <code>/dev</code>. Today <code>/dev</code> is a RAM-backed virtual filesystem — <strong>devtmpfs</strong> — that the kernel mounts during early boot. The moment a driver registers a device, the kernel creates the matching node in devtmpfs automatically, with the right type and the right major/minor. Unplug the device, the driver unregisters, the node vanishes. Nothing is persisted; it's rebuilt from live hardware every boot.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> devtmpfs is the kernel's draft; udev is the editor</div>
+        <p>The kernel populates devtmpfs with bare, predictable names (<code>ttyUSB0</code>, <code>video1</code>). It does <em>not</em> set friendly permissions, group ownership, or stable symlinks. That polish is <strong>udev</strong>'s job (Chapter 03), reacting in userspace to the kernel's "uevent." devtmpfs guarantees a node exists early; udev makes it usable.</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    HW["Device appears<br/>(boot or hotplug)"] --> DRV["Driver registers<br/>device_create()"]
+    DRV --> DT["devtmpfs makes<br/>/dev/ttyUSB0<br/>(type + major/minor)"]
+    DRV --> UE["Kernel emits<br/>uevent (netlink)"]
+    UE --> UDEV["udevd in userspace"]
+    UDEV --> SYM["perms · group ·<br/>/dev/serial/by-id/…"]
+</div>
+
+      <div class="layer"><span class="step">④</span> Real case <small>Jetson AGX Orin USV</small></div>
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Why your GPS sometimes shows up as ttyUSB1</div>
+        <p>devtmpfs names by enumeration order, not by identity. Boot the Orin with the GPS and the IMU both on USB-serial adapters and the kernel grabs whichever the USB host enumerates first as <code>ttyUSB0</code>. Reboot, or warm-plug them in a different order, and they can swap. The node is always <em>correct</em> (right driver, right minor) — it's just not <em>stable</em>. That instability is exactly the problem udev rules solve in the next chapter; for now, just know the names come from devtmpfs in enumeration order.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="sys-tour"><span class="sec-no">4</span>A tour of <code>/sys</code>: the live device map</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>/dev is the door, /sys is the blueprint</small></div>
+      <p>If <code>/dev</code> is the set of doors you open to <em>talk</em> to devices, <code>/sys</code> (the <strong>sysfs</strong> virtual filesystem, mounted at <code>/sys</code>) is the blueprint that describes <em>what every device is, how it's wired, and what state it's in</em>. It's a window straight into the kernel's in-memory device objects. Every file under <code>/sys</code> is an <strong>attribute</strong>: <code>cat</code> it to read kernel state, and for the writable ones, <code>echo</code> into it to change hardware. No special tools, no syscalls you have to learn — it's all VFS.</p>
+
+      <p>sysfs presents the same set of device objects through several lenses. The three you'll live in:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Top-level dir</th><th>View</th><th>You go here to…</th></tr></thead>
+        <tbody>
+          <tr><td><code>/sys/devices/</code></td><td>the canonical tree — every device by its physical parentage (bus → controller → device)</td><td>see the true hierarchy; everything else symlinks here</td></tr>
+          <tr><td><code>/sys/class/</code></td><td>by <em>function</em>: <code>net/</code>, <code>tty/</code>, <code>gpio/</code>, <code>block/</code>, <code>thermal/</code>, <code>hwmon/</code></td><td>"all the network interfaces," "all the TTYs" — the friendly way in</td></tr>
+          <tr><td><code>/sys/bus/</code></td><td>by <em>bus</em>: <code>usb/</code>, <code>pci/</code>, <code>i2c/</code>, <code>spi/</code>, each with <code>devices/</code> and <code>drivers/</code></td><td>see what's on a bus and which driver claimed it (binding)</td></tr>
+        </tbody>
+      </table></div>
+
+      <p><code>class</code> and <code>bus</code> are mostly directories full of symlinks pointing back into the one real tree under <code>devices</code>. Follow any of them with <code>readlink -f</code> and you land on the same canonical path. That's the design: one object, many indexes.</p>
+
+      <div class="codeblock">
+        <div class="code-head">shell — three lenses on the same NIC <span class="lang">bash</span></div>
+<pre><code class="language-bash"># Functional view: every network interface the kernel knows
+$ ls /sys/class/net
+eth0  lo  wlan0
+
+# Follow the class symlink down to the real object
+$ readlink -f /sys/class/net/eth0
+/sys/devices/platform/bus@0/6800000.ethernet/net/eth0
+
+# Bus view: which PCI/USB/platform devices exist and who drives them
+$ ls /sys/bus/usb/devices
+1-0:1.0  1-1  1-1:1.0  1-2  1-2:1.0  usb1  usb2</code></pre>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="sysfs-attrs"><span class="sec-no">5</span>Reading and writing sysfs attributes</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>cat to read, echo to act</small></div>
+      <p>Each attribute file is a tiny, typed channel into the kernel. Reads are cheap and side-effect-free; you can poll <code>speed</code> or <code>temp</code> as often as you like. Writes are the interesting part — writing a string into the right file <em>changes hardware behavior immediately</em>, no reboot, no config file. The kernel parses your text in the driver's <code>store()</code> callback and acts on it.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>three attributes that matter on a robot</small></div>
+      <p><strong>(a) Link speed</strong> — is the Ethernet sensor actually at gigabit, or did it negotiate down to 100 Mb on a marginal cable?</p>
+      <div class="codeblock">
+        <div class="code-head">shell — read negotiated Ethernet speed (Mb/s) <span class="lang">bash</span></div>
+<pre><code class="language-bash">$ cat /sys/class/net/eth0/speed
+1000                       # gigabit — good
+$ cat /sys/class/net/eth0/duplex
+full
+$ cat /sys/class/net/eth0/operstate
+up                         # carrier present and admin-up</code></pre>
+      </div>
+
+      <p><strong>(b) FTDI <code>latency_timer</code></strong> — the single most important number for low-lag USB-serial sensors. FTDI chips buffer received bytes and only forward them after this many milliseconds if the buffer hasn't filled. Default is 16 ms; that's a lifetime for a 100 Hz IMU. Drop it to 1 ms.</p>
+      <div class="codeblock">
+        <div class="code-head">shell — cut USB-serial latency to 1 ms <span class="lang">bash</span></div>
+<pre><code class="language-bash">$ DEV=/sys/bus/usb-serial/devices/ttyUSB0
+$ cat $DEV/latency_timer
+16
+$ echo 1 | sudo tee $DEV/latency_timer
+1
+$ cat $DEV/latency_timer
+1                          # bytes now flushed up to 16x sooner</code></pre>
+      </div>
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Why <code>tee</code>, not redirection?</div>
+        <p><code>sudo echo 1 &gt; file</code> fails: the shell opens the redirect as <em>your</em> user before <code>sudo</code> runs. <code>echo 1 | sudo tee file</code> runs the privileged write inside <code>tee</code>. Also: a sysfs write isn't durable — it resets on unplug/reboot, which is why you'll bake <code>latency_timer</code> into a udev rule later (Chapter 03).</p>
+      </div>
+
+      <p><strong>(c) A GPIO value via the legacy sysfs interface.</strong> You export a pin by number, set its direction, then read or write its logic level as a single character. (The modern path is the <code>libgpiod</code> character device on <code>/dev/gpiochip0</code> — covered in §7 — but sysfs GPIO is still the fastest thing to demo from a shell.)</p>
+      <div class="codeblock">
+        <div class="code-head">shell — drive a GPIO high via sysfs <span class="lang">bash</span></div>
+<pre><code class="language-bash"># Find the controller's base offset, then pick a line
+$ cat /sys/class/gpio/gpiochip300/label
+tegra234-gpio
+$ echo 316 | sudo tee /sys/class/gpio/export        # claim line 316
+$ cd /sys/class/gpio/gpio316
+$ echo out | sudo tee direction                     # make it an output
+$ echo 1   | sudo tee value                          # drive it HIGH (3.3 V)
+$ cat value
+1
+$ echo 0   | sudo tee value                          # back to LOW
+$ echo 316 | sudo tee /sys/class/gpio/unexport       # release the line</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Attribute reads can be deceptive</div>
+        <p>A sysfs attribute reflects the driver's <em>current notion</em> of state, which may be cached. <code>eth0/speed</code> reads <code>-1</code> when the link is down (no negotiation happened). And the legacy GPIO sysfs interface is deprecated and removed in newer kernels precisely because exported pins leak across processes — fine for a quick toggle, wrong for production. Use it to learn; ship with <code>libgpiod</code>.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="device-model"><span class="sec-no">6</span>The unified device model: bus ↔ driver ↔ device</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>matchmaking</small></div>
+      <p>Everything under <code>/sys</code> is a projection of one in-kernel data structure: the <strong>device model</strong>. Three kinds of objects — <strong>buses</strong>, <strong>devices</strong>, and <strong>drivers</strong> — and one relationship that ties them together: <strong>binding</strong>. A device appears on a bus. Drivers register against that bus with a table of IDs they can handle. The bus's <code>match()</code> function compares each device against each driver; on a hit, the driver's <code>probe()</code> runs and the device is <em>bound</em>. That binding is what turns "a chip is present" into "a working <code>/dev</code> node."</p>
+
+      <div class="mermaid">
+flowchart TD
+    BUS["bus_type<br/>(usb / pci / i2c / platform)"]
+    DEV["device<br/>(the chip that showed up)"]
+    DRV["device_driver<br/>(code + id_table)"]
+    DEV -->|"registered on"| BUS
+    DRV -->|"registered on"| BUS
+    BUS -->|"match() compares<br/>device id vs id_table"| M{"id match?"}
+    M -->|yes| PROBE["driver->probe(dev)<br/>= BOUND"]
+    M -->|no| WAIT["device stays<br/>unbound"]
+    PROBE --> NODE["devtmpfs node +<br/>/sys class entry"]
+</div>
+
+      <div class="layer"><span class="step">③</span> Code <small>inspect and force binding from the shell</small></div>
+      <p>Binding is browsable and, when you need it, scriptable. Under <code>/sys/bus/&lt;bus&gt;/</code> you get a <code>devices/</code> directory and a <code>drivers/</code> directory; each driver has <code>bind</code> and <code>unbind</code> attributes you can write a device ID into.</p>
+      <div class="codeblock">
+        <div class="code-head">shell — see what's bound, then rebind <span class="lang">bash</span></div>
+<pre><code class="language-bash"># Which driver claimed this I2C device? Follow the 'driver' symlink.
+$ readlink /sys/bus/i2c/devices/1-0068/driver
+../../../../bus/i2c/drivers/mpu6050      # the IMU bound to mpu6050
+
+# Force-detach a device from its driver, then re-attach it
+$ echo 1-0068 | sudo tee /sys/bus/i2c/drivers/mpu6050/unbind
+$ echo 1-0068 | sudo tee /sys/bus/i2c/drivers/mpu6050/bind
+
+# List every device a driver currently owns
+$ ls -l /sys/bus/usb/drivers/usb-storage/</code></pre>
+      </div>
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> When "the sensor is there but there's no /dev node"</div>
+        <p>On the Orin this is the classic symptom of a <em>binding</em> failure, not a wiring failure. The device shows up under <code>/sys/bus/i2c/devices/</code> (the kernel sees the chip) but has no <code>driver</code> symlink (nothing claimed it). Cause: missing module, wrong <code>compatible</code> string in the device tree, or a <code>probe()</code> that errored — check <code>dmesg</code>. The device model splits "present" from "driven," and that split is your first diagnostic.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="ioctl"><span class="sec-no">7</span><code>ioctl</code>: the escape hatch for char devices</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>when read/write isn't enough</small></div>
+      <p><code>read()</code> and <code>write()</code> move a byte stream. But a serial port needs to <em>set its baud rate</em>; a CAN interface needs its <em>bitrate</em>; a GPIO line needs <em>"configure as output, then give me an event on falling edge."</em> None of that is a byte stream. <strong><code>ioctl</code></strong> (I/O control) is the catch-all syscall for device-specific commands that don't fit read/write. You pass an open fd, a numeric command code, and a pointer to a struct the driver knows how to interpret.</p>
+
+      <div class="math-box">$$ \texttt{ioctl}(\text{fd},\ \text{request},\ \text{arg}) \;\longrightarrow\; \text{driver's } \texttt{.unlocked\_ioctl()} $$</div>
+
+      <p>The <code>request</code> code isn't arbitrary — it's encoded with the direction (read/write/both), a "magic" type byte identifying the driver family, a command number, and the size of <code>arg</code>, via the <code>_IOR</code>/<code>_IOW</code>/<code>_IOWR</code> macros. That encoding lets the kernel sanity-check the call before the driver ever sees it.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>read GPIO line info with the modern API</small></div>
+      <p>Here's the <code>libgpiod</code>-style v2 character-device call that replaces the deprecated sysfs GPIO — an <code>ioctl</code> on <code>/dev/gpiochip0</code> to fetch info about one line:</p>
+      <div class="codeblock">
+        <div class="code-head">gpioinfo.c — one line's info via ioctl <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;fcntl.h&gt;
+#include &lt;stdio.h&gt;
+#include &lt;sys/ioctl.h&gt;
+#include &lt;linux/gpio.h&gt;     /* GPIO_V2_GET_LINEINFO_IOCTL, struct gpio_v2_line_info */
+
+int main(void) {
+    int fd = open("/dev/gpiochip0", O_RDWR | O_CLOEXEC);
+    if (fd &lt; 0) { perror("open"); return 1; }
+
+    struct gpio_v2_line_info info = { .offset = 12 };   /* ask about line 12 */
+    if (ioctl(fd, GPIO_V2_GET_LINEINFO_IOCTL, &amp;info) &lt; 0) {
+        perror("ioctl");                  /* errno tells you WHY it failed */
+        return 1;
+    }
+    printf("line %u: name=\"%s\" flags=0x%llx\n",
+           info.offset, info.name, (unsigned long long)info.flags);
+    return 0;
+}</code></pre>
+      </div>
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> ioctl is per-driver — read the header</div>
+        <p>There is no general <code>ioctl</code> reference; the valid request codes and structs live in the driver's UAPI header — <code>&lt;linux/gpio.h&gt;</code>, <code>&lt;linux/i2c-dev.h&gt;</code>, <code>&lt;asm/termbits.h&gt;</code> for serial, <code>&lt;linux/can.h&gt;</code>. The pattern is always the same: <code>open</code> the char device, fill a struct, fire the right <code>_IOWR</code> code, check the return for <code>-1</code> and read <code>errno</code>. Tools like <code>gpiodetect</code>, <code>i2cset</code>, and <code>ip link set</code> are thin wrappers over exactly these calls.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io02-char-vs-block">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">You run <code>ls -l /dev/ttyTHS0</code> and see the line starts with <code>c</code>. What does that tell you about how the kernel will move data to and from this device?</div>
+        <ul class="ex-options">
+          <li data-correct="false">It is a block device, so reads and writes are cached in fixed-size blocks and can be randomly seeked.</li>
+          <li data-correct="true">It is a character device: an unbuffered byte stream handed straight to the driver, with no block layer or page cache in between.</li>
+          <li data-correct="false">The <code>c</code> means "configurable" — you set the block size with <code>ioctl</code> before reading.</li>
+          <li data-correct="false">It indicates the file is compressed and decompressed transparently on read.</li>
+        </ul>
+        <div class="ex-explain">A leading <code>c</code> is a character device — a sequential byte stream that bypasses the block layer, so the driver sees every byte you write. UARTs, I²C, GPIO, and cameras are char devices. A leading <code>b</code> (block) is for storage, where the kernel adds caching, reordering, and fixed-size random access — <code>mmcblk0</code>, <code>nvme0n1</code>, <code>sda</code>.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io02-devnum" data-answer="8388981" data-tol="0">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">Using the kernel's 32-bit <code>dev_t</code> layout — major in the high 12 bits, minor in the low 20 bits, so $\texttt{dev} = (\text{major} \ll 20)\,|\,\text{minor}$ — what is the packed device number for major <strong>8</strong> (SCSI/SATA disk), minor <strong>373</strong>? Give the decimal integer.</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">dec</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$8 \ll 20 = 8 \times 2^{20} = 8 \times 1{,}048{,}576 = 8{,}388{,}608$. Add the minor: $8{,}388{,}608 + 373 = 8{,}388{,}981$. To invert: $8{,}388{,}981 \gg 20 = 8$ (major), and $8{,}388{,}981 \,\&\, \texttt{0xFFFFF} = 373$ (minor). In C you'd never do the arithmetic yourself — <code>makedev(8, 373)</code> — because the glibc 64-bit layout differs from this kernel layout.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io02-sysfs-toggle">
+        <div class="ex-head"><span class="badge">Q3</span> Hands-on — inspect a device, read its link speed, toggle a GPIO</div>
+        <div class="ex-q">On the Orin you need a one-shot script that (1) finds the canonical <code>/sys</code> path behind <code>eth0</code>, (2) prints its negotiated link speed and duplex, and (3) pulses GPIO line 316 high for one second then low, cleaning up after itself. Write the commands.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Resolve the class symlink with <code>readlink -f</code>. Link speed and duplex are plain attribute files under <code>/sys/class/net/eth0/</code>. For the GPIO, the legacy sequence is <code>export → direction → value → unexport</code>, and remember privileged writes need <code>sudo tee</code>, not <code>&gt;</code>.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <div class="codeblock"><div class="code-head">probe_and_pulse.sh <span class="lang">bash</span></div>
+<pre><code class="language-bash">#!/usr/bin/env bash
+set -euo pipefail
+
+# (1) Canonical sysfs path behind the friendly class name
+echo "eth0 -&gt; $(readlink -f /sys/class/net/eth0)"
+
+# (2) Read negotiated link state (speed is -1 when the link is down)
+echo "speed:  $(cat /sys/class/net/eth0/speed) Mb/s"
+echo "duplex: $(cat /sys/class/net/eth0/duplex)"
+echo "state:  $(cat /sys/class/net/eth0/operstate)"
+
+# (3) Pulse GPIO line 316 high for 1 s, then release the line
+LINE=316
+echo "$LINE" | sudo tee /sys/class/gpio/export &gt; /dev/null
+echo out | sudo tee /sys/class/gpio/gpio$LINE/direction &gt; /dev/null
+echo 1   | sudo tee /sys/class/gpio/gpio$LINE/value &gt; /dev/null
+sleep 1
+echo 0   | sudo tee /sys/class/gpio/gpio$LINE/value &gt; /dev/null
+echo "$LINE" | sudo tee /sys/class/gpio/unexport &gt; /dev/null
+</code></pre></div>
+          <p>The same toggle in production would use <code>gpioset gpiochip0 316=1</code> from <code>libgpiod</code> — an <code>ioctl</code> on <code>/dev/gpiochip0</code> under the hood — which releases the line automatically when the process exits, so it can't leak the way the sysfs export can.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>A device file is a name carrying a type (char vs block) and a <code>(major, minor)</code> pair; the major picks the driver, the minor picks the instance, packed as <code>dev_t = (major&lt;&lt;20) | minor</code> in the kernel. <strong>devtmpfs</strong> auto-creates those nodes from live hardware at registration time; <strong>udev</strong> (next chapter) makes them stable and usable. <code>/sys</code> exposes the kernel's device model through three lenses — <code>devices/</code> (the truth), <code>class/</code> (by function), <code>bus/</code> (by bus + binding) — where every file is a readable, sometimes writable, attribute: link speed, FTDI <code>latency_timer</code>, a GPIO value. Binding (<code>bus.match()</code> → <code>driver.probe()</code>) is what turns a present chip into a working node, and its absence is your first diagnostic. When read/write can't express a command, <strong><code>ioctl</code></strong> is the escape hatch. Next: why <code>ttyUSB0</code> won't stay <code>ttyUSB0</code>, and how udev pins names.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

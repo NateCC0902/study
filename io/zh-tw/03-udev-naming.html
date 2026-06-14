@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>udev 與持久命名 — 機器人的 Linux I/O</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="03-udev-naming">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · 第 03 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · 第 03 章 · 裝置</div>
+        <h1>udev 與持久命名：讓 <code>/dev/gps</code> 永遠代表 GPS</h1>
+        <p>你把一個 GPS 與一個 IMU 接進 USV 的 USB 集線器，開啟 <code>/dev/ttyUSB0</code> 給 GPS 用，出貨了，一週後這艘船卻朝著浮標轉去——因為一次冷開機（cold-boot）競態（race）把 <code>ttyUSB0</code> 交給了 IMU。本章要教你的，就是怎麼讓裝置的名字跟著<em>裝置本身</em>走，而不是跟著核心碰巧探測（probe）它的順序走。</p>
+        <div class="meta"><span>⏱ 約 40 分鐘</span><span>🧠 uevent 與規則</span><span>⚡ 動手做</span><span>∑ n! 種排列</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="the-renumbering-problem"><span class="sec-no">1</span>重新編號問題</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>為什麼編號是個謊言</small></div>
+      <p>像 <code>ttyUSB0</code>、<code>ttyUSB1</code>、<code>video0</code>、<code>sda</code> 這些核心裝置節點（node），是按照核心<em>列舉（enumeration）</em>它們的順序編號的，而那個順序就是它們的驅動程式完成探測的順序。這個順序並不穩定。它取決於 USB 集線器的拓樸（topology）、哪個裝置先上電並完成連結建立、驅動程式載入順序，以及你有沒有重新插拔過什麼。兩個一模一樣的 FTDI 轉接器，在同一台機器的兩次開機之間就可能互換編號。那個索引是一張到場號碼牌，不是身分。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——核心名稱是競態的結果</div>
+        <p>用名字開啟 <code>/dev/ttyUSB0</code>，等於是在開啟「本次開機最先探測到的那個序列裝置」。在一台帶有兩個以上序列轉接頭的機器人上，那是一場你每次重新上電都要重擲一次的擲硬幣賭局。在正式環境裡，永遠不要把核心指派的索引寫死。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>到底能爛到什麼地步</small></div>
+      <p>把這場賭注量化。如果匯流排（bus）上有 $n$ 個彼此無法區分的序列裝置，核心可以用任何一對一映射把索引 <code>ttyUSB0..ttyUSB(n-1)</code> 指派出去。相異排列的數目，就是 $n$ 個物件的排列數：</p>
+      <div class="math-box">$$ P(n) = n! = n \times (n-1) \times \cdots \times 2 \times 1 $$</div>
+      <p>這些排列裡，只有<strong>一個</strong>是你的程式碼所假設的那個，所以一次隨機開機剛好給你寫死的那種佈局的機率是 $1/n!$。階乘咬得很快：兩個裝置有 $2! = 2$ 種排列（弄錯的機率 50%），三個有 $3! = 6$ 種，四個有 $4! = 24$ 種，五個有 $5! = 120$ 種。一艘載著 GPS、IMU、一個 USB 轉 CAN 轉接器和一個 USB 數據機的 USV，每次開機就已經活在一場 24 選一的樂透裡。</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>$n$ 個裝置</th><th>$n!$ 種排列</th><th>$P(\text{你的佈局})=1/n!$</th></tr></thead>
+        <tbody>
+          <tr><td>2</td><td>2</td><td>50%</td></tr>
+          <tr><td>3</td><td>6</td><td>16.7%</td></tr>
+          <tr><td>4</td><td>24</td><td>4.2%</td></tr>
+          <tr><td>5</td><td>120</td><td>0.83%</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 整章濃縮成一句話</div>
+        <p>別再用到場索引來命名裝置了。用<em>身分</em>來命名它們——廠商、產品、序號，或實體連接埠——並讓一個使用者空間（user space）守護程式（daemon），也就是 <strong>udev</strong>，在裝置一出現的那一刻就建立一個穩定的別名。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="uevent-to-udev-flow"><span class="sec-no">2</span>從核心 uevent 到 <code>/dev</code> 裡的一個節點</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>到底是誰造出那個節點的</small></div>
+      <p>當一個裝置出現時，核心<em>並不</em>決定在 <code>/dev</code> 裡要叫它什麼。核心在內部建立這個裝置，把它註冊進裝置模型（也就是第 02 章那棵 <code>/sys</code> 樹），接著發出一則叫做 <strong>uevent</strong> 的小訊息——幾行 <code>KEY=value</code> 文字——透過一個 netlink 通訊端（socket）（<code>NETLINK_KOBJECT_UEVENT</code>）往上送到使用者空間。一個守護程式 <code>systemd-udevd</code> 在那個通訊端上監聽，把事件拿去跟一大堆<em>規則（rule）</em>比對，它才是真正套用擁有權、權限模式與你那些符號連結（symlink）的東西。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 機制 vs. 政策</div>
+        <p>核心提供<em>機制（mechanism）</em>（裝置存在了，這是它的屬性）。udev 提供<em>政策（policy）</em>（叫它這個名字、讓那個群組擁有它、把符號連結放這裡）。正是這個切分，命名才得以可設定：它住在你掌控的使用者空間文字檔裡，而不是在核心裡。</p>
+      </div>
+
+      <p>注意，<code>devtmpfs</code>（第 02 章）其實已經很早就給了你一個像 <code>/dev/ttyUSB0</code> 這樣的裸節點——核心會預先填好它，免得系統在 udev 跑起來之前處於沒有節點的狀態。udev 接著才過來，依照政策替它重新標籤／改權限（chmod）／建立符號連結。兩者都有份：devtmpfs 造出原始節點，udev 套用規則。</p>
+
+      <div class="layer"><span class="step">②</span> 流程 <small>追蹤一次插入事件</small></div>
+      <div class="mermaid">
+flowchart TD
+    A["裝置插入<br/>(USB 列舉)"] --> B["核心：綁定驅動，<br/>註冊進 /sys"]
+    B --> C["devtmpfs 建立<br/>裸 /dev 節點"]
+    B --> D["核心發出 uevent<br/>ACTION=add, KEY=val…"]
+    D -->|"netlink 通訊端"| E["systemd-udevd<br/>收到事件"]
+    E --> F["遍歷 rules.d<br/>(etc + lib)"]
+    F --> G{"所有 match 鍵<br/>== 都通過?"}
+    G -->|"是"| H["套用賦值<br/>SYMLINK+= MODE= RUN+="]
+    G -->|"否"| I["跳過這條規則"]
+    H --> J["/dev/gps 指向 ttyUSB0<br/>擁有權設好，RUN 完成"]
+</div>
+
+      <p>你可以即時觀看原始事件。<code>udevadm monitor</code> 會在你插拔東西時，把核心端的 uevent 與 udev 端處理後的事件都印出來——當一條規則「沒有觸發」時，這非常寶貴：</p>
+
+      <div class="codeblock">
+        <div class="code-head">在事件發生當下觀看它們 <span class="lang">bash</span></div>
+<pre><code class="language-bash"># --kernel = raw uevents, --udev = post-rule events, --property dumps KEY=val
+udevadm monitor --kernel --udev --property
+# plug the GPS in now; you'll see KERNEL[..] add /devices/3610000.usb/usb1/1-2/1-2.1/1-2.1:1.0/ttyUSB0/tty/ttyUSB0
+</code></pre>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="rule-anatomy"><span class="sec-no">3</span>規則剖析：match 鍵 vs. 賦值</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>一條規則就是「若全部成立，則做某事」</small></div>
+      <p>一條 udev 規則就是單獨一行：一串以逗號分隔的 <strong>match 鍵（match keys）</strong>（條件）後面接著 <strong>賦值鍵（assignment keys）</strong>（動作）。udev 為每一個事件讀過每一條規則；若一行上的<em>所有</em> match 鍵都為真，它就執行那一行的賦值。初學者最常犯的單一錯誤，就是把兩種 <code>=</code> 搞混，所以把這點刻進腦子裡：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>運算子</th><th>種類</th><th>意義</th></tr></thead>
+        <tbody>
+          <tr><td><code>==</code></td><td>match（測試）</td><td>「這個鍵<em>等於</em>這個值嗎?」——一個條件</td></tr>
+          <tr><td><code>!=</code></td><td>match（測試）</td><td>「這個鍵<em>不等於</em>這個值嗎?」</td></tr>
+          <tr><td><code>=</code></td><td>賦值</td><td>設定其值（取代先前的任何清單）</td></tr>
+          <tr><td><code>+=</code></td><td>賦值</td><td>附加到一個清單值的鍵上（例如新增一個符號連結）</td></tr>
+          <tr><td><code>:=</code></td><td>賦值</td><td>設定<em>並且</em>鎖定——後面的規則無法再更動它</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——你本想寫 <code>==</code> 卻寫成 <code>=</code></div>
+        <p>寫 <code>SUBSYSTEM="tty"</code>（單一 <code>=</code>）並不會測試子系統——它試圖去<em>賦值</em>給一個唯讀的 match 鍵，於是你的規則會默默地做錯事或什麼都不做。條件<strong>永遠</strong>是 <code>==</code> / <code>!=</code>；動作是 <code>=</code> / <code>+=</code> / <code>:=</code>。把這個搞反，你會白白損失一個下午。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 詞彙 <small>你實際會用到的那些鍵</small></div>
+      <p>你會倚重的 match 鍵：<code>SUBSYSTEM</code>（例如 <code>tty</code>、<code>net</code>、<code>block</code>）、<code>KERNEL</code>（核心名稱，支援像 <code>ttyUSB*</code> 這樣的萬用字元）、<code>ATTRS{idVendor}</code>（在這個裝置<em>或它任一個上層裝置</em>上的一個 sysfs 屬性——這就是你往上探到 USB 裝置去拿 <code>idVendor</code> 的方法），以及 <code>ENV{ID_SERIAL}</code>（由先前某條規則設定的屬性，例如 <code>ID_SERIAL</code>）。賦值鍵：<code>NAME</code>（網路介面——重新命名裝置本身）、<code>SYMLINK+=</code>（在 <code>/dev</code> 裡加一個穩定別名）、<code>MODE</code>、<code>OWNER</code>、<code>GROUP</code>，以及 <code>RUN+=</code>。</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> <code>ATTR</code> vs. <code>ATTRS</code>（差一個字母，差很多）</div>
+        <p><code>ATTR{idVendor}</code> 只比對<em>當前</em>裝置上的一個 sysfs 屬性。<code>ATTRS{idVendor}</code>（帶 S，代表「search／搜尋」）會<em>沿著上層鏈往上走</em>，直到找到一個帶有那個屬性的裝置。一個 <code>ttyUSB</code> 節點本身沒有 <code>idVendor</code>——那住在好幾層之上的 USB 裝置上——所以你幾乎總是要用 <code>ATTRS{idVendor}</code>，而不是 <code>ATTR{idVendor}</code>。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="finding-match-keys"><span class="sec-no">4</span>用 <code>udevadm info</code> 找出 match 鍵</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>先審問這個裝置</small></div>
+      <p>永遠別猜屬性——去問。<code>udevadm info --attribute-walk</code>（簡寫 <code>-a</code>）從裝置節點出發，沿著上層鏈往上走，在每一層把你能比對的每一個 <code>ATTRS{idVendor}</code> 之類的鍵都印出來。就是這一道指令，把「我手上有個轉接頭」變成「我有一條規則」。</p>
+
+      <div class="codeblock">
+        <div class="code-head">替 GPS 遍歷裝置樹 <span class="lang">bash</span></div>
+<pre><code class="language-bash">udevadm info --attribute-walk --name=/dev/ttyUSB0
+# or the short form:
+udevadm info -a -n /dev/ttyUSB0
+</code></pre>
+      </div>
+
+      <p>輸出是一疊區塊，裝置本身在最前，接著是每一個上層裝置。從上往下讀，從帶有 USB 識別碼的那個<em>上層</em>區塊裡抓出那些鍵：</p>
+
+      <div class="codeblock">
+        <div class="code-head">精簡過的 udevadm 輸出 <span class="lang">bash</span></div>
+<pre><code class="language-bash">  looking at device '/devices/3610000.usb/usb1/1-2/1-2.1/1-2.1:1.0/ttyUSB0/tty/ttyUSB0':
+    KERNEL=="ttyUSB0"
+    SUBSYSTEM=="tty"
+
+  looking at parent device '/devices/3610000.usb/usb1/1-2/1-2.1/1-2.1:1.0/ttyUSB0':
+    KERNELS=="ttyUSB0"
+    SUBSYSTEMS=="usb-serial"
+
+  looking at parent device '/devices/3610000.usb/usb1/1-2/1-2.1':   # &lt;-- the USB device
+    KERNELS=="1-2.1"
+    SUBSYSTEMS=="usb"
+    ATTRS{idVendor}=="067b"
+    ATTRS{idProduct}=="2303"
+    ATTRS{serial}=="0001"
+    ATTRS{product}=="USB-Serial Controller"
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 該採收什麼</div>
+        <p>你要的是 <code>idVendor</code> + <code>idProduct</code> 來挑出<em>型號</em>，以及 <code>serial</code> 來挑出<em>個別的那一台</em>。兩個不同型號的轉接頭？廠商＋產品就夠了。兩個<em>一模一樣</em>的轉接頭（相同廠商／產品）？你<strong>必須</strong>用 <code>serial</code> 才能把它們分開——或者退而用實體連接埠（§7）。</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 別把不同上層區塊的屬性混在一起</div>
+        <p>你放進同一條規則裡的所有 <code>ATTRS{idVendor}</code> 之類的鍵，都必須來自<strong>同一個上層區塊</strong>。udev 是拿它們去比對鏈上的同一個裝置——它不會把某個上層的 <code>idVendor</code> 跟另一個上層的 <code>serial</code> 拼湊在一起。把它們全部從 <code>SUBSYSTEMS=="usb"</code> 那個區塊裡拿。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="writing-the-symlink-rule"><span class="sec-no">5</span>撰寫穩定符號連結的規則</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>規則本體</small></div>
+      <p>規則住在 <code>/etc/udev/rules.d/</code>（你的覆寫）與 <code>/lib/udev/rules.d/</code>（發行版的）。檔案是<strong>依檔名按字典序</strong>讀取的——這就是為什麼大家都用一個數字當前綴，例如 <code>99-usv.rules</code>，好讓它晚點才跑、勝出。下面這條規則就把 GPS 釘死：</p>
+
+      <div class="codeblock">
+        <div class="code-head">/etc/udev/rules.d/99-usv.rules <span class="lang">bash</span></div>
+<pre><code class="language-bash"># GPS: PL2303 dongle, serial 0001 -&gt; /dev/gps
+SUBSYSTEM=="tty", ATTRS{idVendor}=="067b", ATTRS{idProduct}=="2303", \
+  ATTRS{serial}=="0001", SYMLINK+="gps", GROUP="dialout", MODE="0660"
+
+# IMU: identical-model dongle, different serial 0002 -&gt; /dev/imu
+SUBSYSTEM=="tty", ATTRS{idVendor}=="067b", ATTRS{idProduct}=="2303", \
+  ATTRS{serial}=="0002", SYMLINK+="imu", GROUP="dialout", MODE="0660"
+</code></pre>
+      </div>
+
+      <p>把它當成一句話來讀：「<em>若</em>子系統是 <code>tty</code> <em>且</em>上層 USB 廠商是 <code>067b</code> <em>且</em>產品是 <code>2303</code> <em>且</em>序號是 <code>0001</code>，<em>則</em>加一個指向這個節點的符號連結 <code>/dev/gps</code>，把群組設成 <code>dialout</code>，把模式設成 <code>0660</code>。」每一個 <code>==</code> 都是條件；每一個 <code>+=</code>／<code>=</code> 都是動作。那個反斜線只是為了好讀而把這一行接續下去——一條真正的規則是邏輯上的一行。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 為什麼用符號連結，而不是改名</div>
+        <p><code>SYMLINK+=</code> 是在 <code>/dev/ttyUSB0</code> 仍然存在的同時<em>加上</em> <code>/dev/gps</code> 當別名——其他任何倚賴核心名稱的東西都不會壞掉。把節點整個改名（更動 <code>NAME</code>）是保留給網路介面用的（§7）；對於字元／區塊裝置，你用符號連結。而用 <code>+=</code>（而非 <code>=</code>）的意思是，你可以對同一個裝置加上好幾個符號連結，而不會把其他規則加上去的那些蓋掉。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 權限的數學 <small>0660 是什麼意思</small></div>
+      <p><code>MODE</code> 是一組八進位權限三元組——擁有者、群組、其他人——每一位數都是讀（4）、寫（2）、執行（1）之和。所以 <code>0660</code> 是擁有者可讀＋寫（$4+2=6$）、群組可讀＋寫（$6$）、其他人什麼都不行（$0$）：$\,rw\text{-}\,rw\text{-}\,---$。配上 <code>GROUP="dialout"</code>，任何使用者屬於 <code>dialout</code> 群組的行程，都能不靠 root 就開啟那個序列埠。對一個不該以 root 執行的機器人服務來說，這正是你要的。</p>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="testing-rules"><span class="sec-no">6</span>測試：<code>udevadm test</code> 與 <code>trigger</code></h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>別靠重開機才知道結果</small></div>
+      <p>編輯完規則後，先重新載入它們，然後要嘛對單一裝置做乾跑（dry-run），要嘛對整個子系統重新發送事件。兩道不同的指令，兩件不同的工作：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>指令</th><th>它做什麼</th></tr></thead>
+        <tbody>
+          <tr><td><code>udevadm control --reload</code></td><td>從磁碟重新載入規則（每次編輯後都做這件事）</td></tr>
+          <tr><td><code>udevadm test /sys/class/tty/ttyUSB0</code></td><td><em>乾跑</em>：模擬該事件，印出哪些規則命中、它們會做什麼——不做任何真實更動</td></tr>
+          <tr><td><code>udevadm trigger --action=add</code></td><td>為既有裝置重新發出 <code>add</code> uevent，讓規則<em>當下</em>就套用而不必重新插拔</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="codeblock">
+        <div class="code-head">編輯 → 測試 → 套用 的循環 <span class="lang">bash</span></div>
+<pre><code class="language-bash">sudo nano /etc/udev/rules.d/99-usv.rules     # edit
+sudo udevadm control --reload                # reload rules
+
+# dry-run against the real device path under /sys (no changes made):
+sudo udevadm test /sys/class/tty/ttyUSB0 2&gt;&amp;1 | grep -E 'SYMLINK|GROUP|MODE'
+
+# apply for real to currently-attached tty devices:
+sudo udevadm trigger --subsystem-match=tty --action=add
+ls -l /dev/gps /dev/imu                       # verify the symlinks exist
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> <code>test</code> 模擬，<code>trigger</code> 落實</div>
+        <p><code>udevadm test</code> 告訴你<em>會發生什麼事</em>，整天跑都安全。<code>udevadm trigger</code> 則真的把事件重播、把規則套用上去。經典的工作流程是：reload，<code>test</code> 跑到輸出裡出現你那行 <code>SYMLINK 'gps'</code> 為止，然後 <code>trigger</code> 讓它成真——不重開機、不拔插。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="by-id-by-path-net"><span class="sec-no">7</span><code>by-id</code>、<code>by-path</code> 與可預測的網路名稱</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>你說不定根本不需要寫規則</small></div>
+      <p>預設的 udev 規則已經替序列裝置建好了兩個穩定的目錄，所以想快速搞定的話，你大可完全跳過寫規則這件事：</p>
+      <ul>
+        <li><code>/dev/serial/by-id/</code> ——以廠商＋產品＋序號為鍵。跨重開機、跨<em>連接埠</em>都穩定。每個裝置都有唯一序號時用這個。</li>
+        <li><code>/dev/serial/by-path/</code> ——以實體 USB 拓樸（哪個集線器、哪個埠）為鍵。只要你不挪動線材就穩定。沒有可用序號的<em>一模一樣</em>裝置用這個——連接埠就成了它的身分。</li>
+      </ul>
+
+      <div class="codeblock">
+        <div class="code-head">udev 早就替你建好的符號連結 <span class="lang">bash</span></div>
+<pre><code class="language-bash">ls -l /dev/serial/by-id/
+# usb-Prolific_USB-Serial_Controller_0001-if00-port0 -&gt; ../../ttyUSB0
+
+ls -l /dev/serial/by-path/
+# platform-3610000.usb-usb-0:2.1:1.0-port0 -&gt; ../../ttyUSB0
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 唯一序號用 by-id，「相同型號插在已知埠」用 by-path</div>
+        <p>兩台序號相異的 GPS → <code>by-id</code>（或一條以序號為鍵的規則）。兩個<em>一模一樣</em>、而你總是插進固定那兩個埠的感測器 → <code>by-path</code>（或一條 <code>ATTRS{devpath}</code> 規則），因為連接埠是唯一不同的東西。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 可預測的網路介面 <small>同樣的問題，<code>.link</code> 是答案</small></div>
+      <p>網卡（NIC）有一模一樣的競態：核心的舊方案按探測順序把它們命名成 <code>eth0</code>、<code>eth1</code>，所以一個 USB 轉乙太網路的轉接器，可能從內建埠那兒把 <code>eth0</code> 偷走。systemd 的解法是<strong>可預測網路介面名稱（Predictable Network Interface Names）</strong>——由硬體位置衍生出來的名字，像 <code>enp1s0</code>（PCI 匯流排 1、插槽 0）或 <code>enx</code> + MAC。它們很醜，但具決定性。要釘上一個<em>你選定</em>的名字，就寫一個 systemd <code>.link</code> 檔，以 MAC 來比對並重新命名介面：</p>
+
+      <div class="codeblock">
+        <div class="code-head">/etc/systemd/network/10-sensor-net.link <span class="lang">bash</span></div>
+<pre><code class="language-bash">[Match]
+MACAddress=00:04:4b:aa:bb:cc
+
+[Link]
+Name=eth_lidar
+</code></pre>
+      </div>
+
+      <p>一個 <code>.link</code> 檔由 <code>systemd-udevd</code> 在非常早的時候處理（在網路裝置的 <code>add</code> 事件期間），趕在介面被啟用之前，這就是為什麼在那裡改名是安全的——不像一條晚到的 udev <code>NAME=</code> 規則，一旦介面正在使用中，核心可能就拒絕它。重新命名網卡，請固守 <code>.link</code> 這套機制。</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——Jetson AGX Orin USV 的開機調校</div>
+        <p>在這艘 USV 的 AGX Orin 上，我們出貨一份 <code>99-usv.rules</code>，把 u-blox GPS 釘到 <code>/dev/gps</code>（以序號為鍵）、把 VectorNav IMU 釘到 <code>/dev/imu</code>，兩者都 <code>GROUP="dialout", MODE="0660"</code>，好讓 ROS 2 驅動程式以非特權的 <code>usv</code> 使用者身分執行。承載 LiDAR 的那個內建乙太網路埠，透過一個以 MAC 比對的 <code>.link</code> 檔被釘到 <code>eth_lidar</code>，所以一個插進來的 USB 轉乙太網路轉接頭（給現場筆電用的）永遠偷不走它。結果：每一個 launch 檔都開啟 <code>/dev/gps</code>、<code>/dev/imu</code>，並把 LiDAR 的通訊端綁定到 <code>eth_lidar</code>——這些名字熬得過重開機、重新插拔，以及新增的硬體。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="run-mode-group"><span class="sec-no">8</span><code>RUN</code>、<code>MODE</code>、<code>GROUP</code>：擁有權與副作用</h2>
+
+      <div class="layer"><span class="step">④</span> 真實案例 <small>讓裝置能用、而且會回應</small></div>
+      <p>釘好一個名字只是戰鬥的一半；行程還得被<em>允許</em>去開啟它，而且有時候裝置一<em>出現</em>就該發生某件事。這正是其餘那些賦值鍵在做的事：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>鍵</th><th>效果</th></tr></thead>
+        <tbody>
+          <tr><td><code>OWNER="usv"</code></td><td>設定節點的擁有使用者</td></tr>
+          <tr><td><code>GROUP="dialout"</code></td><td>設定擁有群組（成員可取得群組存取權）</td></tr>
+          <tr><td><code>MODE="0660"</code></td><td>權限位元（擁有者＋群組可讀寫，其他人不行）</td></tr>
+          <tr><td><code>RUN+="program"</code></td><td>在裝置設定<em>完成之後</em>跑一支短程式</td></tr>
+          <tr><td><code>TAG+="systemd"</code></td><td>讓一個 systemd 單元可以 <code>BindsTo=</code> 這個裝置</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——<code>RUN</code> 不是用來啟動守護程式的地方</div>
+        <p><code>RUN+=</code> 是<em>同步地在 udev 事件內部</em>執行的，若它不快點返回就會被殺掉。它是給快速設定用的——設定 FTDI 的 <code>latency_timer</code>、把一條 CAN 連結拉起來、丟下一個旗標檔——<strong>絕不</strong>用來啟動長時間執行的服務。要在插入時啟動一個服務，請用 <code>systemd</code> 替裝置打標籤，並用一個 <code>BindsTo=</code>／<code>WantedBy=</code> 的單元。在 <code>RUN</code> 裡阻塞會卡死整個 udev。</p>
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">RUN 用於一次快速、有界的設定任務 <span class="lang">bash</span></div>
+<pre><code class="language-bash"># When the FTDI GPS appears, drop its read latency from 16ms to 1ms.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", \
+  ATTRS{serial}=="A50285BI", SYMLINK+="gps", \
+  RUN+="/bin/sh -c 'echo 1 &gt; /sys%p/device/latency_timer'"
+</code></pre>
+      </div>
+
+      <p>這裡 <code>%p</code> 展開成 <code>/sys</code> 底下的核心裝置路徑，所以這條規則在裝置一被辨識出來的那一刻，就寫入 FTDI 的 <code>latency_timer</code> 屬性（來自第 02 章）——一次性、有界的寫入，正是 <code>RUN</code> 該做的事。</p>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>換你了</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io03-match-vs-assign">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">在一條 udev 規則裡，哪一個運算子是<em>測試</em>一個條件（一個 match 鍵），而非執行一個動作?</div>
+        <ul class="ex-options">
+          <li data-correct="false"><code>=</code> ——它把值賦上去以供比較。</li>
+          <li data-correct="true"><code>==</code> ——match 鍵測試相等；<code>=</code>/<code>+=</code>/<code>:=</code> 是賦值。</li>
+          <li data-correct="false"><code>+=</code> ——它把這個條件附加到一個清單裡。</li>
+          <li data-correct="false"><code>:=</code> ——它把這個條件鎖住讓它不能改。</li>
+        </ul>
+        <div class="ex-explain">match 鍵用 <code>==</code>（或 <code>!=</code>），它們是條件——「這個屬性等於那個值嗎?」。賦值鍵用 <code>=</code>（設定）、<code>+=</code>（附加，如 <code>SYMLINK+=</code>）或 <code>:=</code>（設定並鎖定）。用單一 <code>=</code> 寫成 <code>SUBSYSTEM="tty"</code> 是經典的 bug：它試圖賦值給一個唯讀的 match 鍵，而不是去測試它。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io03-orderings" data-answer="120">
+        <div class="ex-head"><span class="badge">Q2</span> 算一算</div>
+        <div class="ex-q">這艘 USV 在一個集線器上有 5 個無法區分的 USB 序列裝置。核心可以用多少種相異的排列來指派 <code>ttyUSB0..ttyUSB4</code>?（提示：$n!$。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">種排列</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$5! = 5 \times 4 \times 3 \times 2 \times 1 = 120$。這 120 種裡只有一種是你程式碼所假設的佈局，所以一次盲目的開機只有 $1/120 \approx 0.83\%$ 的機率對。以序號為鍵的 udev 符號連結讓這機率變成 100%。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io03-write-rule">
+        <div class="ex-head"><span class="badge">Q3</span> 動手做——寫一條能用的規則</div>
+        <div class="ex-q">一個 u-blox GPS 在 <code>tty</code> 子系統上回報 <code>ATTRS{idVendor}=="1546"</code>、<code>ATTRS{idProduct}=="01a8"</code>、<code>ATTRS{serial}=="DBE1F2C0"</code>。寫一條 udev 規則，建立 <code>/dev/gps</code>，由群組 <code>dialout</code> 擁有、模式為 <code>0660</code>。然後給出不重開機就能套用它的那兩道指令。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">條件用 <code>==</code>；符號連結用 <code>SYMLINK+=</code>。重新載入規則，然後對 <code>tty</code> 子系統重新發送 <code>add</code> 事件。</div></details>
+        <details class="ex-acc"><summary>看一個解答</summary><div class="acc-body">
+          <div class="codeblock"><div class="code-head">/etc/udev/rules.d/99-usv.rules <span class="lang">bash</span></div><pre><code class="language-bash">SUBSYSTEM=="tty", ATTRS{idVendor}=="1546", ATTRS{idProduct}=="01a8", \
+  ATTRS{serial}=="DBE1F2C0", SYMLINK+="gps", GROUP="dialout", MODE="0660"
+</code></pre></div>
+          <div class="codeblock"><div class="code-head">套用它 <span class="lang">bash</span></div><pre><code class="language-bash">sudo udevadm control --reload
+sudo udevadm trigger --subsystem-match=tty --action=add
+ls -l /dev/gps        # verify the symlink resolves to the right ttyUSB*
+</code></pre></div>
+          <p>每一個 <code>==</code> 都是對上層 USB 裝置的一個條件（所以必須是 <code>ATTRS</code>，不是 <code>ATTR</code>）；<code>SYMLINK+=</code> 在不干擾核心名稱的前提下加上別名；<code>GROUP</code>＋<code>MODE</code> 讓你的非 root 服務能開啟那個埠。<code>--reload</code> 讀進這個檔案，<code>trigger</code> 重播事件，於是連結立刻出現。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章回顧</div>
+        <p>像 <code>ttyUSB0</code> 這類核心索引就是到場號碼牌——有 $n$ 個裝置時就有 $n!$ 種可能排列，而只有一種是你的。核心發出一則 uevent；<code>systemd-udevd</code> 把它跟規則比對並套用政策。一條規則是 match 鍵（<code>==</code>／<code>!=</code>）後接賦值（<code>=</code>／<code>+=</code>／<code>:=</code>）；用 <code>udevadm info -a -n /dev/ttyUSB0</code> 找出那些鍵，以 <code>ATTRS{idVendor/idProduct/serial}</code> 為鍵，加上 <code>SYMLINK+="gps"</code> 並帶 <code>GROUP</code>／<code>MODE</code>，然後 <code>udevadm test</code>（乾跑）與 <code>trigger</code>（套用）——不重開機。免費的部分，就用 <code>/dev/serial/by-id</code> 與 <code>by-path</code>；對網卡，用一個 systemd <code>.link</code> 檔把名字釘住。下一章：驅動程式、模組與韌體——在那個名字背後，到底是什麼東西綁定到裝置上。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+</body>
+</html>

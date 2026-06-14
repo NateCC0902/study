@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>序列埠與 TTY 層 — 機器人的 Linux I/O</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="06-serial-tty">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · 第 06 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · 第 06 章 · 序列埠</div>
+        <h1>序列埠與 TTY 層：怎麼把 GPS 的位元組無延遲地讀出來</h1>
+        <p>序列埠（serial port）看起來像箱子裡最單純的裝置——兩根線、一個鮑率（baud rate）。但在你的 <code>read()</code> 與矽晶片之間，坐著一整層 TTY，一個為電傳打字機終端機（teletype terminal）打造、已有 40 年歷史的子系統；它預設就會把你的二進位感測器串流搞爛，再添上數十毫秒的延遲。本章要教你怎麼讓一個 UART 表現得像機器人真正需要的那種笨笨的位元組管線。</p>
+        <div class="meta"><span>⏱ 約 40 分鐘</span><span>🧠 UART + termios</span><span>⚡ 即時訊框模擬</span><span>∑ 鮑率數學</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="the-frame"><span class="sec-no">1</span>UART 訊框：一個位元組如何沿著線送出去</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先把畫面建起來</small></div>
+      <p>UART（通用非同步收發器，Universal Asynchronous Receiver/Transmitter）送位元組時<em>沒有時脈線</em>。這正是「非同步」的意思——也是整套把戲的關鍵。兩端事先約好一個速度（鮑率），接收端再靠每一個位元組的訊框形狀，逐位元組重新同步。沒有共享時脈會漂移，所以訊框本身<em>就是</em>同步機制。</p>
+      <p>閒置時線路維持<strong>高電位</strong>（邏輯 1）。要送一個位元組，發送端把線路拉低剛好一個位元週期——那道下降邊緣就是<strong>起始位元（start bit）</strong>，是給接收端的「醒醒，有位元組要來了」訊號。接著 8 個資料位元<strong>由 LSB 先送</strong>，一個可選的<strong>同位位元（parity bit）</strong>，最後線路被拉回高電位維持一到兩個<strong>停止位元（stop bit）</strong>，回到閒置。鎖定起始邊緣之後，接收端會在每個後續位元的視窗中央取樣。</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 為什麼閒置高、起始低</div>
+        <p>一條斷掉或沒插的線會浮接——而上拉（pull-up）的線會讀成閒置（1），而不是源源不絕的垃圾起始位元。起始位元是一個<em>跳變</em>（1→0），即使兩端時脈差個幾個百分點也偵測得到；這正是為什麼 UART 能容忍約 ±3% 的鮑率不匹配，而一條死掉的線看起來就只是沉默。</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    I["閒置<br/>HIGH"] --> S["起始<br/>LOW"]
+    S --> D["8 資料位元<br/>LSB 先送"]
+    D --> P["同位<br/>可選"]
+    P --> T["1–2 停止<br/>HIGH"]
+    T --> I2["閒置<br/>HIGH"]
+</div>
+
+      <p>同位是最廉價的錯誤檢查：挑一個位元，讓 1 位元的總數（資料＋同位）為偶數（<em>偶同位</em>）或奇數（<em>奇同位</em>）。它能抓出任何單一位元翻轉，但對兩個翻轉視而不見——對抗突發性雜訊毫無用處，這正是為什麼幾乎所有機器人鏈路都跑<strong>無同位</strong>，再把完整性檢查推到真正的校驗碼上（NMEA 的 <code>*hh</code>、二進位協定裡的 CRC）。簡寫 <strong>8N1</strong> 意思是 8 個資料位元、No（無）同位、1 個停止位元——近乎通用的預設值。</p>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>這就跑在 USV 上</small></div>
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 實際案例——那個「掉字元」的 GPS</div>
+        <p>在 Jetson AGX Orin 的 USV 上，一顆 u-blox GPS 以 8N1、115200 鮑率串流 NMEA。一份「定位資料亂碼」的現場回報，原因竟是接收端被設成了<strong>偶同位</strong>：GPS 的同位位元被當成第 9 個資料位元解讀，使每個位元組都移了位。線路沒問題；錯的是其中一端的<em>訊框格式</em>。訊框不匹配是序列埠開機調試的頭號 bug，排在鮑率不匹配之前。</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="baud-math"><span class="sec-no">2</span>鮑率、位元時間，與你拿不到的那 80%</h2>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>推導它</small></div>
+      <p><strong>鮑率</strong>是每秒符號數；在普通 UART 上一個符號就是一個位元，所以線上的鮑率＝位元/秒。送一個位元的時間，就是它的倒數：</p>
+      <div class="math-box">$$ t_\text{bit} = \frac{1}{\text{baud}}, \qquad t_\text{bit}(115200) = \frac{1}{115200}\,\text{s} \approx 8.68\ \mu\text{s} $$</div>
+      <p>但你沒辦法每個位元組送滿 8 個有用位元——每個訊框都帶著額外負擔（overhead）。設每個訊框有 $N_\text{frame}$ 個位元（起始＋資料＋同位＋停止），可達到的位元組速率與線路效率為：</p>
+      <div class="math-box">$$ N_\text{frame} = 1 + 8 + p + s,\qquad \dot B = \frac{\text{baud}}{N_\text{frame}},\qquad \eta = \frac{8}{N_\text{frame}} $$</div>
+      <p>對 8N1，$N_\text{frame} = 1 + 8 + 0 + 1 = 10$，所以 $\eta = 8/10 = 80\%$、$\dot B = 115200/10 = 11{,}520$ 位元組/秒。這個漂亮的 10 倍係數，正是大家挑 8N1 的原因：鮑率除以十，心算就得出位元組/秒。改成 8E2（偶同位、2 停止位元），$N_\text{frame}=12$，效率掉到 $8/12 \approx 67\%$——你才剛為了一個孱弱的錯誤位元，白送掉六分之一的頻寬。</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>格式</th><th>訊框位元數</th><th>效率</th><th>位元組/秒 @ 115200</th><th>訊框時間</th></tr></thead>
+        <tbody>
+          <tr><td>8N1</td><td>10</td><td>80%</td><td>11,520</td><td>86.8 µs</td></tr>
+          <tr><td>8N2</td><td>11</td><td>73%</td><td>10,473</td><td>95.5 µs</td></tr>
+          <tr><td>8E1 / 8O1</td><td>11</td><td>73%</td><td>10,473</td><td>95.5 µs</td></tr>
+          <tr><td>8E2 / 8O2</td><td>12</td><td>67%</td><td>9,600</td><td>104 µs</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 估算感測器的頻寬預算</div>
+        <p>反過來算：若某感測器以 200 Hz 吐出 64 位元組的二進位紀錄，那就是 $64 \times 200 = 12{,}800$ 位元組/秒的<em>有效酬載（payload）</em>。在 8N1 下，線上需要 $12{,}800 \times 10 = 128{,}000$ 位元/秒——115200 鮑率<strong>塞不下</strong>（它頂多到 11,520 B/s）。你得跳到 230400 或 460800 鮑率。永遠要把訊框額外負擔算進去，絕不能只看原始酬載。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="uart-sim"><span class="sec-no">3</span>看見訊框——也看數字跟著動</h2>
+      <p>拖動位元組數值，看資料位元翻轉（記住：<strong>LSB 先送</strong>，所以位元 0 是緊接在起始之後的那一格）。切換同位與停止位元，讀即時讀數：位元時間、訊框總位元數、訊框時間、最大位元組速率、效率。這就是上面的數學，化成像素。</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>📡</span> 單一 UART 訊框——鮑率、位元組、同位、停止</div>
+        <canvas id="sim-uart"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 該注意的地方</div>
+        <p>在 9600 鮑率下，一個位元約 104 µs，整個 8N1 訊框約 1.04 ms——慢到幾個位元組的延遲就是毫秒等級。飆到 1,000,000 鮑率，同一個訊框只剩 10 µs；現在瓶頸不再是線路，而是<em>核心多久才把位元組交給你</em>。加一個同位位元或多一個停止位元，看著效率跌破 80%——每一個非資料位元都是你付了錢卻用不到的頻寬。</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="tty-stack"><span class="sec-no">4</span>TTY 堆疊：為什麼你的位元組會被改寫</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>你沒要求的那一層</small></div>
+      <p>當你 <code>open("/dev/ttyUSB0")</code> 時，你並不是在跟 UART 對話。你是在跟 <strong>TTY 層</strong>對話，它由三塊疊起來的東西組成：<em>tty 核心</em>（<code>/dev/tty*</code> 字元裝置與它的緩衝區）、<em>行規（line discipline）</em>（位元組處理策略），以及<em>驅動程式（driver）</em>（把位元組推給硬體的晶片專屬程式碼）。會咬機器人一口的，正是行規。</p>
+
+      <div class="mermaid">
+flowchart TD
+    A["你的應用<br/>read/write"] --> C["tty 核心<br/>緩衝區 + termios"]
+    C --> LD["行規<br/>N_TTY：標準 / 原始"]
+    LD --> DRV["uart 驅動<br/>ttyUSB* 或 ttyTHS*"]
+    DRV --> HW["UART / USB 序列晶片"]
+</div>
+
+      <p>預設的行規 <code>N_TTY</code> 處於<strong>標準模式（canonical mode）</strong>——它假裝你的序列埠是個有人在打字的終端機。它逐行緩衝輸入直到看見換行符，讓使用者退格，把字元回顯（echo）回去，展開定位字元（tab），並把某些位元組當成控制用：<code>0x03</code>（Ctrl-C）會發出訊號，<code>0x11</code>/<code>0x13</code>（XON/XOFF）會暫停串流，<code>0x04</code>（Ctrl-D）代表 EOF。對登入 shell 來說這恰到好處。但對二進位的 GPS 串流就是場災難：酬載裡的一個 <code>0x03</code> 會殺掉你的行程，一個 <code>0x13</code> 會悄悄停掉資料流，而你在某個 <code>0x0A</code> 剛好飄過來之前，連一個位元組都看不到。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——標準模式會吃掉二進位資料</div>
+        <p>典型症狀：明明裝置顯然在發送（你在 <code>dmesg</code> 或示波器上看得到流量），你的讀取端卻永遠卡死。是標準模式把每個位元組都扣著當人質，直到出現換行符。修法不是加大緩衝區——而是切到<strong>原始模式（raw mode）</strong>，讓行規變成透明的直通管線，位元組就是位元組。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="termios"><span class="sec-no">5</span>termios：用 C 設定序列埠</h2>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>每一行都讀</small></div>
+      <p>每一項 TTY 設定都住在一個 <code>struct termios</code> 裡：四個旗標字（<code>c_iflag</code> 輸入、<code>c_oflag</code> 輸出、<code>c_cflag</code> 控制、<code>c_lflag</code> 本地/行）外加一個控制字元陣列 <code>c_cc[]</code> 與鮑率。你先 <code>tcgetattr()</code> 讀出目前設定，編輯這個結構，再 <code>tcsetattr()</code> 寫回去。整套「把它變成原始位元組管線」的動作，被一個輔助函式 <code>cfmakeraw()</code> 一手包辦：它一口氣清掉標準/回顯/訊號旗標與輸入/輸出轉換。</p>
+
+      <div class="codeblock">
+        <div class="code-head">serial_open.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;termios.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;unistd.h&gt;
+
+int serial_open(const char *path, speed_t baud) {
+    /* O_NOCTTY: don't let this tty become our controlling terminal
+       (a stray Ctrl-C on the line must not signal us). */
+    int fd = open(path, O_RDWR | O_NOCTTY);
+    if (fd &lt; 0) return -1;
+
+    struct termios tio;
+    if (tcgetattr(fd, &amp;tio) &lt; 0) { close(fd); return -1; }
+
+    cfmakeraw(&amp;tio);              /* raw mode: no canonical, no echo, no signals */
+    cfsetispeed(&amp;tio, baud);     /* input baud  */
+    cfsetospeed(&amp;tio, baud);     /* output baud */
+
+    tio.c_cflag |= (CLOCAL | CREAD);   /* ignore modem ctrl lines; enable receiver */
+    tio.c_cflag &amp;= ~CSTOPB;            /* 1 stop bit (clear = 1, set = 2)          */
+    tio.c_cflag &amp;= ~PARENB;            /* no parity  -&gt;  this is the N in 8N1       */
+    tio.c_cflag &amp;= ~CRTSCTS;           /* no hardware flow control (set to enable)  */
+
+    /* Blocking read policy: return as soon as >=1 byte is available,
+       but wait at most 100 ms (VTIME is in deciseconds). */
+    tio.c_cc[VMIN]  = 0;
+    tio.c_cc[VTIME] = 1;
+
+    tcflush(fd, TCIFLUSH);                       /* drop stale bytes in the kernel buffer */
+    if (tcsetattr(fd, TCSANOW, &amp;tio) &lt; 0) {      /* apply immediately */
+        close(fd); return -1;
+    }
+    return fd;
+}
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 用 <code>speed_t</code> 常數來設速度</div>
+        <p>鮑率不是隨便填的整數：<code>cfsetispeed()</code> 吃的是 <code>speed_t</code> 代號，例如 <code>B115200</code> 或 <code>B460800</code>，由驅動程式對映成除頻值。標準速率有對應常數；至於不在清單上的速率（例如 250000），你得走 <code>termios2</code> / <code>BOTHER</code> 的 ioctl 路徑。<code>cfmakeraw()</code> 是 POSIX 的簡寫——它等同於清掉 <code>c_lflag</code> 裡的 <code>ICANON|ECHO|ISIG</code>、<code>c_iflag</code> 裡的 <code>IXON|ICRNL</code>，以及 <code>c_oflag</code> 裡的 <code>OPOST</code>。</p>
+      </div>
+
+      <p>決定你<em>延遲</em>的兩個欄位是 <code>VMIN</code> 與 <code>VTIME</code>。它們組成一個小型狀態機，決定一個阻塞式 <code>read()</code> 何時返回：</p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>VMIN</th><th>VTIME</th><th>read() 在何時返回…</th><th>適用於</th></tr></thead>
+        <tbody>
+          <tr><td>0</td><td>0</td><td>立刻，有什麼就回什麼（輪詢，polling）</td><td>類非阻塞式讀取</td></tr>
+          <tr><td>&gt;0</td><td>0</td><td>至少 VMIN 個位元組到達後（永遠阻塞）</td><td>固定大小的訊框</td></tr>
+          <tr><td>0</td><td>&gt;0</td><td>≥1 個位元組，或 VTIME×0.1 秒的整體逾時</td><td>低延遲串流</td></tr>
+          <tr><td>&gt;0</td><td>&gt;0</td><td>VMIN 個位元組，或第一個位元組後的 VTIME 閒置間隔</td><td>突發式訊框</td></tr>
+        </tbody>
+      </table></div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="flow-control"><span class="sec-no">6</span>流量控制：叫發送端等一等</h2>
+      <p>如果接收端跟不上，位元組就會溢出 FIFO 而遺失——而且 UART 溢位是無聲的（你拿到的是一個被加一的錯誤計數器，而不是 <code>read()</code> 上的錯誤）。流量控制（flow control）就是線路上的反壓（backpressure）。兩種口味：</p>
+      <ul>
+        <li><strong>硬體（RTS/CTS）</strong>：兩根額外的線。接收端取消宣告 <strong>RTS</strong>（「我還沒準備好」）；發送端盯著 <strong>CTS</strong> 並暫停。它是頻外（out-of-band）的——它從不碰你的資料——而且能在一個位元組時間內反應。在 <code>c_cflag</code> 裡用 <code>CRTSCTS</code> 啟用。對高速率而言這是正確選擇，<em>前提是</em>那兩根線有接好。</li>
+        <li><strong>軟體（XON/XOFF）</strong>：頻內（in-band）的控制位元組 <code>0x11</code>（XON，恢復）與 <code>0x13</code>（XOFF，暫停），用 <code>IXON</code>/<code>IXOFF</code> 啟用。不用額外的線——但那兩個位元組值現在被<em>保留</em>了，永遠不能出現在你的酬載裡。對二進位資料來說這是致命的，所以機器人鏈路會把 XON/XOFF <strong>關掉</strong>，改用 RTS/CTS，或乾脆跑一個接收端永遠排得完的速率。</li>
+      </ul>
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——對二進位串流開 XON/XOFF</div>
+        <p>把 <code>IXON</code> 留著開（它常常預設就是開的），那麼一旦你的二進位酬載含有一個 <code>0x13</code> 位元組，核心就會悄悄停止給你資料，直到出現一個 <code>0x11</code>。鏈路「掛住」，沒有任何錯誤。<code>cfmakeraw()</code> 會幫你清掉 <code>IXON</code>——這又是一個永遠從原始模式起步的理由。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="latency"><span class="sec-no">7</span>延遲：你沒編進預算的那 16 ms</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>200 Hz 無延遲</small></div>
+      <p>這就是毀掉控制迴圈的那個陷阱。線路很快——115200 下的一個 8N1 位元組是 86.8 µs——但從「位元組在晶片 FIFO 裡」到「位元組在你緩衝區裡」的這段路，有兩個延遲來源大到讓它相形見絀：</p>
+      <ol>
+        <li><strong>FTDI / USB 序列的延遲計時器（latency timer）。</strong>USB 序列轉接器（FTDI、CP210x）不會每個位元組就中斷主機一次——它們把位元組批次打包成 USB 封包，再依計時器一次沖出。FTDI 的預設是 <strong>16 ms</strong>。所以一句 1 位元組的 GPS 語句，可能在轉接器裡待上 16 ms 才跨過 USB。對一個 200 Hz 迴圈（週期 5 ms）來說，那是<em>三個迴圈迭代</em>的純死時間。</li>
+        <li><strong>核心端的 VMIN/VTIME。</strong>要求 VMIN=64，核心就不會叫醒你，直到累積了 64 個位元組——對吞吐量很棒，但若你的紀錄是 200 Hz 下的 20 位元組就糟透了。</li>
+      </ol>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 實際案例——修掉 AGX Orin 上的 IMU 延遲</div>
+        <p>一顆透過 USB 序列橋接進 Orin 的 IMU，在 EKF 裡顯出頑固的約 16 ms 延遲，不管程式怎麼調都消不掉。修法是一次 sysfs 寫入——把 FTDI 延遲計時器從 16 ms 降到 1 ms：</p>
+        <div class="codeblock">
+          <div class="code-head">terminal <span class="lang">bash</span></div>
+<pre><code class="language-bash"># find the device, then read/write its latency_timer (milliseconds)
+cat /sys/bus/usb-serial/devices/ttyUSB0/latency_timer    # -&gt; 16
+echo 1 | sudo tee /sys/bus/usb-serial/devices/ttyUSB0/latency_timer
+
+# make it persistent with a udev rule (see Ch 03):
+# SUBSYSTEM=="usb-serial", ATTR{latency_timer}="1"
+</code></pre>
+        </div>
+        <p>搭配 <code>VMIN=0, VTIME=1</code>（第一個位元組就醒、100 ms 安全逾時），最壞情況的延遲從約 16 ms 降到約 1 ms——不到 5 ms 迴圈週期的四分之一。晶片內建的 UART（下一節）根本沒有這個計時器。</p>
+      </div>
+
+      <p>USB 序列埠的通用延遲模型，把轉接器的沖出視窗加到線路時間上：</p>
+      <div class="math-box">$$ t_\text{latency} \approx t_\text{flush} + n\cdot t_\text{frame}, \qquad t_\text{flush} = \text{latency\_timer} $$</div>
+      <p>在 16 ms 對上 1 ms 時，<code>latency_timer</code> 這一項<em>就是</em>整個預算；訊框時間在它旁邊只是雜訊。把計時器調低，你是拿一點點 USB 額外負擔（更多、更小的封包）去換取反應靈敏度——對控制迴圈而言，這正是該做的取捨。</p>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="ttyusb-vs-ttyths"><span class="sec-no">8</span>ttyUSB* vs ttyTHS*：兩種大不相同的序列埠</h2>
+      <p>在 Jetson 上你會看到兩個家族的序列裝置，它們的行為差異大到值得在意：</p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th></th><th><code>/dev/ttyUSB*</code></th><th><code>/dev/ttyTHS*</code></th></tr></thead>
+        <tbody>
+          <tr><td>它是什麼</td><td>USB 序列橋接（FTDI、CP210x、CH340）</td><td>Orin 晶片內建 UART（Tegra 高速）</td></tr>
+          <tr><td>到主機的路徑</td><td>UART → 橋接晶片 → USB → 主機</td><td>UART → SoC 匯流排（bus）直連</td></tr>
+          <tr><td>延遲下限</td><td>USB 輪詢 + <code>latency_timer</code>（1–16 ms）</td><td>逐位元組/FIFO 中斷（interrupt）；數十 µs</td></tr>
+          <tr><td>編號方式</td><td>依列舉（enumeration）順序（用 udev！）</td><td>依裝置樹（device tree）腳位固定</td></tr>
+          <tr><td>接線</td><td>USB 線，可熱插拔</td><td>排針（3.3 V TTL——不是 RS-232！）</td></tr>
+        </tbody>
+      </table></div>
+      <p>晶片內建的 <code>ttyTHS</code> 埠沒有 USB 這一跳、也沒有批次計時器，所以對時序緊湊的感測器而言，它們是低延遲的選擇——但它們是 3.3 V 邏輯電位的腳位，凡是要接到板外的東西，電位轉換器（level shifter）或收發器（transceiver）就是必備的。USB 轉接器方便又可熱插拔，卻繼承了 USB 的延遲下限，而它們的 <code>ttyUSBn</code> 編號取決於插入順序——這正是第 03 章的 udev <code>by-id</code> 符號連結存在的原因。還有一條路上的規矩：核心的開機主控台（console）可能停駐在某個 UART 上；若某個埠在 <code>/proc/cmdline</code> 裡是 <code>console=ttyTHSx</code>，核心就在往那裡寫日誌垃圾，它就不是你能用的。</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 從 shell 檢視任何序列埠</div>
+        <div class="codeblock">
+          <div class="code-head">terminal <span class="lang">bash</span></div>
+<pre><code class="language-bash">stty -F /dev/ttyUSB0 -a          # dump every termios flag (look for 'raw'/'-icanon')
+stty -F /dev/ttyUSB0 115200 raw -echo   # one-shot raw config from the shell
+udevadm info -q property /dev/ttyUSB0 | grep ID_   # vendor/serial for a udev rule
+dmesg | grep -i tty             # which UARTs the kernel found at boot
+</code></pre>
+        </div>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>換你了</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io06-efficiency">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">為什麼說 8N1 只有 80% 效率，就算用一條完美、零雜訊的線也一樣？</div>
+        <ul class="ex-options">
+          <li data-correct="false">行規每五個位元組就丟掉一個。</li>
+          <li data-correct="true">每個 8 位元的位元組搭在一個 10 位元的訊框裡（1 起始 + 8 資料 + 1 停止），所以線上只有 8/10 的位元是酬載。</li>
+          <li data-correct="false">USB 序列轉接器因為延遲計時器而丟掉了 20% 的位元組。</li>
+          <li data-correct="false">同位消耗了 20% 的頻寬。</li>
+        </ul>
+        <div class="ex-explain">效率是 $\eta = 8/N_\text{frame}$。對 8N1，$N_\text{frame} = 1+8+0+1 = 10$，所以 $\eta = 8/10 = 80\%$——起始與停止位元是訊框額外負擔，不是資料，而且（注意）8N1 <em>根本沒有</em>同位。加上偶同位（8E1）會變成 11 個訊框位元，$\approx 73\%$。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io06-byte-rate" data-answer="11520" data-tol="5">
+        <div class="ex-head"><span class="badge">Q2</span> 算一算</div>
+        <div class="ex-q">某個埠跑 <strong>8N1、115200 鮑率</strong>。最大可持續吞吐量是多少<strong>位元組每秒</strong>？（提示：$\dot B = \text{baud}/N_\text{frame}$，且 8N1 的 $N_\text{frame}=10$。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">B/s</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$\dot B = 115200 / 10 = 11{,}520$ 位元組/秒。每個訊框是 $10 \times t_\text{bit} = 10 \times 8.68\,\mu\text{s} = 86.8\,\mu\text{s}$，而 $1/86.8\,\mu\text{s} \approx 11{,}520$ 訊框/秒——每個訊框一個位元組。8N1 好用的心算捷徑就是「鮑率 ÷ 10」。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io06-raw-termios">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰——用原始模式開一個埠</div>
+        <div class="ex-q">寫出能以 115200 8N1、<strong>原始</strong>模式開啟 <code>/dev/ttyUSB0</code> 的 C，且讀取要在第一個位元組就返回、但約 100 ms 後逾時。說出設定原始模式與鮑率的那三個呼叫，以及設定讀取時序的那兩個欄位。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body"><code>cfmakeraw()</code> 處理原始旗標的工作；<code>cfsetispeed()</code>/<code>cfsetospeed()</code> 設鮑率；<code>VMIN=0, VTIME=1</code> 意思是「≥1 個位元組就返回，或過 1 個十分之一秒後返回」。開檔時帶 <code>O_NOCTTY</code>，這樣線上一個亂飄的 Ctrl-C 就不能對你發訊號。</div></details>
+        <details class="ex-acc"><summary>看一個解答</summary><div class="acc-body">
+          <div class="codeblock"><div class="code-head">raw_open.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;termios.h&gt;
+#include &lt;fcntl.h&gt;
+#include &lt;unistd.h&gt;
+
+int raw_open(const char *path) {
+    int fd = open(path, O_RDWR | O_NOCTTY);
+    if (fd &lt; 0) return -1;
+
+    struct termios tio;
+    tcgetattr(fd, &amp;tio);
+    cfmakeraw(&amp;tio);                 /* raw: no canon/echo/signals/translation */
+    cfsetispeed(&amp;tio, B115200);     /* baud in */
+    cfsetospeed(&amp;tio, B115200);     /* baud out */
+    tio.c_cflag |= (CLOCAL | CREAD);
+    tio.c_cflag &amp;= ~CSTOPB;         /* 1 stop  */
+    tio.c_cflag &amp;= ~PARENB;         /* no parity -&gt; the N in 8N1 */
+    tio.c_cc[VMIN]  = 0;            /* return on >=1 byte... */
+    tio.c_cc[VTIME] = 1;           /* ...or after 100 ms */
+
+    tcflush(fd, TCIFLUSH);
+    tcsetattr(fd, TCSANOW, &amp;tio);
+    return fd;
+}
+</code></pre></div>
+          <p>那三個「塑形序列埠」的呼叫是 <code>cfmakeraw</code>、<code>cfsetispeed</code>、<code>cfsetospeed</code>；那兩個讀取時序欄位是 <code>c_cc[VMIN]</code> 與 <code>c_cc[VTIME]</code>。清掉 <code>PARENB</code> + <code>CSTOPB</code> 給你 8N1 的 N1（8 個資料位元是 <code>cfmakeraw</code> 透過 <code>CS8</code> 的預設值）。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章回顧</div>
+        <p>一個 UART 訊框是閒置高、一個起始位元、8 個 LSB 先送的資料位元、可選的同位、1–2 個停止位元；8N1 是每個位元組 10 個線上位元，所以效率是 80%、位元組速率是鮑率 ÷ 10。Linux 把序列埠包進 TTY 堆疊（核心 → 行規 → 驅動）；預設的標準模式會編輯並緩衝你的位元組，所以永遠透過 <code>cfmakeraw()</code> + <code>cfset{i,o}speed()</code> 切到<strong>原始</strong>模式，並用 <code>VMIN/VTIME</code> 在延遲與批次之間取捨。對二進位資料把 XON/XOFF 關掉；偏好 RTS/CTS。USB 序列上真正的延遲殺手是 <code>latency_timer</code>（預設 16 ms——把它降到 1 ms）；晶片內建的 <code>ttyTHS</code> 埠完全跳過 USB，延遲最低。下一章：資料究竟如何移動——中斷、DMA 與 MMIO。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+<script src="../../assets/io-sim.js"></script>
+<script>EM.ioDemo.uartFrame("sim-uart");</script>
+</body>
+</html>

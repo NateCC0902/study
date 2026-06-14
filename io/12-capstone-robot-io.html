@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Capstone: Architecting a Robot's I/O — Linux I/O for Robotics</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="12-capstone-robot-io">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · Ch 12</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · Chapter 12 · Capstone</div>
+        <h1>Architecting a Robot's I/O: the whole USV, one system</h1>
+        <p>Eleven chapters of syscalls, sysfs, udev, drivers, buses, serial, DMA, epoll, networking, CAN, and real-time. Now we assemble them. We take the Jetson AGX Orin USV from a bare board to a vessel whose every sensor and actuator is mapped to a bus, a driver, and a file descriptor — booting deterministically, read by one event loop, and surviving the failures the sea throws at it.</p>
+        <div class="meta"><span>⏱ ~45 min</span><span>🧠 systems synthesis</span><span>⚡ bring-up + epoll</span><span>∑ bandwidth budget</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="whole-system-view"><span class="sec-no">1</span>The whole-system view: every I/O on one map</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>see the whole vessel at once</small></div>
+      <p>A robot is not a CPU with sensors bolted on; it is a <strong>concurrency problem with a hull</strong>. Heading sensors, position sensors, the LiDAR, the thrusters, and the shore link all move bytes at the same time, on different buses, with wildly different rates and failure tolerances. Each previous chapter taught one slice. The capstone skill is holding the entire data-flow graph in your head: from the physical pin, up through the bus controller, into a kernel driver, out to a file descriptor your code calls <code>read()</code> on.</p>
+      <p>Here is the USV's complete I/O map. Follow any leaf left-to-right and you walk the exact path of one byte — <em>physical port → bus → kernel driver → the fd userspace touches</em>:</p>
+
+      <div class="mermaid">
+flowchart LR
+    subgraph Wireless
+      W["Shore radio<br/>2.4 GHz WiFi"] --> SDIO["SDIO bus<br/>(declared in DT)"]
+      SDIO --> MOAL["mlan / moal<br/>driver + firmware"] --> WLAN["wlan0<br/>socket fd"]
+    end
+    subgraph Wired-LAN
+      LID["LiDAR<br/>1000BASE-T"] --> ETH["Ethernet MAC<br/>(MGBE)"]
+      ETH --> EQOS["nvethernet<br/>driver"] --> EFD["eth0<br/>UDP socket fd"]
+    end
+    subgraph USB
+      GPS["GPS"] --> HUB["USB host<br/>auto-enumerate"]
+      IMU["IMU"] --> HUB
+      HUB --> CDC["cdc-acm /<br/>ftdi_sio"] --> TTY["/dev/gps<br/>/dev/imu (udev)"]
+    end
+    subgraph Field
+      THR["Thrusters +<br/>N2K instruments"] --> CANC["CAN controller<br/>(mttcan)"]
+      CANC --> CANDRV["SocketCAN<br/>can0"] --> CANFD["AF_CAN<br/>socket fd"]
+    end
+</div>
+
+      <div class="layer"><span class="step">②</span> Math <small>why one map, not four</small></div>
+      <p>The reason you draw <em>one</em> graph and not four separate diagrams is that the kernel collapses all of them into a single namespace: integer file descriptors. WiFi sockets, the LiDAR UDP socket, <code>/dev/gps</code>, and the CAN socket are all just non-negative ints in one per-process table. That uniformity is the whole point of "everything is a file" from Chapter 01 — it's what makes the unified epoll loop in §4 possible. If there are $N$ I/O sources and each gets one fd, the entire vessel's input is a set of $N$ integers you can watch with a <em>single</em> syscall.</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — the AGX Orin's split personality</div>
+        <p>Notice the buses split into two camps. PCIe-class buses (the MGBE Ethernet, USB host) <strong>auto-enumerate</strong>: plug a device in and the kernel walks descriptors and binds a driver (Ch 05). The on-module WiFi sits on <strong>SDIO</strong>, which has no enumeration protocol — the kernel only knows it exists because the <em>device tree</em> declares it (Ch 05). CAN (<code>mttcan</code>) is the same: declared, not discovered. This single fact dictates half your bring-up work in §3.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="interface-roles"><span class="sec-no">2</span>Interface-role assignment: who carries what</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>match the medium to the message</small></div>
+      <p>Every interface has a personality you learned the hard way in earlier chapters, and architecture is mostly about <em>not fighting it</em>. WiFi is a shared, half-duplex, jittery medium (Ch 09) — wonderful for "where are you, are you alive, here's a new waypoint," catastrophic for a 76 Mbit/s point cloud. Ethernet is full-duplex and switched — born to carry heavy, latency-sensitive sensor streams. Serial over USB is low-rate and human-paced but needs stable names (Ch 03/06). CAN is slow but deterministic with priority arbitration (Ch 10) — exactly what actuators want.</p>
+      <p>So the assignment writes itself once you respect each medium:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Interface</th><th>Role</th><th>Why this medium</th><th>What must NOT ride it</th></tr></thead>
+        <tbody>
+          <tr><td>WiFi (<code>wlan0</code>)</td><td>Control &amp; telemetry</td><td>Low data rate, tolerates jitter; only link to shore</td><td>LiDAR, video, anything &gt; a few Mbit/s</td></tr>
+          <tr><td>Ethernet (<code>eth0</code>)</td><td>Heavy sensors (LiDAR, camera)</td><td>Full-duplex, switched, ~118 MB/s usable</td><td>The default route (Ch 09 route theft!)</td></tr>
+          <tr><td>USB/serial (<code>/dev/gps</code>, <code>/dev/imu</code>)</td><td>Low-rate point sensors</td><td>Simple, ubiquitous; udev gives stable names</td><td>Anything time-critical without flow control</td></tr>
+          <tr><td>CAN (<code>can0</code>)</td><td>Actuators &amp; field instruments</td><td>Priority arbitration, multi-drop, noise-immune</td><td>Bulk data — 500 kbit/s is the ceiling</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the default route lives on exactly one NIC</div>
+        <p>The most common two-NIC bug (Ch 09): the LiDAR's Ethernet link comes up with DHCP, grabs a default route, and now your SSH-over-WiFi packets try to exit through the LiDAR's dead-end network. The control link <em>must</em> own the default route; the sensor NIC gets a host-scoped address and <strong>no gateway</strong>. We enforce that in netplan in §3.</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="bring-up-chain"><span class="sec-no">3</span>The bring-up chain as persistent config</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>nothing typed by hand survives a reboot</small></div>
+      <p>Everything you proved interactively across the course — declaring the bus, loading the firmware, naming the device, addressing the NIC, ordering the daemons — has a <em>persistent</em> home on disk. A robot you have to babysit through boot is a robot that strands you at sea. The bring-up chain is a layered stack; each layer can only succeed if the one below it already did.</p>
+
+      <div class="mermaid">
+flowchart TB
+    DT["Device tree + overlay<br/>declares SDIO / CAN / pinmux"] --> FW["Firmware in /lib/firmware<br/>request_firmware() at probe"]
+    FW --> DRV["Driver binds<br/>creates netdev / chardev"]
+    DRV --> UDEV["udev rules<br/>stable /dev names + net names"]
+    UDEV --> NET["netplan<br/>addresses + default route"]
+    NET --> SYS["systemd ordering<br/>can0.service after network-online"]
+    SYS --> APP["sensor-manager.service<br/>opens every fd"]
+</div>
+
+      <div class="layer"><span class="step">③</span> Code <small>the four config files that boot the vessel</small></div>
+      <p>Layer 1–3 you established earlier; here is what they crystallize into on disk. First, the udev rule pinning the serial devices to stable symlinks regardless of plug order (Ch 03):</p>
+
+      <div class="codeblock">
+        <div class="code-head">/etc/udev/rules.d/90-usv.rules <span class="lang">bash</span></div>
+<pre><code class="language-bash"># Match the GPS by its FTDI serial number, never by ttyUSB enumeration order
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{serial}=="A50285BI", \
+    SYMLINK+="gps", MODE="0660", GROUP="dialout"
+
+# The IMU is a CDC-ACM device; match by USB serial string
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1546", ATTRS{serial}=="3779A1C2", \
+    SYMLINK+="imu", MODE="0660", GROUP="dialout"
+</code></pre>
+      </div>
+
+      <p>Next, netplan — the control link owns the default route; the LiDAR NIC is host-scoped with no gateway, killing the route-theft bug:</p>
+
+      <div class="codeblock">
+        <div class="code-head">/etc/netplan/01-usv.yaml <span class="lang">bash</span></div>
+<pre><code class="language-bash">network:
+  version: 2
+  ethernets:
+    eth0:                      # LiDAR — heavy sensor, NO gateway
+      addresses: [192.168.10.2/24]
+      dhcp4: false
+      routes: []              # host-scoped: never steals the default route
+  wifis:
+    wlan0:                     # control + telemetry — owns the default route
+      dhcp4: true
+      access-points:
+        "usv-shore": {password: "redacted-key"}
+</code></pre>
+      </div>
+
+      <p>Finally, the systemd unit that brings CAN up. SocketCAN's <code>can0</code> is declared by the device tree but starts <em>down</em>; you must set the bitrate and bring the link up (Ch 10). It depends on nothing networked, so order it before the app — but the app's WiFi sockets need the network, so the app waits on <code>network-online.target</code>:</p>
+
+      <div class="codeblock">
+        <div class="code-head">/etc/systemd/system/can0.service <span class="lang">bash</span></div>
+<pre><code class="language-bash">[Unit]
+Description=Bring up SocketCAN can0
+# The mttcan driver must have bound the netdev first
+After=sys-subsystem-net-devices-can0.device
+BindsTo=sys-subsystem-net-devices-can0.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 500 kbit/s; auto-recover from bus-off after 100 ms (Ch 10)
+ExecStart=/sbin/ip link set can0 type can bitrate 500000 restart-ms 100
+ExecStart=/sbin/ip link set can0 up
+ExecStop=/sbin/ip link set can0 down
+
+[Install]
+WantedBy=multi-user.target
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> <code>network-online.target</code> is not <code>network.target</code></div>
+        <p><code>network.target</code> only means "the network stack is configured" — it can be reached before a single interface has an IP. The sensor-manager needs an actually-routable WiFi link, so its unit must <code>After=network-online.target</code> <em>and</em> <code>Wants=network-online.target</code> (the <code>Wants</code> is what pulls in <code>systemd-networkd-wait-online</code>; <code>After</code> alone never waits). Getting this wrong is why a service "works when I start it by hand but not at boot."</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="sensor-manager"><span class="sec-no">4</span>One epoll loop to read them all</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>four buses, one thread, zero polling</small></div>
+      <p>You now have four (or more) file descriptors: a UDP socket for the LiDAR, two raw TTYs for GPS and IMU, and a CAN socket. The naive design — a thread per device, each blocking on its own <code>read()</code> — burns context switches and makes shutdown a synchronization nightmare (Ch 08). The right design is one thread, all fds registered with <strong>epoll</strong>, blocking in a single <code>epoll_wait()</code> until <em>any</em> source is ready. This is the multiplexing payoff: cost scales with the number of <em>ready</em> fds, not the total.</p>
+
+      <div class="layer"><span class="step">②</span> Math <small>why one loop wins</small></div>
+      <p>With thread-per-fd, $N$ devices cost roughly $N$ kernel threads and $O(N)$ context switches per scheduling round. With <code>poll()</code>/<code>select()</code> the kernel rescans all $N$ fds every call, so a wakeup costs $O(N)$. <code>epoll</code> returns only the ready set $k$, so a wakeup costs:</p>
+      <div class="math-box">$$ C_\text{epoll} = O(k), \qquad k \le N, \quad k \approx 1\text{–}2 \text{ in steady state} $$</div>
+      <p>For our 4–8 sources $k$ is tiny, but the structural win is the same one that solved C10k: the loop doesn't get more expensive as you add quiet sensors. One <code>epoll_wait()</code> call, woken only when bytes actually arrive.</p>
+
+      <div class="layer"><span class="step">③</span> Code <small>the sensor-manager skeleton</small></div>
+      <p>Every fd is non-blocking and edge-triggered (drain until <code>EAGAIN</code>), and a <code>timerfd</code> drives the 20 Hz control tick from <em>inside</em> the same loop — so the controller and the sensors share one scheduler with no extra thread:</p>
+
+      <div class="codeblock">
+        <div class="code-head">sensor_manager.c <span class="lang">C</span></div>
+<pre><code class="language-c">int ep = epoll_create1(EPOLL_CLOEXEC);
+
+// Each open_* returns a non-blocking fd; tag it so we know who fired.
+int fds[] = { lidar_udp, gps_tty, imu_tty, can_sock, tick_timerfd };
+for (int i = 0; i &lt; 5; i++) {
+    struct epoll_event ev = {
+        .events = EPOLLIN | EPOLLET,        // edge-triggered: drain fully
+        .data.fd = fds[i],
+    };
+    epoll_ctl(ep, EPOLL_CTL_ADD, fds[i], &amp;ev);
+}
+
+struct epoll_event events[16];
+for (;;) {
+    int n = epoll_wait(ep, events, 16, -1);
+    if (n &lt; 0) { if (errno == EINTR) continue; break; }   // Ch 11: handle EINTR
+
+    for (int i = 0; i &lt; n; i++) {
+        int fd = events[i].data.fd;
+        if (events[i].events &amp; (EPOLLHUP | EPOLLERR)) {
+            mark_source_down(fd);            // §6 failure matrix takes over
+            continue;
+        }
+        if (fd == tick_timerfd)      run_control_step();   // 20 Hz PID tick
+        else                         drain_source(fd);     // read until EAGAIN
+    }
+}
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What ties the course together here</div>
+        <p>This one loop uses Chapter 01 (fds + partial reads), 06 (raw termios TTYs), 08 (epoll, edge-triggered), 09 (the UDP socket), 10 (the CAN socket), and 11 (EINTR + a timerfd for deterministic timing). Five chapters collapse into ~30 lines. <code>EPOLLHUP</code> is your free disconnect detector — the kernel tells you when a device vanishes, so you never have to poll for liveness.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="bandwidth-budget"><span class="sec-no">5</span>The bandwidth budget across buses</h2>
+
+      <div class="layer"><span class="step">②</span> Math <small>does it physically fit?</small></div>
+      <p>Before you trust the architecture, prove the data <em>fits</em> on the wires. Each source has a payload rate; each bus has a usable ceiling (always below the line rate — protocol overhead and, for WiFi, contention). The rule is simple:</p>
+      <div class="math-box">$$ \text{utilization}_\text{bus} = \frac{\sum_i R_i^{\,\text{payload}} \cdot (1+h_i)}{B_\text{usable}} \;&lt;\; 1 $$</div>
+      <p>where $R_i$ is a stream's payload rate, $h_i$ is its framing overhead fraction, and $B_\text{usable}$ is the realistic throughput of the bus. Take the LiDAR: a spinning unit emitting $6.0\times10^{5}$ points/s at 16 bytes/point is</p>
+      <div class="math-box">$$ R_\text{lidar} = 6.0\times10^{5}\times16 = 9.6\times10^{6}\ \text{B/s} = 76.8\ \text{Mbit/s} $$</div>
+      <p>On a 1000BASE-T link with ~118 MB/s usable, that's $9.6/118 \approx 8\%$ utilization — comfortable. Now run the whole vessel:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Source</th><th>Payload rate</th><th>Bus</th><th>Bus usable</th><th>Utilization</th></tr></thead>
+        <tbody>
+          <tr><td>LiDAR @ 600 k pts/s</td><td>76.8 Mbit/s</td><td>Ethernet (1 Gbit/s)</td><td>~944 Mbit/s</td><td>~8%</td></tr>
+          <tr><td>GPS @ 10 Hz, 80 B</td><td>~6.4 kbit/s</td><td>USB serial (115200)</td><td>~92 kbit/s</td><td>~7%</td></tr>
+          <tr><td>IMU @ 200 Hz, 40 B</td><td>~64 kbit/s</td><td>USB serial (921600)</td><td>~737 kbit/s</td><td>~9%</td></tr>
+          <tr><td>Thrusters + N2K</td><td>~80 kbit/s</td><td>CAN (500 kbit/s)</td><td>~250 kbit/s</td><td>~32%</td></tr>
+          <tr><td>Telemetry to shore</td><td>~200 kbit/s</td><td>WiFi (shared)</td><td>~20 Mbit/s real</td><td>~1%</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the WiFi ceiling is a lie if you average it</div>
+        <p>WiFi's "20 Mbit/s real" is an <em>aggregate, contended</em> number with fat jitter (Ch 09). At 1% average you'll still see 200 ms stalls when the medium is busy. That is exactly why telemetry rides WiFi and the LiDAR does not — and why the failure matrix in §6 assumes the WiFi link can vanish for seconds at a time.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="failure-matrix"><span class="sec-no">6</span>Health monitoring &amp; the failure matrix</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>plan the failure before it happens</small></div>
+      <p>At sea, every link <em>will</em> fail. Robust I/O (Ch 11) isn't a try/catch; it's a per-source policy decided in advance. The kernel hands you the failure signal cheaply — <code>EPOLLHUP</code> on a vanished USB device, <code>recv()</code> timeouts on a dead socket, the CAN error counters crossing into bus-off — and your job is to map each signal to a degraded mode that keeps the boat safe rather than crashing the whole stack.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Failure</th><th>How you detect it</th><th>Kernel/driver behavior</th><th>Architected response</th></tr></thead>
+        <tbody>
+          <tr><td>WiFi drop (control link)</td><td>No heartbeat for <em>T</em>; <code>send()</code> EAGAIN piling up</td><td>Socket stays open; packets silently dropped</td><td>Failsafe: hold station / loiter, kill thrust on long loss, keep logging</td></tr>
+          <tr><td>USB GPS/IMU unplug</td><td><code>EPOLLHUP</code> on the fd; <code>read()</code> returns 0 / <code>ENODEV</code></td><td>chardev disappears, then udev re-creates <code>/dev/gps</code> on replug</td><td>Mark stale, fall back to dead-reckoning (IMU) or last-fix; reopen on udev re-add</td></tr>
+          <tr><td>CAN bus-off</td><td>Netlink state = <code>BUS_OFF</code>; TX error counter &gt; 255</td><td>Controller stops TX/RX until reset</td><td><code>restart-ms 100</code> auto-recovers; on repeated bus-off, command thrust neutral</td></tr>
+          <tr><td>Ethernet link down (LiDAR)</td><td><code>SIOCGIFFLAGS</code> loses <code>IFF_RUNNING</code>; no UDP for <em>T</em></td><td>Carrier lost; socket open but silent</td><td>Switch perception to last good scan; alarm; navigation degrades, not crashes</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="layer"><span class="step">③</span> Code <small>a pre-flight check that refuses to launch broken</small></div>
+      <p>Before you ever arm thrusters, run a pre-flight that asserts every link the matrix depends on. Fail loud, fail on the dock — not 2 km out:</p>
+
+      <div class="codeblock">
+        <div class="code-head">preflight.sh <span class="lang">bash</span></div>
+<pre><code class="language-bash">#!/usr/bin/env bash
+set -euo pipefail
+fail=0
+check() { if eval "$2"; then echo "  OK  $1"; else echo "FAIL  $1"; fail=1; fi; }
+
+echo "== USV pre-flight =="
+check "GPS symlink present"   '[ -e /dev/gps ]'
+check "IMU symlink present"   '[ -e /dev/imu ]'
+check "can0 is UP"            '[ "$(cat /sys/class/net/can0/operstate)" = up ]'
+check "eth0 carrier (LiDAR)"  '[ "$(cat /sys/class/net/eth0/carrier)" = 1 ]'
+check "wlan0 has a route"     'ip route show default | grep -q wlan0'
+check "LiDAR answering"       'timeout 2 nc -uz 192.168.10.10 2368'
+# CAN traffic seen in 1 s? (Ch 10 candump)
+check "thruster CAN traffic"  'timeout 1 candump -n 1 can0 >/dev/null 2>&amp;1'
+
+[ "$fail" -eq 0 ] &amp;&amp; { echo "PRE-FLIGHT PASS"; exit 0; } \
+                  || { echo "PRE-FLIGHT FAIL — do not arm"; exit 1; }
+</code></pre>
+      </div>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — health from <code>/sys</code> and <code>/proc</code>, not guesses</div>
+        <p>Live health monitoring reads the same kernel surfaces you toured in Ch 02: <code>/sys/class/net/&lt;if&gt;/operstate</code> and <code>carrier</code> for link state, <code>/sys/class/net/can0/can/state</code> for CAN error state, <code>/proc/interrupts</code> to confirm the LiDAR NIC's IRQ is actually firing (Ch 07). No heuristics — the kernel already knows the truth and exposes it as files. Your monitor is a loop of cheap <code>read()</code>s on virtual files.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="whole-course-recap"><span class="sec-no">7</span>The whole course, in one frame</h2>
+      <p>Step back. The capstone is just the course read in dependency order. Every chapter is one layer the byte passes through on its way from the water to your control loop and back to the thrusters:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Ch</th><th>Layer in the path</th><th>What it contributes to the USV</th></tr></thead>
+        <tbody>
+          <tr><td>01</td><td>The syscall boundary &amp; fds</td><td>Every device is an int you <code>read()</code></td></tr>
+          <tr><td>02</td><td><code>/dev</code> &amp; sysfs</td><td>Find &amp; introspect devices; read health attrs</td></tr>
+          <tr><td>03</td><td>udev naming</td><td><code>/dev/gps</code>, <code>/dev/imu</code> survive replug</td></tr>
+          <tr><td>04</td><td>Drivers, modules, firmware</td><td>WiFi <code>moal</code> + blob actually binds</td></tr>
+          <tr><td>05</td><td>Buses, enumeration, device tree</td><td>SDIO/CAN declared; USB/PCIe discovered</td></tr>
+          <tr><td>06</td><td>Serial &amp; the TTY layer</td><td>GPS/IMU in raw mode, no lag</td></tr>
+          <tr><td>07</td><td>Interrupts, DMA, MMIO</td><td>LiDAR DMA keeps the CPU free for control</td></tr>
+          <tr><td>08</td><td>Multiplexing &amp; epoll</td><td>One thread reads every source</td></tr>
+          <tr><td>09</td><td>Networking I/O</td><td>WiFi=control, Ethernet=sensors, no route theft</td></tr>
+          <tr><td>10</td><td>CAN &amp; SocketCAN</td><td>Thrusters &amp; N2K as a socket; bus-off recovery</td></tr>
+          <tr><td>11</td><td>Real-time &amp; robust I/O</td><td>20 Hz deadline met; failsafe on loss</td></tr>
+          <tr><td>12</td><td>This synthesis</td><td>The whole vessel, booting &amp; surviving</td></tr>
+        </tbody>
+      </table></div>
+
+      <p>If you can draw the §1 map from memory and explain, for any leaf, which bus it sits on, why it sits there, what driver binds it, what fd it becomes, and what happens when it fails — you understand Linux I/O for robotics. That is the entire course.</p>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io12-role-assignment">
+        <div class="ex-head"><span class="badge">Q1</span> Interface-role assignment</div>
+        <div class="ex-q">You're adding a 4K bow camera streaming ~30 Mbit/s of H.264 to the operator. Which interface should carry it, given the roles we assigned?</div>
+        <ul class="ex-options">
+          <li data-correct="false">WiFi (<code>wlan0</code>) — it's the link to the operator, so put the video there.</li>
+          <li data-correct="true">Ethernet (<code>eth0</code>) onto the vessel, transcoded/decimated before any WiFi hop — heavy media belongs on the full-duplex switched link, never raw on the shared WiFi medium.</li>
+          <li data-correct="false">CAN (<code>can0</code>) — it's already the field bus for devices.</li>
+          <li data-correct="false">USB serial (<code>/dev/cam</code>) — give it a stable udev name and stream it.</li>
+        </ul>
+        <div class="ex-explain">30 Mbit/s exceeds WiFi's realistic contended ceiling (~20 Mbit/s) and would starve the control link. Heavy media rides Ethernet on-vessel; only a heavily compressed, rate-limited preview should ever touch WiFi. CAN tops out at 500 kbit/s and USB serial at &lt;1 Mbit/s — both are off by orders of magnitude.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io12-lidar-budget" data-answer="76.8" data-tol="0.5">
+        <div class="ex-head"><span class="badge">Q2</span> Compute the LiDAR's bus load</div>
+        <div class="ex-q">The LiDAR emits $6.0\times10^{5}$ points per second at 16 bytes per point (payload only). What is its payload throughput in <strong>Mbit/s</strong>? (Hint: bytes/s × 8, then ÷ $10^{6}$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">Mbit/s</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$6.0\times10^{5}\times16 = 9.6\times10^{6}$ B/s. $\times 8 = 7.68\times10^{7}$ bit/s $= 76.8$ Mbit/s. On a 1 Gbit/s link (~944 Mbit/s usable after framing) that's ~8% utilization — which is precisely why this stream rides Ethernet and would be impossible on WiFi.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io12-can-unit">
+        <div class="ex-head"><span class="badge">Q3</span> Build it — a systemd unit + pre-flight gate</div>
+        <div class="ex-q">Write a systemd unit for the <code>sensor-manager</code> that (a) starts only after the WiFi link is actually routable, (b) requires <code>can0</code> to be up first, and (c) refuses to start unless <code>preflight.sh</code> exits 0. Then say why <code>Wants=network-online.target</code> matters.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Use <code>After=</code> for ordering, <code>Requires=</code>/<code>Wants=</code> for dependency, and <code>ExecStartPre=</code> for the gate. Remember <code>After</code> alone never <em>waits</em> for the network — you must also <code>Wants</code> the wait-online target.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <div class="codeblock"><div class="code-head">/etc/systemd/system/sensor-manager.service <span class="lang">bash</span></div>
+<pre><code class="language-bash">[Unit]
+Description=USV unified sensor-manager (epoll loop)
+# Ordering: only after a routable network AND can0 is up
+After=network-online.target can0.service
+Wants=network-online.target        # pulls in systemd-networkd-wait-online
+Requires=can0.service              # if CAN fails to come up, do not start
+
+[Service]
+Type=simple
+# Pre-flight gate: nonzero exit here blocks the service from starting
+ExecStartPre=/usr/local/bin/preflight.sh
+ExecStart=/usr/local/bin/sensor-manager
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+</code></pre></div>
+          <p><strong>Why <code>Wants=network-online.target</code>:</strong> <code>After=network-online.target</code> only orders the unit <em>after</em> that target is reached, but it does not cause the target to be reached. The target is only pulled into the boot transaction by something that <code>Wants</code>/<code>Requires</code> it (which in turn activates <code>systemd-networkd-wait-online.service</code>, the thing that actually blocks until an interface is up). Without the <code>Wants</code>, <code>network-online.target</code> may be reached instantly while WiFi is still associating, the sensor-manager starts, its <code>connect()</code> on <code>wlan0</code> fails, and you get the classic "works by hand, broken at boot." The <code>ExecStartPre</code> gate is the belt to that suspenders: even if every dependency is satisfied, a failed physical link (no GPS symlink, dead LiDAR carrier, no CAN traffic) exits nonzero and systemd refuses to launch, keeping the thrusters disarmed.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>A robot's I/O is one data-flow graph: every source maps physical&nbsp;port → bus → driver → fd. Assign interfaces by their nature — WiFi=control/telemetry, Ethernet=heavy sensors, USB/serial=low-rate with udev names, CAN=actuators — and never let a sensor NIC steal the default route. The bring-up chain lives on disk as persistent config: device tree + firmware + udev rules + netplan + ordered systemd units gated by <code>network-online.target</code> and a <code>can0</code> unit. One epoll loop reads every fd and drives the 20 Hz tick from a timerfd, synthesizing Chapters 01, 06, 08, 09, 10, and 11. Prove the bandwidth budget fits each bus, map every failure (WiFi drop, USB unplug, CAN bus-off, link-down) to a pre-planned degraded mode, and gate launch behind a pre-flight that reads the truth straight from <code>/sys</code>. Draw the §1 map from memory and you own the whole course.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

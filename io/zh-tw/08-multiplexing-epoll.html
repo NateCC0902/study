@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>多工 I/O：poll、epoll 與 io_uring — 機器人的 Linux I/O</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="08-multiplexing-epoll">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · 第 08 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · 第 08 章 · 並行</div>
+        <h1>多工 I/O：如何用一條執行緒盯住每一顆感測器</h1>
+        <p>機器人的大腦同時讀取 GPS、IMU、LiDAR 與 CAN——四個檔案描述子（file descriptor）、四種資料速率，全部同時在線。最直覺的答案是「一個裝置配一條執行緒」。它在筆電上跑得動，但在規模一大就會悄悄崩潰。本章要講的，是那套讓<em>單一</em>執行緒得以等候數百個 fd、只為有資料的那些醒來的核心機制：<code>select</code>、<code>poll</code>、<code>epoll</code> 與 <code>io_uring</code>。</p>
+        <div class="meta"><span>⏱ 約 40 分鐘</span><span>🧠 就緒模型</span><span>⚡ 事件迴圈</span><span>∑ O(n) vs O(ready)</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="blocking-nonblocking"><span class="sec-no">1</span>阻塞、非阻塞，以及等待的難題</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先把畫面建起來</small></div>
+      <p>你到目前為止寫過的每一個 <code>read()</code> 都是<strong>阻塞（blocking）</strong>的：如果 GPS 還沒送出下一行 NMEA，呼叫端的執行緒就會在核心裡睡著，直到位元組抵達。當你剛好只有一件事要盯時，這完美無缺。但只要你有<em>兩件</em>事，阻塞就把你困住了——當你睡在 GPS 上時，LiDAR 的 socket 緩衝區滿溢，你就掉了一筆掃描。你一次只能阻塞在一個 fd 上，但機器人有一大堆。</p>
+
+      <p>第一條出路是<strong>非阻塞模式（non-blocking mode）</strong>。用 <code>O_NONBLOCK</code> 旗標開啟 fd（或之後用 <code>fcntl</code> 設定），這樣一個沒有資料的 <code>read()</code> 不會睡著，而是立刻回傳 <code>-1</code> 並把 <code>errno == EAGAIN</code>（在 Linux 上等同 <code>EWOULDBLOCK</code>）。現在你<em>可以</em>在迴圈裡逐一拜訪每個 fd 而不會卡死在某一個上——但看看這要付出什麼代價。</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 忙碌輪詢會燒掉一整顆核心</div>
+        <p>一個光禿禿的 <code>while(1)</code>，對每個非阻塞 fd 做 <code>read()</code> 又忽略 <code>EAGAIN</code>，永遠不會睡著。它以 100% CPU 空轉，每秒問上百萬次「好了嗎？好了嗎？」。<code>EAGAIN</code> 不是錯誤——它的意思是「現在沒有，待會再問」。多工這整盤棋的核心就在於：<em>誰來告訴我們什麼時候該問，好讓我們在那之前能睡著？</em></p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>為什麼忙碌迴圈毫無希望</small></div>
+      <p>假設你的控制迴圈跑在 20 Hz，所以你<em>只需要</em>每 $50\ \text{ms}$ 拿到一次新資料。一個忙碌輪詢迴圈，除了 <code>read()</code>+<code>EAGAIN</code> 什麼都不做，比如說以每秒 $2\times10^{6}$ 次迭代運轉，幾乎做不了什麼有用的事：</p>
+      <div class="math-box">$$ \eta = \frac{f_{\text{useful}}}{f_{\text{poll}}} \approx \frac{80\ \text{reads with data/s}}{2\times10^{6}\ \text{reads/s}} \approx 0.004\% $$</div>
+      <p>那些檢查每一次都是一個系統呼叫（syscall）（使用者空間→核心空間→使用者空間）。我們付出兩百萬次跨越，只為抓到八十筆酬載。我們需要一個<em>會阻塞到至少一個 fd 就緒</em>、然後把就緒集合交給我們的基本機制。那個機制就是 I/O 多工。</p>
+
+      <div class="codeblock">
+        <div class="code-head">nonblock.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;fcntl.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;unistd.h&gt;
+
+int set_nonblocking(int fd) {
+    int fl = fcntl(fd, F_GETFL, 0);             /* read current flags */
+    if (fl == -1) return -1;
+    return fcntl(fd, F_SETFL, fl | O_NONBLOCK); /* add O_NONBLOCK     */
+}
+
+/* a read that tolerates "no data yet" */
+ssize_t try_read(int fd, void *buf, size_t n) {
+    ssize_t r = read(fd, buf, n);
+    if (r &lt; 0 &amp;&amp; (errno == EAGAIN || errno == EWOULDBLOCK))
+        return 0;            /* not an error: ask again later */
+    return r;                /* &gt;0 bytes, 0 = EOF, &lt;0 real error */
+}
+</code></pre>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="thread-per-fd"><span class="sec-no">2</span>一 fd 一執行緒，以及它為何無法擴展</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>那個顯而易見的答案</small></div>
+      <p>「阻塞沒問題，只要每個 fd 都有自己的執行緒就行。」每個裝置開一條執行緒，讓它各自阻塞在自己的 <code>read()</code> 上，搞定。對少數幾個 fd 而言，這確實是正確的做法——對一台裝了四顆感測器的機器人來說，這是個完全合理的架構。問題在於它無法<em>推廣</em>，而看清它究竟在哪裡崩潰，正是後面一切的動機所在。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>兩項隨 N 成長的成本</small></div>
+      <p><strong>記憶體。</strong>每條 pthread 都會保留一塊堆疊（stack）——Linux 預設是 $8\ \text{MiB}$ 的虛擬位址空間（<code>ulimit -s</code> 以 KiB 顯示）。它是惰性換頁（lazily faulted）進來的，所以不會全部變成 RAM，但這份虛擬保留再加上每執行緒的核心 <code>task_struct</code>（每條各佔幾 KiB 的實體 RAM）是省不掉的。對 $N$ 條執行緒：</p>
+      <div class="math-box">$$ M_{\text{vm}} = N \cdot S_{\text{stack}} = N \cdot 8\ \text{MiB} \qquad\Rightarrow\qquad N=10{,}000 \;\Rightarrow\; \approx 78\ \text{GiB of VM} $$</div>
+      <p><strong>排程器成本。</strong>比記憶體更糟的是上下文切換（context switch）這筆稅。當一條執行緒阻塞、另一條醒來時，核心要存下並還原暫存器、抽換分頁表的根，而且——最昂貴的部分——污染 L1/L2 快取與 TLB，使得新執行緒是「冷」著開跑的。一次上下文切換大約是 $1$–$5\ \mu s$ 的直接成本，外加快取未命中（cache miss）的餘震。當 $N$ 條執行緒各自因自己的流量醒來時，切換率隨 $N$ 成長：</p>
+      <div class="math-box">$$ C_{\text{cpu}} \approx N \cdot f_{\text{events}} \cdot t_{\text{switch}} $$</div>
+      <p>這就是著名的 <strong>C10k 問題</strong>：一台想處理一萬個並行連線的伺服器辦不到，因為一連線一執行緒的做法早在耗盡 RAM 之前，就先把排程器淹沒了。解法不是更多執行緒——而是<em>一條</em>執行緒，讓核心能告訴它哪些 fd 就緒了。</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 真實案例——AGX Orin 那艘 USV 只有十幾個 fd，那為什麼還要在意？</div>
+        <p>我們的 USV 大概只有十幾個 I/O 來源，所以一 fd 一執行緒<em>是</em>跑得動的。但同樣的擴展邏輯會以縮小版現形：每條每秒為 IMU 醒來 200 次的阻塞讀取執行緒，都是一次把你 20 Hz PID 迴圈剛暖好的快取行（cache line）逐出的上下文切換。十二條這樣的執行緒，足以把一個確定性的控制迴圈變成抖動連連的迴圈。下面的事件迴圈模式，讓控制執行緒得以獨佔自己的快取，只在真有資料落地時才醒來。</p>
+      </div>
+
+      <div class="mermaid">
+flowchart LR
+    subgraph TPF["一 fd 一執行緒"]
+      T1["執行緒<br/>GPS"] --> K1["核心"]
+      T2["執行緒<br/>IMU"] --> K1
+      T3["執行緒<br/>LiDAR"] --> K1
+      T4["執行緒<br/>CAN"] --> K1
+      K1 -->|"N 次上下文<br/>切換"| CPU1["CPU"]
+    end
+    subgraph EL["epoll 事件迴圈"]
+      G["GPS"] --> EP["單一執行緒<br/>epoll_wait"]
+      I["IMU"] --> EP
+      LD["LiDAR"] --> EP
+      C["CAN"] --> EP
+      EP -->|"O(ready)"| CPU2["CPU"]
+    end
+</div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="select-poll"><span class="sec-no">3</span>select 與 poll：那兩位 O(n) 的祖先</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>把整份清單交給核心</small></div>
+      <p>最早的多工器用一個想法解決了等待難題：把你整組 fd 交給核心，說「睡到這裡頭任何一個變成可讀／可寫，或者逾時為止」。它回傳時，你掃過整個集合看是哪些醒了。這就是 <code>select(2)</code>（1983 年，固定大小的位元圖，上限為 <code>FD_SETSIZE</code> = 1024）與它更乾淨的後繼者 <code>poll(2)</code>（一個 <code>struct pollfd</code> 陣列，沒有硬性上限）。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>成本藏在哪裡</small></div>
+      <p>兩者共享一個致命的性質：感興趣的集合（interest set）住在<em>使用者空間</em>，而且每次呼叫都要重建。所以每次呼叫都做了兩遍 $O(n)$ 的工——進入時核心複製並掃描全部 $n$ 個描述子，回傳時你又掃過全部 $n$ 個才找出就緒的那些，即使實際上只有一個 fd 真的觸發：</p>
+      <div class="math-box">$$ T_{\text{select}} = \underbrace{O(n)}_{\text{copy in}} + \underbrace{O(n)}_{\text{kernel scan}} + \underbrace{O(n)}_{\text{user scan}} = O(n)\ \text{per call} $$</div>
+      <p>當 $n=10{,}000$ 個 fd 而只有 $1$ 個就緒時，你做了約 $10{,}000$ 單位的工，只送出 $1$ 個事件——這個 $0.01\%$ 的回報，在<em>每一次</em>迴圈迭代上反覆重演。成本綁在被監看集合的大小，而不是實際 I/O 的量。這跟你想要的恰恰相反。</p>
+
+      <div class="codeblock">
+        <div class="code-head">poll_loop.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;poll.h&gt;
+
+struct pollfd pfds[4];
+pfds[0] = (struct pollfd){ .fd = gps_fd,   .events = POLLIN };
+pfds[1] = (struct pollfd){ .fd = imu_fd,   .events = POLLIN };
+pfds[2] = (struct pollfd){ .fd = lidar_fd, .events = POLLIN };
+pfds[3] = (struct pollfd){ .fd = can_fd,   .events = POLLIN };
+
+for (;;) {
+    int ready = poll(pfds, 4, 50 /* ms timeout */);
+    if (ready &lt; 0) { if (errno == EINTR) continue; break; }
+    if (ready == 0) { /* 50 ms passed: run the control tick */ continue; }
+    for (int i = 0; i &lt; 4; i++)                 /* O(n) rescan EVERY call */
+        if (pfds[i].revents &amp; POLLIN)
+            drain(pfds[i].fd);                  /* read until EAGAIN */
+}
+</code></pre>
+      </div>
+      <p>對四個 fd 來說這沒問題——在 $n=4$ 時那次 $O(n)$ 重掃幾乎免費，而 <code>poll</code> 就是正確、可攜的工具。這一課講的是漸近行為，不是這個迴圈本身。</p>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="epoll"><span class="sec-no">4</span>epoll：集合由核心保管，O(ready)</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>別再重新遞交同一份清單</small></div>
+      <p><code>poll</code> 的浪費在於：你每一次呼叫都重新宣告一遍你感興趣的集合。Linux 的 <code>epoll</code>（2002 年）的修法，是把感興趣的集合做成一個<em>持久的核心物件</em>。你用 <code>epoll_ctl(... EPOLL_CTL_ADD ...)</code> 把它建立一次；此後 <code>epoll_wait()</code> 只回傳<em>真正就緒的那些 fd</em>。沒有使用者空間集合要複製進去，也沒有整份重掃。核心掛勾到每個 fd 的喚醒路徑上，所以當資料抵達時，它會在內部把那個 fd 附加到一張就緒清單上。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>成本轉移到了實際工作上</small></div>
+      <p>註冊是攤提後（amortized）每 fd $O(1)$（感興趣的集合是一棵以 fd 為鍵的紅黑樹）。熱路徑——<code>epoll_wait</code>——只花費<em>就緒</em>的 fd 數量 $r$，而不是總數 $n$：</p>
+      <div class="math-box">$$ T_{\text{epoll\_wait}} = O(r),\qquad r = \#\{\text{ready fds}\} \;\le\; n $$</div>
+      <p>當 $10{,}000$ 個 fd 中有 $1$ 個就緒時，<code>epoll_wait</code> 做 $O(1)$ 的工並回傳一個事件——相對於 <code>poll</code> 的 $O(10{,}000)$。成本終於隨你實際擁有的 I/O 而擴展，這正是整件事的重點。<strong>拉動下方模擬的滑桿，看著紅色（一 fd 一執行緒）與橘色（epoll）曲線隨 $N$ 增長而分岔。</strong></p>
+
+      <div class="sim"><div class="sim-title"><span>🔀</span> 連線數擴展時：一 fd 一執行緒 vs epoll</div><canvas id="sim-mux"></canvas></div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 該注意的地方</div>
+        <p>把 fd 數往右推，<strong>紅色曲線一路爬升</strong>——一 fd 一執行緒的記憶體（每條 8 MiB 堆疊）與 O(N) 的排程器壓力，隨著每個 fd 線性成長。<strong>橘色 epoll 曲線追蹤的是<em>活躍（active）</em>的比例</strong>，而非總數：把「% active」降到 5%，即使在五萬個 fd 下，epoll 的工作量仍貼著地板，跑在單一執行緒上、每 fd 約 0.3 KB 的核心狀態。兩條線之間的差距<em>就是</em> C10k 問題，而 epoll 把它合攏起來，正是為什麼每一個現代事件迴圈都建立在它之上。</p>
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>把感興趣的集合建立一次</small></div>
+      <div class="codeblock">
+        <div class="code-head">epoll_setup.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;sys/epoll.h&gt;
+
+int ep = epoll_create1(EPOLL_CLOEXEC);     /* the kernel-side interest set */
+
+struct epoll_event ev = { .events = EPOLLIN, .data.fd = gps_fd };
+epoll_ctl(ep, EPOLL_CTL_ADD, gps_fd, &amp;ev); /* register ONCE, not per loop */
+
+/* later, the wait returns only ready fds */
+struct epoll_event events[64];
+int n = epoll_wait(ep, events, 64, 50 /* ms */);
+for (int i = 0; i &lt; n; i++)                 /* i runs over READY fds only   */
+    drain(events[i].data.fd);
+</code></pre>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="edge-level"><span class="sec-no">5</span>準位觸發 vs 邊緣觸發：每個人都會踩的那個 bug</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>一個狀態，還是一個轉變</small></div>
+      <p>epoll 有兩種通知模式，選錯就是最常見的 epoll bug。<strong>準位觸發（level-triggered, LT）</strong>——也就是預設——只要還有資料<em>正</em>緩衝著，就會持續回報該 fd 就緒，像個水位感測器：每一次 <code>epoll_wait</code> 都會一直告訴你「仍然可讀」，直到你把它讀乾。<strong>邊緣觸發（edge-triggered, ET）</strong>用 <code>EPOLLET</code> 旗標設定，只在從「未就緒到就緒」的<em>轉變</em>那一刻觸發——每次抵達觸發一次。如果你在一次 ET 通知時沒有把整個緩衝區讀乾，剩下的位元組就會停在那兒，而 <code>epoll_wait</code> 在<em>新</em>資料抵達之前再也不會提起那個 fd。你就握著沒讀完的資料卡住了。</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> ET 守則：永遠讀乾到 EAGAIN</div>
+        <p>用 <code>EPOLLET</code> 時，fd <strong>必須</strong>是非阻塞的，而且每次醒來你都要在迴圈裡 <code>read()</code>，直到它回傳 <code>EAGAIN</code>。那個 <code>EAGAIN</code> 就是「緩衝區已空，你已消化掉整個邊緣」的訊號。略過它，你就會悄無聲息地掉資料。邊緣模式是拿一事件一系統呼叫的效率，去換取那條嚴格的讀乾紀律。</p>
+      </div>
+
+      <p>那何苦用 ET？喚醒更少。在 LT 之下，一顆把 4 KB 掃描分塊送來的高速 LiDAR，可能為一則邏輯訊息把 <code>epoll_wait</code> 喚醒好幾次；ET 只喚醒你一次，由你把它全部讀乾。對大多數機器人節點來說，LT 更單純、也夠快——只有當喚醒的開銷已經可量測地在傷害你時，才去動 ET。</p>
+
+      <div class="codeblock">
+        <div class="code-head">edge_drain.c <span class="lang">C</span></div>
+<pre><code class="language-c">/* EPOLLET requires O_NONBLOCK fds + drain-to-EAGAIN */
+struct epoll_event ev = { .events = EPOLLIN | EPOLLET, .data.fd = lidar_fd };
+epoll_ctl(ep, EPOLL_CTL_ADD, lidar_fd, &amp;ev);
+
+/* on a ready event, loop until the kernel says "empty" */
+for (;;) {
+    ssize_t r = read(lidar_fd, buf, sizeof buf);
+    if (r &gt; 0)            { handle(buf, r); continue; }   /* keep draining */
+    if (r == 0)           { close_peer(lidar_fd); break; } /* EOF          */
+    if (errno == EAGAIN)  { break; }                       /* edge consumed */
+    if (errno == EINTR)   { continue; }                    /* retry        */
+    perror("read"); break;
+}
+</code></pre>
+      </div>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th></th><th>準位觸發（預設）</th><th>邊緣觸發（EPOLLET）</th></tr></thead>
+        <tbody>
+          <tr><td>何時觸發</td><td>資料<em>正</em>緩衝著（一個狀態）</td><td>資料<em>抵達</em>（一個轉變）</td></tr>
+          <tr><td>沒讀乾會重新通知嗎？</td><td>會，每次等待都會</td><td>不會——只在有新資料時</td></tr>
+          <tr><td>必須讀乾到 EAGAIN 嗎？</td><td>不必（部分讀取是安全的）</td><td>必須，沒有例外</td></tr>
+          <tr><td>fd 必須是非阻塞的嗎？</td><td>建議</td><td>必須</td></tr>
+          <tr><td>每則訊息的喚醒次數</td><td>可能好幾次</td><td>一次</td></tr>
+        </tbody>
+      </table></div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="io-uring"><span class="sec-no">6</span>io_uring：從就緒走向真正的非同步</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>告訴我何時「做完」，而不是何時「就緒」</small></div>
+      <p>epoll 是一個<em>就緒（readiness）</em>介面：它告訴你「這個 fd 現在可以讀了」，而你還是得自己發出 <code>read()</code>（又一個系統呼叫）。<code>io_uring</code>（Linux 5.1 起）把模型翻轉成<em>完成（completion）</em>：你提交實際的操作——「從這個 fd 讀 4 KB 進這塊緩衝區」——而核心會在<strong>資料已經在那兒了</strong>的時候告訴你。工作是非同步發生的；沒有一事件一個獨立的讀取系統呼叫。</p>
+
+      <p>它的機制是兩個在你的行程與核心之間記憶體映射（memory mapped）的共享環狀緩衝區（ring buffer）——你把請求推進去的<strong>提交佇列（submission queue, SQ）</strong>，以及核心把結果推進去的<strong>完成佇列（completion queue, CQ）</strong>。因為兩個環都是共享記憶體，你可以批次堆疊許多操作，再用<em>一個</em> <code>io_uring_enter()</code> 系統呼叫把它們提交出去——或者，開啟 SQ 輪詢後，在穩態下做到零個系統呼叫。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>把系統呼叫攤提掉</small></div>
+      <p>如果一個系統呼叫的成本是 $t_{\text{sc}}$，而你每次 <code>io_uring_enter</code> 批次 $b$ 個操作，每操作的系統呼叫開銷就崩塌下去：</p>
+      <div class="math-box">$$ t_{\text{per-op}} = \frac{t_{\text{sc}}}{b} \;\xrightarrow[\;b\to\infty\;]{}\; 0 \qquad\text{vs. epoll's } 2\,t_{\text{sc}}\text{ per event (wait + read)} $$</div>
+      <p>對我們的控制迴圈來說好處不大——在十幾個 fd 時我們並非受限於系統呼叫——但 io_uring 是核心正在前進的方向，而它在重度磁碟的任務記錄上大放異彩，那正是 epoll 一直以來束手無策之處（一般檔案永遠是「就緒」的，所以 epoll 無法把它們非同步化；io_uring 可以）。</p>
+
+      <div class="mermaid">
+flowchart LR
+    APP["應用程式"] -->|"推入 SQE"| SQ["提交環<br/>(SQ)"]
+    SQ -->|"io_uring_enter()<br/>批次"| KERN["核心<br/>執行 I/O"]
+    KERN -->|"推入 CQE"| CQ["完成環<br/>(CQ)"]
+    CQ -->|"收割結果"| APP
+</div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 三個世代，一個趨勢</div>
+        <p><code>poll</code>：集合由你保管，核心重掃它——$O(n)$。<code>epoll</code>：集合由核心保管，回傳就緒的 fd——$O(r)$，但仍是就緒（讀取由你來做）。<code>io_uring</code>：核心保管集合<em>而且</em>替你做 I/O，在共享記憶體環裡回傳完成——批次化、真正的非同步。每一步都把工作從你的迴圈移進核心，並縮減系統呼叫的數量。</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="event-loop"><span class="sec-no">7</span>ROS2 風格節點裡的事件迴圈模式</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>一條執行緒、四顆感測器，跑在 AGX Orin 上</small></div>
+      <p>下面就是每一個反應器（reactor）——libev、libuv、ROS 2 的執行器（executor）、一個 nginx worker——最終都歸結成的形狀：把你所有的 fd 註冊好，然後在 <code>epoll_wait</code> 上迴圈，把就緒的那些派發給處理常式，並用逾時當作你的週期性節拍（tick）。在 USV 上，這一條執行緒擁有 GPS（<code>/dev/serial/by-id/...</code>）、IMU（另一個 tty）、LiDAR（一個 UDP socket）與 CAN 匯流排（bus）（透過 <code>AF_CAN</code> 的 SocketCAN fd）——全部多工、全部快取暖熱、沒有執行緒抖動。</p>
+
+      <div class="codeblock">
+        <div class="code-head">sensor_loop.c <span class="lang">C</span></div>
+<pre><code class="language-c">int ep = epoll_create1(EPOLL_CLOEXEC);
+
+/* every fd is non-blocking; register each with its handler tag */
+add_fd(ep, gps_fd,   EPOLLIN);   /* NMEA over /dev/serial/by-id/... */
+add_fd(ep, imu_fd,   EPOLLIN);   /* 200 Hz binary over ttyTHS       */
+add_fd(ep, lidar_fd, EPOLLIN);   /* UDP scans                       */
+add_fd(ep, can_fd,   EPOLLIN);   /* SocketCAN AF_CAN                */
+
+struct epoll_event evs[16];
+const int TICK_MS = 50;                 /* 20 Hz control deadline */
+
+for (;;) {
+    int n = epoll_wait(ep, evs, 16, TICK_MS);
+    if (n &lt; 0 &amp;&amp; errno == EINTR) continue;   /* signal: just retry */
+
+    for (int i = 0; i &lt; n; i++) {            /* O(ready) dispatch  */
+        int fd = evs[i].data.fd;
+        if (evs[i].events &amp; (EPOLLERR | EPOLLHUP)) { reopen(fd); continue; }
+        if (fd == gps_fd)        drain_nmea(fd);
+        else if (fd == imu_fd)   drain_imu(fd);
+        else if (fd == lidar_fd) drain_lidar(fd);
+        else if (fd == can_fd)   drain_can(fd);
+    }
+
+    run_control_tick();   /* fires on every wake OR the 50 ms timeout */
+}
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 一個慢處理常式會卡住所有人</div>
+        <p>單執行緒的事件迴圈是協作式（cooperative）的：如果 <code>drain_lidar</code> 為了解析一筆巨大掃描而阻塞了 30 ms，GPS、IMU 與 CAN 全都得等，而你的 50 ms 控制節拍就會延誤。處理常式必須又快又不阻塞。沉重的 CPU 工作（點雲處理、SLAM）屬於<em>另一條</em>由佇列餵食的執行緒——把 I/O 迴圈保持精瘦，好讓控制截止期限神聖不可侵犯。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="your-turn"><span class="sec-no">8</span>換你了</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io08-edge-vs-level">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">你用 <code>EPOLLIN | EPOLLET</code> 註冊了一個 fd。一則 4 KB 的訊息抵達；你的處理常式只讀了前 1 KB，就回到 <code>epoll_wait</code>。那個 fd 上再也沒有新資料抵達。剩下的 3 KB 會怎樣？</div>
+        <ul class="ex-options">
+          <li data-correct="false">下一次 <code>epoll_wait</code> 會再次回報該 fd 可讀，所以你會拿到剩下的部分。</li>
+          <li data-correct="true">它原封不動地擺著沒讀——邊緣模式已經為這次抵達觸發過了，所以 <code>epoll_wait</code> 會保持沉默，直到<em>新</em>資料進來。你本該讀乾到 <code>EAGAIN</code>。</li>
+          <li data-correct="false">核心會在逾時後把它丟棄。</li>
+          <li data-correct="false">epoll 會自動替你重試讀取。</li>
+        </ul>
+        <div class="ex-explain">邊緣觸發通知在「到就緒」的<em>轉變</em>那一刻觸發，一次。那 3 KB 仍在 socket 緩衝區裡，但因為沒有新的轉變，<code>epoll_wait</code> 不會再提起這個 fd。ET 的約定是：每次醒來都在迴圈裡讀取，直到 <code>EAGAIN</code>。準位觸發模式會把它重新回報，這正是為什麼 LT 是更安全的預設。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io08-scan-cost" data-answer="9999" data-tol="1">
+        <div class="ex-head"><span class="badge">Q2</span> 算一算</div>
+        <div class="ex-q">你監看 $n = 10{,}000$ 個 fd，其中在某一次醒來時恰好有 $r = 1$ 個就緒。一次 <code>poll</code> 呼叫做 $O(n)$ 的工；一次 <code>epoll_wait</code> 呼叫做 $O(r)$ 的工。以每檢查一個 fd 算一「單位」，在這單一次醒來中，<code>poll</code> 比 <code>epoll_wait</code> 多做了幾個單位的工？（計算 $n - r$。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">units</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$n - r = 10{,}000 - 1 = 9{,}999$。<code>poll</code> 掃過全部一萬個描述子才找到那個就緒的；<code>epoll_wait</code> 只回傳那一個、檢查一個。這約一萬倍的差距在每一次迴圈迭代上重演——這就是 $O(n)$ 與 $O(r)$ 之間的漸近差異，也是 epoll 存在的全部理由。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io08-epoll-skeleton">
+        <div class="ex-head"><span class="badge">Q3</span> 程式挑戰——一個 epoll 事件迴圈骨架</div>
+        <div class="ex-q">用 C 寫一個最小的準位觸發 epoll 迴圈：建立實例、為讀取事件註冊單一個非阻塞 <code>fd</code>，然後以 100 ms 逾時等待，並在它就緒時把該 fd 讀乾。處理 <code>EINTR</code> 與回傳零的逾時。（假設 <code>set_nonblocking</code> 與 <code>handle</code> 已存在。）</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">三個系統呼叫包辦了所有的工：<code>epoll_create1</code> 造出實例、<code>epoll_ctl(... EPOLL_CTL_ADD ...)</code> 把 fd 註冊一次、<code>epoll_wait</code> 阻塞等候就緒事件。回傳 <code>0</code> 表示逾時已到；回傳 <code>-1</code> 且 <code>errno == EINTR</code> 表示有訊號中斷了它——再迴圈一次即可。</div></details>
+        <details class="ex-acc"><summary>看一個解答</summary><div class="acc-body">
+          <div class="codeblock"><div class="code-head">loop.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;sys/epoll.h&gt;
+#include &lt;errno.h&gt;
+#include &lt;unistd.h&gt;
+
+int run_loop(int fd) {
+    set_nonblocking(fd);
+
+    int ep = epoll_create1(EPOLL_CLOEXEC);
+    if (ep &lt; 0) return -1;
+
+    struct epoll_event ev = { .events = EPOLLIN, .data.fd = fd };
+    if (epoll_ctl(ep, EPOLL_CTL_ADD, fd, &amp;ev) &lt; 0) { close(ep); return -1; }
+
+    struct epoll_event out[8];
+    for (;;) {
+        int n = epoll_wait(ep, out, 8, 100 /* ms */);
+        if (n &lt; 0) {
+            if (errno == EINTR) continue;   /* signal: retry */
+            break;                          /* real error    */
+        }
+        if (n == 0) { periodic_tick(); continue; } /* timeout */
+
+        for (int i = 0; i &lt; n; i++) {
+            if (out[i].events &amp; EPOLLIN) {
+                char buf[1024]; ssize_t r;
+                /* LT: a single read is safe, but draining is fine too */
+                while ((r = read(out[i].data.fd, buf, sizeof buf)) &gt; 0)
+                    handle(buf, r);
+                /* r &lt; 0 with EAGAIN => buffer empty, normal */
+            }
+        }
+    }
+    close(ep);
+    return 0;
+}
+</code></pre></div>
+          <p>在準位觸發模式下，內層的讀乾迴圈是選用的——就算你只讀一次，只要還有資料，下一次 <code>epoll_wait</code> 就會把該 fd 重新回報。在 <code>EPOLLET</code> 之下，那條讀乾到 <code>EAGAIN</code> 的迴圈就變成必須的了。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章回顧</div>
+        <p>阻塞會把一條執行緒困在一個 fd 上；<code>O_NONBLOCK</code> 回傳 <code>EAGAIN</code> 而不睡著，但忙碌輪詢會燒掉一顆核心。一 fd 一執行緒對少數幾個 fd 沒問題，卻無法擴展——8 MiB 的堆疊與 $O(N)$ 的上下文切換會把它拖垮（C10k 問題）。<code>select</code>／<code>poll</code> 每次呼叫都重掃整個集合（$O(n)$）；<code>epoll</code> 把感興趣的集合留在核心裡，只回傳就緒的 fd（$O(r)$），而準位 vs 邊緣觸發（<code>EPOLLET</code> 讀乾到 <code>EAGAIN</code>）是其中的關鍵抉擇。<code>io_uring</code> 走得更遠——完成而非就緒，在共享的 SQ/CQ 環上批次化系統呼叫。最終的收穫就是事件迴圈模式：一條快取暖熱的執行緒多工著 GPS+IMU+LiDAR+CAN，同時讓 20 Hz 的控制截止期限神聖不可侵犯。下一章：從網卡（NIC）到 socket 的封包路徑。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+<script src="../../assets/io-sim.js"></script>
+<script>EM.ioDemo.ioMultiplex("sim-mux");</script>
+</body>
+</html>

@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>資料如何搬移：中斷、DMA 與 MMIO — 機器人的 Linux I/O</title>
+<link rel="stylesheet" href="../../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="07-interrupts-dma-mmio">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="開啟章節選單">☰</button>
+  <a class="brand" href="../../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · 第 07 章</span>
+  <span class="done-chip" id="done-chip">進行中</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · 第 07 章 · 它如何搬移</div>
+        <h1>資料如何搬移：中斷、DMA 與 MMIO</h1>
+        <p>裝置裡有一堆位元組，你的程式想要它們。在這兩件事之間，藏著機器人 I/O 裡最重要的單一效能決策：<em>究竟是誰在搬資料</em>。選錯了，一個話多的感測器就能餓死你的控制迴圈；選對了，一顆 100&nbsp;Mb/s 的光達（LiDAR）在 <code>top</code> 上幾乎看不出來。</p>
+        <div class="meta"><span>⏱ 約 40 分鐘</span><span>🧠 PIO / IRQ / DMA</span><span>⚡ /proc/interrupts</span><span>∑ 每個 IRQ 的 CPU%</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="three-ways"><span class="sec-no">1</span>搬移一個位元組的三種方式</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>先把畫面建起來</small></div>
+      <p>CPU 能把資料從裝置暫存器（register）搬進記憶體，剛好只有三種機制。其他一切——合併（coalescing）、NAPI、環形緩衝區（ring buffer）——都只是疊在這三者之上的最佳化。</p>
+      <ol>
+        <li><strong>程式化 I/O（programmed I/O, PIO）：</strong>CPU 自己在一個迴圈裡，把每一個字（word）從裝置暫存器讀出來，再寫進記憶體。CPU 本身<em>就是</em>那條資料路徑。簡單，但在高速率下是一場災難。</li>
+        <li><strong>中斷驅動 I/O（interrupt-driven I/O）：</strong>CPU 先去做別的工作；當裝置備妥資料時，它在一條實體訊號線上拉起一個<strong>中斷請求（IRQ, interrupt request）</strong>。CPU 停下手邊的事，跑一段處理常式（handler），把資料複製出來，然後恢復原本的工作。沒有忙等（busy-waiting）——但仍然是 CPU 在複製。</li>
+        <li><strong>DMA（直接記憶體存取，Direct Memory Access）：</strong>匯流排（bus）上一個專屬引擎，把位元組直接從裝置搬進 RAM，整個過程 CPU 不參與。CPU 只在最後收到<em>一個</em>中斷：「你的緩衝區滿了。」CPU 從頭到尾不碰負載資料（payload）。</li>
+      </ol>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> 信箱的比喻</div>
+        <p>PIO 是站在信箱前面，每一秒都去翻一次。中斷是一個門鈴，郵件來了它才響——響之前你都在做別的事。DMA 則是雇了一個快遞員，他安靜地把你的收件匣填滿，滿了才拍你一下。當郵件量往上飆，門鈴會響個不停，你什麼別的事都做不了；而那個快遞員卻能輕鬆地擴展。</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>為什麼 PIO 會死</small></div>
+      <p>假設一個裝置每秒送出 $R$ 個位元組，而 CPU 每次存取搬 $w$ 個位元組。在 PIO 之下，CPU 要執行</p>
+      <div class="math-box">$$ \text{accesses/s} = \frac{R}{w} $$</div>
+      <p>一顆 100&nbsp;Mb/s 的感測器是 $R = 12.5$&nbsp;MB/s。以 4-byte 的字存取來算，那就是<em>每一秒</em> $3.1\times10^{6}$ 次暫存器讀取，而每一次都是一個慢吞吞、不經快取（uncached）的 MMIO 存取，可能讓管線停頓（stall）數百奈秒。CPU 什麼別的都做不了。這就是為什麼 PIO 拿來設一個一次性的設定暫存器沒問題，拿來處理串流（stream）卻是致命的。</p>
+
+      <div class="mermaid">
+flowchart LR
+    DEV["裝置<br/>FIFO"] -->|"PIO：CPU 讀<br/>每個字"| CPU1["CPU"]
+    CPU1 -->|"逐字存入"| MEM1["RAM"]
+    DEV2["裝置<br/>FIFO"] -->|"DMA 引擎<br/>搬位元組"| MEM2["RAM"]
+    DEV2 -.->|"1 個完成 IRQ"| CPU2["CPU"]
+</div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="mmio-volatile"><span class="sec-no">2</span>MMIO：裝置看起來就像記憶體</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>有位址的暫存器</small></div>
+      <p>CPU 究竟是怎麼「讀一個裝置暫存器」的？在每一顆現代 SoC 上，答案都是<strong>記憶體映射 I/O（memory-mapped I/O, MMIO）</strong>。裝置的控制與狀態暫存器，被接到跟 RAM 同一條實體位址匯流排上，只是落在不同的範圍。讀位址 <code>0x0c260000</code> 並不會打到 DRAM——記憶體控制器會把它導向（route）一個周邊裝置。對 CPU 來說那是一次普通的載入／儲存（load/store）；對硬體來說那是一道命令。</p>
+      <p>核心（kernel）用 <code>ioremap()</code> 把那段實體範圍映射進驅動程式的虛擬位址空間。使用者空間（user space）也能在一個被允許的裝置上玩同樣的把戲，方法是對 <code>/dev/mem</code> 或一個 UIO 節點做 <code>mmap</code>（我們在第&nbsp;04&nbsp;章碰過 UIO 驅動程式）。你拿一個 C 結構指標蓋在那塊暫存器區上，再依欄位名稱去存取。</p>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>以及為什麼 <code>volatile</code> 是必要的</small></div>
+      <p>接下來是那個微妙、足以定生死的部分。編譯器假設記憶體是<em>正常的</em>：如果你讀同一個位址兩次、中間沒有任何寫入，它會把值快取起來，跳過第二次載入。但對於一個裝置會在編譯器背後偷偷更新的狀態暫存器，那個最佳化會把一個輪詢（polling）迴圈變成無窮迴圈。解法是 <code>volatile</code>：它禁止編譯器快取、重排（reorder）或省略這次存取。</p>
+
+      <div class="codeblock">
+        <div class="code-head">mmio.c <span class="lang">C</span></div>
+<pre><code class="language-c">#include &lt;fcntl.h&gt;
+#include &lt;sys/mman.h&gt;
+#include &lt;stdint.h&gt;
+
+#define STATUS_REG  0x18      /* offset within the register block */
+#define DATA_VALID  (1u &lt;&lt; 0)
+
+int fd = open("/dev/mem", O_RDWR | O_SYNC);          /* O_SYNC =&gt; uncached */
+volatile uint32_t *regs =
+    mmap(NULL, 0x1000, PROT_READ | PROT_WRITE,
+         MAP_SHARED, fd, 0x0c260000);                /* phys base, page-aligned */
+
+/* WRONG without volatile: compiler reads STATUS_REG once, loops forever. */
+while (!(regs[STATUS_REG / 4] &amp; DATA_VALID))
+    ;                                                /* spin until device sets bit */
+
+uint32_t sample = regs[0x20 / 4];                    /* read the data register */
+</code></pre>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——<code>volatile</code> 不是記憶體屏障（memory barrier）</div>
+        <p><code>volatile</code> 只擋住<em>編譯器</em>的重排。它<strong>無法</strong>阻止 CPU 或匯流排去重排，而且它不是原子的（atomic）。真正的驅動程式會用 <code>readl()</code>／<code>writel()</code> 這類存取器（accessor），它們會加上該架構的 MMIO 屏障，讓「先設定，再啟動」這種序列真的依序抵達裝置。在 ARM64（也就是 Orin）上，那個排序不是免費的——省掉屏障正是那個經典的「在 x86 上跑得好好的，到 ARM 上就卡死」的 bug。</p>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="interrupts-isr"><span class="sec-no">3</span>中斷：上半部、下半部、執行緒化 IRQ</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>門鈴與那條不成文的規則</small></div>
+      <p>中斷（interrupt）很粗暴：CPU 丟下正在跑的使用者空間或核心程式碼，遮蔽（mask）後續的中斷，跳進驅動程式的<strong>中斷服務常式（interrupt service routine, ISR）</strong>。在 ISR 跑的期間，那顆核心什麼別的都不做——不跑你的控制迴圈，不跑排程器（scheduler）。所以有一條不成文的規則：<strong>ISR 必須短。</strong>是微秒，不是毫秒。永遠不要睡眠，永遠不要去等一個可能阻塞（block）的鎖。</p>
+      <p>但真正的工作——剖析一個封包、喚醒一個讀取者、重新填一個 DMA 環——並不總是短的。Linux 用一個拆分來解決這件事：</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>階段</th><th>情境</th><th>做什麼</th><th>限制</th></tr></thead>
+        <tbody>
+          <tr><td><strong>上半部（top half）</strong>（硬中斷）</td><td>中斷情境，IRQ 已關閉</td><td>向裝置確認（ack）、把資料抓進一個緩衝區、排定其餘工作</td><td>快、原子、不能睡眠</td></tr>
+          <tr><td><strong>下半部（bottom half）</strong>（softirq／tasklet／workqueue）</td><td>softirq 或核心執行緒</td><td>粗重活——協定剖析、喚醒讀取者</td><td>可被延後；workqueue 可以睡眠</td></tr>
+          <tr><td><strong>執行緒化 IRQ（threaded IRQ）</strong></td><td>專屬的核心執行緒</td><td>整個處理常式，但可被排程（schedulable）且可被搶佔（preemptible）</td><td>PREEMPT_RT 上的預設做法</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>一個執行緒化的處理常式</small></div>
+      <p>現代主線（in-tree）的寫法是 <code>request_threaded_irq()</code>：一個極小的上半部，讓裝置安靜下來並回傳 <code>IRQ_WAKE_THREAD</code>，外加一個執行緒函式，在可被排程的情境裡做完其餘所有事。這對即時（real-time）機器人來說簡直是黃金——你可以給 IRQ 執行緒一個 RT 優先序，讓它跟你的控制迴圈公平競爭，而不是盲目地搶佔它。</p>
+
+      <div class="codeblock">
+        <div class="code-head">sensor_drv.c <span class="lang">C</span></div>
+<pre><code class="language-c">/* TOP HALF: runs in hard-IRQ context. Keep it tiny. */
+static irqreturn_t sensor_hardirq(int irq, void *dev_id)
+{
+    struct sensor *s = dev_id;
+    u32 st = readl(s-&gt;base + STATUS_REG);     /* MMIO read w/ barrier */
+    if (!(st &amp; IRQ_PENDING))
+        return IRQ_NONE;                       /* not ours (shared line) */
+    writel(st, s-&gt;base + STATUS_REG);          /* ack: clear the bit */
+    return IRQ_WAKE_THREAD;                    /* defer the real work */
+}
+
+/* BOTTOM HALF: runs in a kernel thread; may sleep, take mutexes. */
+static irqreturn_t sensor_thread(int irq, void *dev_id)
+{
+    struct sensor *s = dev_id;
+    parse_and_queue(s);                        /* heavy work, safely */
+    wake_up_interruptible(&amp;s-&gt;readq);          /* unblock read() */
+    return IRQ_HANDLED;
+}
+
+request_threaded_irq(s-&gt;irq, sensor_hardirq, sensor_thread,
+                     IRQF_SHARED, "sensor", s);
+</code></pre>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="proc-interrupts"><span class="sec-no">4</span>/proc/interrupts 與 IRQ 親和性（affinity）</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>中斷落在哪裡</small></div>
+      <p>每一個中斷都會被遞送到<em>某一顆</em> CPU 核心。在像 Orin 這樣的多核 SoC（12 顆 Cortex-A78AE 核心）上，那個選擇關係重大：如果一張高速率的網卡（NIC）和你的控制迴圈都落在 core 0，網卡的中斷風暴（interrupt storm）就會把迴圈的週期數偷走。解法是 <strong>SMP 親和性（SMP affinity）</strong>——把一個 IRQ 釘（pin）到一顆（或一組）你為它保留好的核心上。</p>
+      <p>先從讀取即時計數開始。<code>/proc/interrupts</code> 每個 IRQ 一列、每顆 CPU 一欄，外加控制器與裝置名稱：</p>
+
+      <div class="codeblock">
+        <div class="code-head">shell <span class="lang">bash</span></div>
+<pre><code class="language-bash"># one row per IRQ; columns are per-CPU counts
+cat /proc/interrupts
+#            CPU0     CPU1     CPU2     CPU3
+#  56:    1048576        0        0        0   GICv3  72 Edge    eth0
+#  58:        412        0        0        0   GICv3  98 Level   nvme0q0
+#  61:       2048        0       17        0   GICv3 104 Edge    can0
+
+# watch the rate live (delta per second)
+watch -n1 'grep -E "eth0|nvme" /proc/interrupts'
+
+# which core is IRQ 56 allowed on? (bitmask, hex)
+cat /proc/irq/56/smp_affinity        # e.g. fff = any of 12 cores
+cat /proc/irq/56/smp_affinity_list   # human form, e.g. 0-11</code></pre>
+      </div>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>釘住這個 IRQ</small></div>
+      <p>要把 IRQ 56（eth0）只搬到 core 3 上，就寫進那個位元遮罩（bitmask）。Core 3 是第 3 位元，所以遮罩是 <code>8</code>。如果你寧可用核心編號來指名，就用 <code>smp_affinity_list</code>。<strong>注意：</strong>在多數系統上，<code>irqbalance</code> 會以一個常駐程式（daemon）的身分執行，並且很樂意把你釘好的東西又拆掉——要做出可預測（deterministic）的設定，先把它停掉或遮蔽掉。</p>
+
+      <div class="codeblock">
+        <div class="code-head">shell <span class="lang">bash</span></div>
+<pre><code class="language-bash">sudo systemctl stop irqbalance            # stop it fighting you
+
+echo 8     | sudo tee /proc/irq/56/smp_affinity        # core 3 (bit 3)
+echo 3     | sudo tee /proc/irq/56/smp_affinity_list   # same, by name
+
+# pair it with isolating the control-loop core from the scheduler:
+#   kernel cmdline: isolcpus=2 nohz_full=2 rcu_nocbs=2
+# then run the 20 Hz loop pinned to core 2:
+taskset -c 2 ./control_loop</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> 那個行得通的模式</div>
+        <p>把感測器的 IRQ 放在幾顆「打雜（housekeeping）」核心上；把控制迴圈單獨放在一顆 <code>isolcpus</code> 核心上，並把親和性鎖死在它身上。這樣一來，光達的爆量想怎麼狂打它那顆核心都行——而迴圈那顆核心永遠看不到那個中斷。</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="dma-coherent-streaming"><span class="sec-no">5</span>DMA：描述子、一致性 vs 串流，以及快取陷阱</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>快遞員需要一個地址</small></div>
+      <p>DMA 把資料路徑交給一個引擎，但那個引擎講的是<em>實體</em>位址（或經 IOMMU 映射的匯流排位址），不是你的驅動程式用的虛擬位址。所以驅動程式必須（1）配置一個緩衝區，（2）取得它的 DMA 位址，（3）透過 MMIO 把那個位址加上一個長度寫進引擎，（4）啟動它，然後（5）處理一個完成中斷。對串流而言，那個緩衝區通常是一個<strong>描述子（descriptor）環</strong>，這樣引擎就能持續填滿一個個槽位（slot），同時你在抽乾較早的那些。</p>
+
+      <div class="layer"><span class="step">②</span> 數學 <small>整件事的重點</small></div>
+      <p>回想 §1 裡 PIO 的代價是每秒 $R/w$ 次存取。DMA 把 CPU 每條串流的中斷代價，壓縮成大約每個<em>緩衝區</em>一個 IRQ，而不是每個字一個。如果引擎填滿一個 $B$ 位元組的緩衝區才中斷一次，中斷率就降到</p>
+      <div class="math-box">$$ f_{\text{IRQ}}^{\text{DMA}} = \frac{R}{B} \quad\ll\quad f_{\text{IRQ}}^{\text{PIO/word}} = \frac{R}{w} $$</div>
+      <p>當 $R=12.5$&nbsp;MB/s、緩衝區 $B=64$&nbsp;KiB 時，那是 $\approx 190$ 個中斷/秒，而不是幾百萬次 CPU 複製。下面的模擬會把這件事講得很具體。</p>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>一致性 vs 串流</small></div>
+      <p>設定這個緩衝區有兩種方式，而它們的差別全在快取（cache）上：</p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>映射</th><th>API</th><th>快取</th><th>用於</th></tr></thead>
+        <tbody>
+          <tr><td><strong>一致性（coherent / consistent）</strong></td><td><code>dma_alloc_coherent()</code></td><td>由硬體維持一致／不經快取；不需手動同步</td><td>長壽命的環、描述子表</td></tr>
+          <tr><td><strong>串流（streaming）</strong></td><td><code>dma_map_single()</code> / <code>dma_map_sg()</code></td><td>有快取；<em>你</em>要在前後手動同步</td><td>對既有緩衝區做的一次性傳輸</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> 陷阱——快取一致性陷阱（在 ARM64 上非常真實）</div>
+        <p>用串流映射時，CPU 的快取和 DMA 引擎看到的記憶體是不一樣的。在裝置讀你的緩衝區<em>之前</em>，你必須呼叫 <code>dma_sync_single_for_device()</code>（把髒掉的快取行刷出去）；在裝置寫完<em>之後</em>、你讀之前，你必須呼叫 <code>dma_sync_single_for_cpu()</code>（讓陳舊的快取行失效）。略過這個同步，你就會讀到<strong>陳舊的快取資料</strong>，而新鮮的位元組正躺在 RAM 裡——這是一種間歇性、與對齊（alignment）相關的資料損毀，x86 那種窺探（snooping）硬體常常會幫你蓋掉，但 Orin 不會。這種 bug 會吃掉你好幾週。一個 IOMMU（在 Tegra 上是 SMMU）坐在路徑上，會把引擎的位址重新映射並設界限，但它並不會免去你做快取同步的責任。</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="coalescing-napi"><span class="sec-no">6</span>合併、NAPI，以及延遲—吞吐量這顆旋鈕</h2>
+
+      <div class="layer"><span class="step">①</span> 直覺 <small>連每個封包一個 IRQ 都嫌太多</small></div>
+      <p>DMA 給你每個緩衝區一個 IRQ——但一張忙碌的網卡，每秒收 10 萬個封包、每個各佔一個 DMA 填好的描述子，仍然會每秒打出 10 萬個中斷。每一個中斷都要付出情境的存／復原（context save/restore）、快取汙染（cache pollution），外加跑一趟處理常式的成本。有兩個機制能馴服它：</p>
+      <ul>
+        <li><strong>中斷合併（interrupt coalescing）：</strong>網卡會等到累積了 <em>N</em> 個封包<em>或</em>逾時 <em>T</em> 到了，才為這一批打出一個 IRQ。更少的中斷、更低的 CPU——代價是最多 $T$ 的額外延遲。這是一個直接的「吞吐量對延遲」轉盤，用 <code>ethtool -C</code> 來設。</li>
+        <li><strong>NAPI：</strong>當中斷開始成風暴時，驅動程式會<em>關掉</em> RX 中斷，改成在一個 softirq 裡<strong>輪詢（polling）</strong> DMA 環，一次輪詢抽乾很多個封包。當環抽乾了，它再把中斷重新開回來。兩全其美：閒時是中斷驅動（低延遲），負載下是輪詢驅動（沒有風暴）。</li>
+      </ul>
+
+      <div class="layer"><span class="step">③</span> 程式碼 <small>調整合併</small></div>
+      <div class="codeblock">
+        <div class="code-head">shell <span class="lang">bash</span></div>
+<pre><code class="language-bash"># see current coalescing settings for the LiDAR NIC
+ethtool -c eth0
+#   rx-usecs: 50        (wait up to 50 µs to batch RX IRQs)
+#   rx-frames: 64       (or until 64 frames arrive)
+
+# favor THROUGHPUT (batch harder; CPU drops, latency rises):
+sudo ethtool -C eth0 rx-usecs 100 rx-frames 128
+
+# favor LATENCY (fire sooner; more IRQs, more CPU):
+sudo ethtool -C eth0 rx-usecs 10  rx-frames 8
+
+# count how hard NAPI is working / drops under load:
+ethtool -S eth0 | grep -E "rx_packets|rx_dropped|napi"</code></pre>
+      </div>
+
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> 一個中斷的 CPU 預算</div>
+        <p>如果每一個中斷（進入＋處理常式＋離開）花掉 $c$ 秒的 CPU，而你每秒收 $f_{\text{IRQ}}$ 個，那麼穩態下的 CPU 占比就是 $\;\text{CPU} = f_{\text{IRQ}}\cdot c$。當 $c \approx 3\,\mu\text{s}$、每秒 10 萬個 IRQ，那是 $0.30 = 30\%$ 的一顆核心，光是花在開銷（overhead）上就沒了。合併到每秒 5 千個 IRQ，它就只剩 $1.5\%$。<strong>那顆省回來的核心，就是你控制迴圈的餘裕（headroom）。</strong></p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="sim-section"><span class="sec-no">7</span>看一看：PIO vs IRQ vs DMA 的 CPU 代價</h2>
+      <p>這就是整章濃縮成一張圖。拖動傳輸大小、字大小，以及 IRQ FIFO 深度（裝置在每次中斷前緩衝多少個字），看著每種方案下 CPU 的工作量。PIO 隨位元組數成長；IRQ 隨「位元組除以 FIFO」成長；DMA 則平在一。</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>🔀</span> 資料搬移：每次傳輸的 CPU 操作數</div>
+        <canvas id="sim-move"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 該注意的地方</div>
+        <p>PIO 那根長條（紅色）隨傳輸量線性成長——它就是 CPU 在逐字複製，而且大到把其他兩根矮成好幾個數量級。把 IRQ FIFO 加深，會讓橘色那根往左滑：更大的硬體 FIFO 意味著同樣的資料用更少的中斷（那就是硬體裡的合併）。DMA（綠色）不管傳輸量多大，永遠釘在 <strong>1</strong>——CPU 的代價是固定的，因為搬位元組的是引擎，不是 CPU。綠色和其餘兩根之間的那道縫，就是你買到的 CPU 餘裕。</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="real-lidar"><span class="sec-no">8</span>實際案例：AGX Orin USV 上的高速率光達</h2>
+
+      <div class="layer"><span class="step">④</span> 實際案例 <small>這才是整件事的重點</small></div>
+      <p>我們 USV 上那顆旋轉式光達，透過 Gigabit Ethernet 串流點雲（point cloud）——大約 $R \approx 100$&nbsp;Mb/s 的 UDP，全速旋轉時每秒數萬個封包。這顆 Jetson AGX Orin 同時還跑著那個 20&nbsp;Hz 的「航向與推力」控制迴圈，而它絕對不能卡頓（PID 課程的每一章都倚賴那個 $dt=50$&nbsp;ms 是貨真價實的）。</p>
+      <p>如果網卡在控制迴圈那顆核心上、每個封包都中斷一次，那麼在光達負載下迴圈就會錯過截止時間（deadline）。解法把本章每一個想法都疊了上去：</p>
+      <ul>
+        <li><strong>DMA：</strong>Orin 的乙太網路控制器把訊框（frame）直接 DMA 進 RAM 裡的一個環。CPU 從不複製封包本體。</li>
+        <li><strong>合併＋NAPI：</strong>在光達風暴下，驅動程式在 softirq 裡輪詢那個環，把 ~30k+ 個 IRQ/秒收攏成幾千個批次化的喚醒。</li>
+        <li><strong>親和性＋隔離：</strong><code>eth0</code> 的 IRQ 與它的 NAPI softirq 都被釘在一顆打雜核心上；控制迴圈獨占一顆 <code>isolcpus</code> 核心。</li>
+      </ul>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> 實際案例——讓它能出貨的那些數字</div>
+        <p>每秒 30k 個逐封包 IRQ、$c\approx3\,\mu$s，會光在中斷開銷上燒掉一顆核心的 $\sim$9%，把迴圈那顆核心的延遲拉出尖峰。在 DMA ＋合併到一顆<em>另外的</em>核心上 $\sim$3k 個批次化 IRQ/秒之後，控制迴圈那顆核心在 <code>/proc/interrupts</code> 裡顯示出近乎零的中斷活動，並且以微秒級的抖動（jitter）守住它的 50&nbsp;ms 週期。同一顆光達、同一份資料——差別全在<em>誰來搬位元組，以及中斷落在哪裡。</em></p>
+      </div>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>換你了</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io07-why-dma">
+        <div class="ex-head"><span class="badge">Q1</span> 觀念檢查</div>
+        <div class="ex-q">一個感測器持續串流 12.5&nbsp;MB/s。對這條資料路徑來說，為什麼 DMA 才是對的選擇，而不是逐字中斷的 PIO？</div>
+        <ul class="ex-options">
+          <li data-correct="false">DMA 每位元組比 CPU 的記憶體複製還快。</li>
+          <li data-correct="true">DMA 用一個專屬引擎來搬負載資料，所以 CPU 花的是每個緩衝區約 1 個中斷，而不是每秒幾百萬次暫存器讀取——把它解放出來給控制迴圈。</li>
+          <li data-correct="false">DMA 避開使用 RAM，所以沒有記憶體壓力。</li>
+          <li data-correct="false">DMA 不需要 <code>volatile</code> 關鍵字。</li>
+        </ul>
+        <div class="ex-explain">這個贏面不是純粹的複製速度——是<em>卸載（offload）</em>。PIO 讓 CPU 成為資料路徑（這裡是 $R/w \approx 3.1$M 次存取/秒）；DMA 把 CPU 的參與縮減成設定描述子、外加每個緩衝區接一個完成 IRQ。省回來的那些 CPU 週期數，正是讓那個 20&nbsp;Hz 迴圈準時的本錢。</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io07-cpu-percent" data-answer="9.0" data-tol="0.5">
+        <div class="ex-head"><span class="badge">Q2</span> 算一算</div>
+        <div class="ex-q">一張網卡每秒收 30,000 個封包，並且每個封包打出一個中斷。每個中斷花 $c = 3\,\mu\text{s}$ 的 CPU（進入＋處理常式＋離開）。中斷處理會吃掉單一顆核心的百分之幾？（提示：$\text{CPU} = f_{\text{IRQ}}\cdot c$，再 ×100。）</div>
+        <input class="ex-input" type="number" step="any" placeholder="數值"><span class="ex-unit">% 的一顆核心</span>
+        <button class="ex-check">檢查</button>
+        <div class="ex-explain">$\text{CPU} = 30000 \times 3\times10^{-6}\,\text{s} = 0.09 = 9.0\%$ 的一顆核心——光是中斷開銷，還沒做任何有用的工作。合併到每秒 3,000 個批次化 IRQ，它就掉到 $0.9\%$。那份省回來的餘裕，正是我們做合併、並把親和性釘離控制迴圈核心的理由。</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io07-affinity">
+        <div class="ex-head"><span class="badge">Q3</span> 實作——找出一個 IRQ 並釘住它</div>
+        <div class="ex-q">在 Orin 上，從 <code>/proc/interrupts</code> 找出乙太網路介面 <code>eth0</code> 的 IRQ 編號，然後把它只釘到 core 3 上並確認。把那個原本會把你的更動拆掉的常駐程式也考慮進去。</div>
+        <details class="ex-acc"><summary>提示</summary><div class="acc-body">IRQ 編號是那一列最左欄的數字，而那一列的名稱（最右欄）是 <code>eth0</code>。SMP 親和性住在 <code>/proc/irq/&lt;N&gt;/smp_affinity</code>，是一個十六進位的 CPU 位元遮罩——core 3 是第 3 位元。還有，別忘了 <code>irqbalance</code>。</div></details>
+        <details class="ex-acc"><summary>看一個解答</summary><div class="acc-body">
+          <div class="codeblock"><div class="code-head">shell <span class="lang">bash</span></div>
+<pre><code class="language-bash"># 1) find the IRQ number for eth0 (e.g. it prints "56")
+grep eth0 /proc/interrupts | awk -F: '{print $1}' | tr -d ' '
+
+# 2) stop the balancer so the pin sticks
+sudo systemctl stop irqbalance
+
+# 3) pin IRQ 56 to core 3 only (bit 3 =&gt; mask 0x8)
+echo 8 | sudo tee /proc/irq/56/smp_affinity
+#   or the readable form:
+echo 3 | sudo tee /proc/irq/56/smp_affinity_list
+
+# 4) confirm, then verify counts now climb only under CPU3
+cat /proc/irq/56/smp_affinity_list      # =&gt; 3
+watch -n1 'grep eth0 /proc/interrupts'</code></pre>
+          </div>
+          <p>那個中斷計數現在應該只在 CPU3 那一欄遞增。把這顆核心和你跑 <code>isolcpus</code>-釘住的控制迴圈那顆分開，光達風暴就永遠偷不走迴圈的週期數。</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> 本章回顧</div>
+        <p>搬位元組的三種方式：<strong>PIO</strong>（CPU 複製每個字，每秒 $R/w$ 次存取——對串流是致命的）、<strong>中斷</strong>（一個門鈴；ISR 上半部保持極小，真正的活交給下半部或執行緒化 IRQ），以及 <strong>DMA</strong>（一個引擎搬負載資料，CPU 每個緩衝區約收一個 IRQ）。裝置透過 <strong>MMIO</strong> 看起來就像記憶體，這正是為什麼暫存器存取需要 <code>volatile</code> 外加真正的屏障。<code>/proc/interrupts</code> 顯示 IRQ 落在哪裡；<code>/proc/irq/N/smp_affinity</code> 把它們釘離你的控制迴圈核心。DMA 串流映射在 ARM64 上要求<strong>快取同步</strong>，否則你會讀到陳舊資料。<strong>合併</strong>與 <strong>NAPI</strong> 拿一點點延遲換來大量的 CPU 餘裕——正是讓 Orin 那個 20&nbsp;Hz 迴圈在光達洪流下仍然準時的關鍵。下一章：當一條執行緒必須同時盯著許多 fd 時——<code>poll</code>、<code>epoll</code> 與 <code>io_uring</code>。</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="回到頂端">↑</button>
+<script src="../../assets/vendor/highlight.min.js"></script>
+<script src="../../assets/katex/katex.min.js"></script>
+<script src="../../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../../assets/vendor/mermaid.min.js"></script>
+<script src="../../assets/app.js"></script>
+<script src="../../assets/io-sim.js"></script>
+<script>EM.ioDemo.dataMovement("sim-move");</script>
+</body>
+</html>

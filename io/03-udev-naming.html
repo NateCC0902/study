@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>udev &amp; Persistent Naming — Linux I/O for Robotics</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-io" data-course="io" data-track="main" data-chapter="03-udev-naming">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> Linux&nbsp;I/O</a>
+  <span class="spacer"></span>
+  <span class="track-pill">I/O · Ch 03</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">Linux I/O · Chapter 03 · Devices</div>
+        <h1>udev &amp; Persistent Naming: making <code>/dev/gps</code> mean GPS, forever</h1>
+        <p>You wired a GPS and an IMU into the USV's USB hub, opened <code>/dev/ttyUSB0</code> for the GPS, shipped it, and a week later the boat steered toward a buoy because a cold-boot race handed <code>ttyUSB0</code> to the IMU instead. This chapter is how you make a device's name follow the <em>device</em>, not the order the kernel happened to probe it.</p>
+        <div class="meta"><span>⏱ ~40 min</span><span>🧠 uevents &amp; rules</span><span>⚡ hands-on</span><span>∑ n! orderings</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="the-renumbering-problem"><span class="sec-no">1</span>The renumbering problem</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>why the number is a lie</small></div>
+      <p>Kernel device nodes like <code>ttyUSB0</code>, <code>ttyUSB1</code>, <code>video0</code>, <code>sda</code> are numbered in the order the kernel <em>enumerates</em> them, which is the order their drivers finish probing. That order is not stable. It depends on USB hub topology, on which device powers up and trains its link first, on driver load order, and on whether you replugged something. Two identical FTDI adapters can swap numbers between two boots of the same machine. The index is an arrival ticket, not an identity.</p>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — the kernel name is a race result</div>
+        <p>Opening <code>/dev/ttyUSB0</code> by name is opening "whichever serial device probed first this boot." On a robot with two or more serial dongles, that is a coin flip you re-run on every power cycle. Never hard-code a kernel-assigned index in production.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Math <small>how bad does it get</small></div>
+      <p>Quantify the gamble. If you have $n$ otherwise-indistinguishable serial devices on the bus, the kernel can assign the indices <code>ttyUSB0..ttyUSB(n-1)</code> in any one-to-one mapping. The number of distinct orderings is the number of permutations of $n$ objects:</p>
+      <div class="math-box">$$ P(n) = n! = n \times (n-1) \times \cdots \times 2 \times 1 $$</div>
+      <p>Only <strong>one</strong> of those orderings is the one your code assumes, so the probability that a random boot hands you the layout you hard-coded is $1/n!$. The factorial bites fast: with two devices there are $2! = 2$ orderings (a 50% chance of being wrong), with three there are $3! = 6$, with four $4! = 24$, with five $5! = 120$. A USV carrying GPS, IMU, a USB-to-CAN adapter and a USB modem already lives in a 24-way lottery every time it boots.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>$n$ devices</th><th>$n!$ orderings</th><th>$P(\text{your layout})=1/n!$</th></tr></thead>
+        <tbody>
+          <tr><td>2</td><td>2</td><td>50%</td></tr>
+          <tr><td>3</td><td>6</td><td>16.7%</td></tr>
+          <tr><td>4</td><td>24</td><td>4.2%</td></tr>
+          <tr><td>5</td><td>120</td><td>0.83%</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> The whole chapter in one line</div>
+        <p>Stop naming devices by arrival index. Name them by <em>identity</em> — vendor, product, serial number, or physical port — and let a userspace daemon, <strong>udev</strong>, create a stable alias the moment the device appears.</p>
+      </div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="uevent-to-udev-flow"><span class="sec-no">2</span>From kernel uevent to a node in <code>/dev</code></h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>who actually makes the node</small></div>
+      <p>When a device appears, the kernel does <em>not</em> decide what to call it in <code>/dev</code>. The kernel creates the device internally, registers it in the device model (the <code>/sys</code> tree from Chapter 02), and then fires a small message called a <strong>uevent</strong> — a few lines of <code>KEY=value</code> text — up to userspace over a netlink socket (<code>NETLINK_KOBJECT_UEVENT</code>). A daemon, <code>systemd-udevd</code>, listens on that socket, matches the event against a pile of <em>rules</em>, and is the thing that actually applies ownership, mode, and your symlinks.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> Mechanism vs. policy</div>
+        <p>The kernel supplies the <em>mechanism</em> (the device exists, here are its attributes). udev supplies the <em>policy</em> (call it this, own it by that group, symlink it there). That split is why naming is configurable at all: it lives in userspace text files you control, not in the kernel.</p>
+      </div>
+
+      <p>Note that <code>devtmpfs</code> (Chapter 02) already gives you a bare node like <code>/dev/ttyUSB0</code> very early — the kernel pre-populates it so the system isn't node-less before udev runs. udev then comes along to relabel / chmod / symlink it according to policy. Both are involved: devtmpfs makes the raw node, udev applies the rules.</p>
+
+      <div class="layer"><span class="step">②</span> The flow <small>follow one plug-in event</small></div>
+      <div class="mermaid">
+flowchart TD
+    A["Device plugged in<br/>(USB enumerate)"] --> B["Kernel: bind driver,<br/>register in /sys"]
+    B --> C["devtmpfs creates<br/>bare /dev node"]
+    B --> D["Kernel emits uevent<br/>ACTION=add, KEY=val…"]
+    D -->|"netlink socket"| E["systemd-udevd<br/>receives event"]
+    E --> F["Walk rules.d<br/>(etc + lib)"]
+    F --> G{"All match keys<br/>== pass?"}
+    G -->|"yes"| H["Apply assignments<br/>SYMLINK+= MODE= RUN+="]
+    G -->|"no"| I["Skip this rule"]
+    H --> J["/dev/gps points at ttyUSB0<br/>owned, RUN done"]
+</div>
+
+      <p>You can watch the raw events live. <code>udevadm monitor</code> prints both the kernel-side uevent and the udev-side processed event as you plug things in — invaluable when a rule "isn't firing":</p>
+
+      <div class="codeblock">
+        <div class="code-head">watch events as they happen <span class="lang">bash</span></div>
+<pre><code class="language-bash"># --kernel = raw uevents, --udev = post-rule events, --property dumps KEY=val
+udevadm monitor --kernel --udev --property
+# plug the GPS in now; you'll see KERNEL[..] add /devices/3610000.usb/usb1/1-2/1-2.1/1-2.1:1.0/ttyUSB0/tty/ttyUSB0
+</code></pre>
+      </div>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="rule-anatomy"><span class="sec-no">3</span>Rule anatomy: match keys vs. assignments</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>a rule is "if all this, then do that"</small></div>
+      <p>A udev rule is a single line: a comma-separated list of <strong>match keys</strong> (conditions) followed by <strong>assignment keys</strong> (actions). udev reads every rule for every event; if <em>all</em> the match keys on a line are true, it runs that line's assignments. The single most common beginner mistake is confusing the two kinds of <code>=</code>, so burn this in:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Operator</th><th>Kind</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>==</code></td><td>match (test)</td><td>"this key <em>equals</em> this value?" — a condition</td></tr>
+          <tr><td><code>!=</code></td><td>match (test)</td><td>"this key is <em>not</em> this value?"</td></tr>
+          <tr><td><code>=</code></td><td>assign</td><td>set the value (replaces any prior list)</td></tr>
+          <tr><td><code>+=</code></td><td>assign</td><td>append to a list-valued key (e.g. add a symlink)</td></tr>
+          <tr><td><code>:=</code></td><td>assign</td><td>set <em>and</em> lock — later rules can't change it</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — <code>=</code> where you meant <code>==</code></div>
+        <p>Writing <code>SUBSYSTEM="tty"</code> (single <code>=</code>) doesn't test the subsystem — it tries to <em>assign</em> to a read-only match key, and your rule silently does the wrong thing or nothing. Conditions are <strong>always</strong> <code>==</code> / <code>!=</code>; actions are <code>=</code> / <code>+=</code> / <code>:=</code>. Get this one backwards and you will lose an afternoon.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> The vocabulary <small>the keys you'll actually use</small></div>
+      <p>Match keys you'll lean on: <code>SUBSYSTEM</code> (e.g. <code>tty</code>, <code>net</code>, <code>block</code>), <code>KERNEL</code> (the kernel name, supports globs like <code>ttyUSB*</code>), <code>ATTRS{idVendor}</code> (a sysfs attribute on the device <em>or any parent</em> — this is how you reach up to the USB device for <code>idVendor</code>), and <code>ENV{ID_SERIAL}</code> (a property set by an earlier rule, like <code>ID_SERIAL</code>). Assignment keys: <code>NAME</code> (network interfaces — renames the device itself), <code>SYMLINK+=</code> (add a stable alias in <code>/dev</code>), <code>MODE</code>, <code>OWNER</code>, <code>GROUP</code>, and <code>RUN+=</code>.</p>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> <code>ATTR</code> vs. <code>ATTRS</code> (one letter, big difference)</div>
+        <p><code>ATTR{idVendor}</code> matches a sysfs attribute on the <em>current</em> device only. <code>ATTRS{idVendor}</code> (with the S, for "search") walks <em>up the parent chain</em> until it finds a device with that attribute. A <code>ttyUSB</code> node has no <code>idVendor</code> of its own — that lives on the USB device several levels up — so you almost always want <code>ATTRS{idVendor}</code>, not <code>ATTR{idVendor}</code>.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="finding-match-keys"><span class="sec-no">4</span>Finding the match keys with <code>udevadm info</code></h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>interrogate the device first</small></div>
+      <p>Never guess attributes — ask. <code>udevadm info --attribute-walk</code> (short <code>-a</code>) starts at the device node and walks up the parent chain, printing every <code>ATTRS{idVendor}</code>-style key you can match at each level. This is the single command that turns "I have a dongle" into "I have a rule."</p>
+
+      <div class="codeblock">
+        <div class="code-head">walk the device tree for the GPS <span class="lang">bash</span></div>
+<pre><code class="language-bash">udevadm info --attribute-walk --name=/dev/ttyUSB0
+# or the short form:
+udevadm info -a -n /dev/ttyUSB0
+</code></pre>
+      </div>
+
+      <p>The output is a stack of blocks, the device itself first, then each parent. Read it from the top down and grab the keys from the <em>parent</em> block that has the USB identifiers:</p>
+
+      <div class="codeblock">
+        <div class="code-head">trimmed udevadm output <span class="lang">bash</span></div>
+<pre><code class="language-bash">  looking at device '/devices/3610000.usb/usb1/1-2/1-2.1/1-2.1:1.0/ttyUSB0/tty/ttyUSB0':
+    KERNEL=="ttyUSB0"
+    SUBSYSTEM=="tty"
+
+  looking at parent device '/devices/3610000.usb/usb1/1-2/1-2.1/1-2.1:1.0/ttyUSB0':
+    KERNELS=="ttyUSB0"
+    SUBSYSTEMS=="usb-serial"
+
+  looking at parent device '/devices/3610000.usb/usb1/1-2/1-2.1':   # &lt;-- the USB device
+    KERNELS=="1-2.1"
+    SUBSYSTEMS=="usb"
+    ATTRS{idVendor}=="067b"
+    ATTRS{idProduct}=="2303"
+    ATTRS{serial}=="0001"
+    ATTRS{product}=="USB-Serial Controller"
+</code></pre>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What to harvest</div>
+        <p>You want <code>idVendor</code> + <code>idProduct</code> to pick the <em>model</em>, and <code>serial</code> to pick the <em>individual unit</em>. Two different-model dongles? Vendor+product is enough. Two <em>identical</em> dongles (same vendor/product)? You <strong>must</strong> use <code>serial</code> to tell them apart — or fall back to physical port (§7).</p>
+      </div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Don't mix attributes from different parent blocks</div>
+        <p>All the <code>ATTRS{idVendor}</code>-style keys you put in one rule must come from <strong>a single parent block</strong>. udev matches them against one device on the chain — it won't stitch <code>idVendor</code> from one parent to <code>serial</code> from another. Take them all from the <code>SUBSYSTEMS=="usb"</code> block.</p>
+      </div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="writing-the-symlink-rule"><span class="sec-no">5</span>Writing the stable-symlink rule</h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>the rule itself</small></div>
+      <p>Rules live in <code>/etc/udev/rules.d/</code> (your overrides) and <code>/lib/udev/rules.d/</code> (the distro's). Files are read in <strong>lexical order by filename</strong> — that's why everyone prefixes with a number, e.g. <code>99-usv.rules</code>, to run late and win. Here is the rule that pins the GPS:</p>
+
+      <div class="codeblock">
+        <div class="code-head">/etc/udev/rules.d/99-usv.rules <span class="lang">bash</span></div>
+<pre><code class="language-bash"># GPS: PL2303 dongle, serial 0001 -&gt; /dev/gps
+SUBSYSTEM=="tty", ATTRS{idVendor}=="067b", ATTRS{idProduct}=="2303", \
+  ATTRS{serial}=="0001", SYMLINK+="gps", GROUP="dialout", MODE="0660"
+
+# IMU: identical-model dongle, different serial 0002 -&gt; /dev/imu
+SUBSYSTEM=="tty", ATTRS{idVendor}=="067b", ATTRS{idProduct}=="2303", \
+  ATTRS{serial}=="0002", SYMLINK+="imu", GROUP="dialout", MODE="0660"
+</code></pre>
+      </div>
+
+      <p>Read it as a sentence: "<em>if</em> the subsystem is <code>tty</code> <em>and</em> the parent USB vendor is <code>067b</code> <em>and</em> product is <code>2303</code> <em>and</em> serial is <code>0001</code>, <em>then</em> add a symlink <code>/dev/gps</code> pointing at this node, set the group to <code>dialout</code>, and the mode to <code>0660</code>." Every <code>==</code> is a condition; every <code>+=</code>/<code>=</code> is an action. The backslash just continues the line for readability — a real rule is one logical line.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> Why a symlink, not a rename</div>
+        <p><code>SYMLINK+=</code> <em>adds</em> <code>/dev/gps</code> as an alias while <code>/dev/ttyUSB0</code> still exists — nothing else that relied on the kernel name breaks. Renaming the node outright (changing <code>NAME</code>) is reserved for network interfaces (§7); for char/block devices you symlink. And <code>+=</code> (not <code>=</code>) means you can add several symlinks to the same device without clobbering ones other rules added.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> The math of permissions <small>what 0660 means</small></div>
+      <p>The <code>MODE</code> is an octal permission triple — owner, group, other — each digit a sum of read (4), write (2), execute (1). So <code>0660</code> is read+write for owner ($4+2=6$), read+write for group ($6$), nothing for other ($0$): $\,rw\text{-}\,rw\text{-}\,---$. Paired with <code>GROUP="dialout"</code>, any process whose user is in the <code>dialout</code> group can open the serial port without root. That's exactly what you want for a robot service that should not run as root.</p>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="testing-rules"><span class="sec-no">6</span>Testing: <code>udevadm test</code> and <code>trigger</code></h2>
+
+      <div class="layer"><span class="step">③</span> Code <small>don't reboot to find out</small></div>
+      <p>After editing rules, reload them, then either dry-run a single device or re-fire events for a whole subsystem. Two distinct commands, two distinct jobs:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Command</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td><code>udevadm control --reload</code></td><td>reload rules from disk (do this after every edit)</td></tr>
+          <tr><td><code>udevadm test /sys/class/tty/ttyUSB0</code></td><td><em>dry-run</em>: simulate the event, print which rules matched and what they'd do — makes no real changes</td></tr>
+          <tr><td><code>udevadm trigger --action=add</code></td><td>re-emit <code>add</code> uevents for existing devices, so rules apply <em>now</em> without replugging</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="codeblock">
+        <div class="code-head">the edit → test → apply loop <span class="lang">bash</span></div>
+<pre><code class="language-bash">sudo nano /etc/udev/rules.d/99-usv.rules     # edit
+sudo udevadm control --reload                # reload rules
+
+# dry-run against the real device path under /sys (no changes made):
+sudo udevadm test /sys/class/tty/ttyUSB0 2&gt;&amp;1 | grep -E 'SYMLINK|GROUP|MODE'
+
+# apply for real to currently-attached tty devices:
+sudo udevadm trigger --subsystem-match=tty --action=add
+ls -l /dev/gps /dev/imu                       # verify the symlinks exist
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> <code>test</code> simulates, <code>trigger</code> commits</div>
+        <p><code>udevadm test</code> tells you <em>what would happen</em> and is safe to run all day. <code>udevadm trigger</code> actually replays the events and applies the rules. The classic workflow is: reload, <code>test</code> until the output shows your <code>SYMLINK 'gps'</code> line, then <code>trigger</code> to make it real — no reboot, no unplugging.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="by-id-by-path-net"><span class="sec-no">7</span><code>by-id</code>, <code>by-path</code> &amp; predictable net names</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>you may not even need a rule</small></div>
+      <p>The default udev rules already build two stable directories for serial devices, so for a quick fix you can skip writing rules entirely:</p>
+      <ul>
+        <li><code>/dev/serial/by-id/</code> — keyed on vendor+product+serial. Stable across reboots and across <em>ports</em>. Use this when each device has a unique serial.</li>
+        <li><code>/dev/serial/by-path/</code> — keyed on the physical USB topology (which hub, which port). Stable as long as you don't move the cable. Use this for <em>identical</em> devices with no usable serial — the port becomes the identity.</li>
+      </ul>
+
+      <div class="codeblock">
+        <div class="code-head">the symlinks udev already made for you <span class="lang">bash</span></div>
+<pre><code class="language-bash">ls -l /dev/serial/by-id/
+# usb-Prolific_USB-Serial_Controller_0001-if00-port0 -&gt; ../../ttyUSB0
+
+ls -l /dev/serial/by-path/
+# platform-3610000.usb-usb-0:2.1:1.0-port0 -&gt; ../../ttyUSB0
+</code></pre>
+      </div>
+
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> by-id for unique serials, by-path for "same model in known ports"</div>
+        <p>Two GPS units with distinct serials → <code>by-id</code> (or a serial-keyed rule). Two <em>identical</em> sensors that you always plug into the same two ports → <code>by-path</code> (or an <code>ATTRS{devpath}</code> rule), because the port is the only thing that differs.</p>
+      </div>
+
+      <div class="layer"><span class="step">②</span> Predictable network interfaces <small>same problem, the <code>.link</code> answer</small></div>
+      <p>NICs have the identical race: the kernel's old scheme named them <code>eth0</code>, <code>eth1</code> in probe order, so a USB-Ethernet adapter could steal <code>eth0</code> from the onboard port. systemd's fix is <strong>Predictable Network Interface Names</strong> — names derived from the hardware location, like <code>enp1s0</code> (PCI bus 1, slot 0) or <code>enx</code> + MAC. They're ugly but deterministic. To pin a <em>chosen</em> name, write a systemd <code>.link</code> file that matches on the MAC and renames the interface:</p>
+
+      <div class="codeblock">
+        <div class="code-head">/etc/systemd/network/10-sensor-net.link <span class="lang">bash</span></div>
+<pre><code class="language-bash">[Match]
+MACAddress=00:04:4b:aa:bb:cc
+
+[Link]
+Name=eth_lidar
+</code></pre>
+      </div>
+
+      <p>A <code>.link</code> file is processed by <code>systemd-udevd</code> very early (during the net device's <code>add</code> event), before the interface is brought up, which is why renaming is safe there — unlike a late udev <code>NAME=</code> rule, which the kernel may reject once the interface is in use. Stick to the <code>.link</code> mechanism for renaming NICs.</p>
+
+      <div class="callout real">
+        <div class="c-title"><span class="ico">🏭</span> Real case — the Jetson AGX Orin USV bring-up</div>
+        <p>On the USV's AGX Orin we ship <code>99-usv.rules</code> pinning the u-blox GPS to <code>/dev/gps</code> (serial-keyed) and the VectorNav IMU to <code>/dev/imu</code>, both <code>GROUP="dialout", MODE="0660"</code> so the ROS 2 driver runs as the unprivileged <code>usv</code> user. The onboard Ethernet port that carries the LiDAR is pinned to <code>eth_lidar</code> via a MAC-matched <code>.link</code> file, so a plugged-in USB-Ethernet dongle (for the field laptop) can never steal it. Result: every launch file opens <code>/dev/gps</code>, <code>/dev/imu</code>, and binds the LiDAR socket to <code>eth_lidar</code> — names that survive reboots, replugs, and added hardware.</p>
+      </div>
+
+      <!-- ============================================================ §8 -->
+      <h2 id="run-mode-group"><span class="sec-no">8</span><code>RUN</code>, <code>MODE</code>, <code>GROUP</code>: ownership and side effects</h2>
+
+      <div class="layer"><span class="step">④</span> Real case <small>making the device usable, and reactive</small></div>
+      <p>A pinned name is half the battle; the process also has to be <em>allowed</em> to open it, and sometimes something should happen <em>when</em> it appears. That's what the remaining assignment keys do:</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Key</th><th>Effect</th></tr></thead>
+        <tbody>
+          <tr><td><code>OWNER="usv"</code></td><td>set the node's owning user</td></tr>
+          <tr><td><code>GROUP="dialout"</code></td><td>set the owning group (members get group access)</td></tr>
+          <tr><td><code>MODE="0660"</code></td><td>permission bits (rw for owner+group, none for other)</td></tr>
+          <tr><td><code>RUN+="program"</code></td><td>run a short program <em>after</em> the device is set up</td></tr>
+          <tr><td><code>TAG+="systemd"</code></td><td>let a systemd unit be <code>BindsTo=</code> this device</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Pitfall — <code>RUN</code> is not a place to start daemons</div>
+        <p><code>RUN+=</code> runs <em>synchronously inside the udev event</em> and is killed if it doesn't return fast. It is for quick setup — set FTDI <code>latency_timer</code>, bring up a CAN link, drop a flag file — <strong>never</strong> for launching a long-running service. To start a service on plug-in, tag the device with <code>systemd</code> and use a <code>BindsTo=</code>/<code>WantedBy=</code> unit. Blocking in <code>RUN</code> stalls all of udev.</p>
+      </div>
+
+      <div class="codeblock">
+        <div class="code-head">RUN for a quick, bounded setup task <span class="lang">bash</span></div>
+<pre><code class="language-bash"># When the FTDI GPS appears, drop its read latency from 16ms to 1ms.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6001", \
+  ATTRS{serial}=="A50285BI", SYMLINK+="gps", \
+  RUN+="/bin/sh -c 'echo 1 &gt; /sys%p/device/latency_timer'"
+</code></pre>
+      </div>
+
+      <p>Here <code>%p</code> expands to the kernel device path under <code>/sys</code>, so the rule writes the FTDI's <code>latency_timer</code> attribute (from Chapter 02) the instant the device is recognized — a one-shot, bounded write, exactly what <code>RUN</code> is for.</p>
+
+      <!-- ============================================================ §9 -->
+      <h2 id="your-turn"><span class="sec-no">9</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="io03-match-vs-assign">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">In a udev rule, which operator <em>tests</em> a condition (a match key) rather than performing an action?</div>
+        <ul class="ex-options">
+          <li data-correct="false"><code>=</code> — it assigns the value to compare against.</li>
+          <li data-correct="true"><code>==</code> — match keys test equality; <code>=</code>/<code>+=</code>/<code>:=</code> assign.</li>
+          <li data-correct="false"><code>+=</code> — it appends the condition to a list.</li>
+          <li data-correct="false"><code>:=</code> — it locks the condition so it can't change.</li>
+        </ul>
+        <div class="ex-explain">Match keys use <code>==</code> (or <code>!=</code>) and are conditions — "is this attribute equal to that value?". Assignment keys use <code>=</code> (set), <code>+=</code> (append, as in <code>SYMLINK+=</code>), or <code>:=</code> (set and lock). Writing <code>SUBSYSTEM="tty"</code> with a single <code>=</code> is the classic bug: it tries to assign to a read-only match key instead of testing it.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="io03-orderings" data-answer="120">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">The USV has 5 indistinguishable USB-serial devices on one hub. In how many distinct orderings can the kernel assign <code>ttyUSB0..ttyUSB4</code>? (Hint: $n!$.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">orderings</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$5! = 5 \times 4 \times 3 \times 2 \times 1 = 120$. Only one of those 120 is the layout your code assumes, so a blind boot has a $1/120 \approx 0.83\%$ chance of being right. Serial-keyed udev symlinks make the chance 100%.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="io03-write-rule">
+        <div class="ex-head"><span class="badge">Q3</span> Hands-on — write a working rule</div>
+        <div class="ex-q">A u-blox GPS reports <code>ATTRS{idVendor}=="1546"</code>, <code>ATTRS{idProduct}=="01a8"</code>, <code>ATTRS{serial}=="DBE1F2C0"</code> on the <code>tty</code> subsystem. Write a single udev rule that creates <code>/dev/gps</code>, owned by group <code>dialout</code> with mode <code>0660</code>. Then give the two commands to apply it without rebooting.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">Conditions use <code>==</code>; the symlink uses <code>SYMLINK+=</code>. Reload the rules, then re-fire the <code>add</code> event for the <code>tty</code> subsystem.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <div class="codeblock"><div class="code-head">/etc/udev/rules.d/99-usv.rules <span class="lang">bash</span></div><pre><code class="language-bash">SUBSYSTEM=="tty", ATTRS{idVendor}=="1546", ATTRS{idProduct}=="01a8", \
+  ATTRS{serial}=="DBE1F2C0", SYMLINK+="gps", GROUP="dialout", MODE="0660"
+</code></pre></div>
+          <div class="codeblock"><div class="code-head">apply it <span class="lang">bash</span></div><pre><code class="language-bash">sudo udevadm control --reload
+sudo udevadm trigger --subsystem-match=tty --action=add
+ls -l /dev/gps        # verify the symlink resolves to the right ttyUSB*
+</code></pre></div>
+          <p>Every <code>==</code> is a condition on the parent USB device (so it must be <code>ATTRS</code>, not <code>ATTR</code>); <code>SYMLINK+=</code> adds the alias without disturbing the kernel name; <code>GROUP</code>+<code>MODE</code> let your non-root service open the port. <code>--reload</code> picks up the file, <code>trigger</code> replays the event so the link appears immediately.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>Kernel indices like <code>ttyUSB0</code> are arrival tickets — with $n$ devices there are $n!$ possible orderings and only one is yours. The kernel emits a uevent; <code>systemd-udevd</code> matches it against rules and applies policy. A rule is match keys (<code>==</code>/<code>!=</code>) then assignments (<code>=</code>/<code>+=</code>/<code>:=</code>); find the keys with <code>udevadm info -a -n /dev/ttyUSB0</code>, key on <code>ATTRS{idVendor/idProduct/serial}</code>, add <code>SYMLINK+="gps"</code> with <code>GROUP</code>/<code>MODE</code>, then <code>udevadm test</code> (dry-run) and <code>trigger</code> (apply) — no reboot. For free, use <code>/dev/serial/by-id</code> and <code>by-path</code>; for NICs, pin names with a systemd <code>.link</code> file. Next: drivers, modules, and firmware — what actually binds to the device behind that name.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+</body>
+</html>

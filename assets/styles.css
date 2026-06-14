@@ -483,6 +483,7 @@ details.ex-acc .acc-body { padding: 4px 14px 14px; border-top: 1px solid var(--b
 /* per-course accents for chapter pages (embedded uses track-arduino/stm32) */
 body.course-pid  { --accent:#3fb950; --accent-2:#56d364; }
 body.course-mldl { --accent:#a371f7; --accent-2:#c8a6ff; }
+body.course-io   { --accent:#f0883e; --accent-2:#ff9f5a; }
 
 /* language toggle (injected by app.js into .topbar) */
 .lang-toggle {
@@ -498,13 +499,16 @@ body.course-mldl { --accent:#a371f7; --accent-2:#c8a6ff; }
 .track-card.embedded { --accent:#33b1ff; --accent-2:#6cc4ff; }
 .track-card.mldl     { --accent:#a371f7; --accent-2:#c8a6ff; }
 .track-card.pid      { --accent:#3fb950; --accent-2:#56d364; }
+.track-card.io       { --accent:#f0883e; --accent-2:#ff9f5a; }
 .track-card.embedded:hover { border-color:#33b1ff; }
 .track-card.mldl:hover     { border-color:#a371f7; }
 .track-card.pid:hover      { border-color:#3fb950; }
+.track-card.io:hover       { border-color:#f0883e; }
 .track-card.embedded .tc-logo { background: color-mix(in srgb,#33b1ff 22%, transparent); }
 .track-card.mldl .tc-logo     { background: color-mix(in srgb,#a371f7 22%, transparent); }
 .track-card.pid .tc-logo      { background: color-mix(in srgb,#3fb950 22%, transparent); }
-.hub-hero h1 .accent { background: linear-gradient(90deg,#33b1ff,#a371f7,#3fb950); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; }
+.track-card.io .tc-logo       { background: color-mix(in srgb,#f0883e 22%, transparent); }
+.hub-hero h1 .accent { background: linear-gradient(90deg,#33b1ff,#a371f7,#3fb950,#f0883e); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; }
 
 /* sim controls: toggle (checkbox) + select, alongside the existing range sliders */
 .sim .controls label.toggle { flex-direction: row; align-items: center; gap: 8px; min-width: 0; cursor: pointer; }

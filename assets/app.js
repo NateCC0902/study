@@ -117,6 +117,31 @@
           ]
         }
       }
+    },
+
+    io: {
+      title: "Linux I/O for Robotics", zh: "機器人的 Linux I/O", short: "Linux I/O",
+      icon: "🔀", accent: "#f0883e", accent2: "#ff9f5a", base: "io/",
+      tracks: {
+        main: {
+          title: "Course", zh: "課程", sub: "12 lessons + glossary", dir: "",
+          chapters: [
+            { id: "01-io-model",                 num: "01", file: "01-io-model.html",                 title: "The Linux I/O Model",                  zh: "Linux I/O 模型" },
+            { id: "02-devices-sysfs",            num: "02", file: "02-devices-sysfs.html",            title: "Devices as Files: /dev & sysfs",       zh: "裝置即檔案：/dev 與 sysfs" },
+            { id: "03-udev-naming",              num: "03", file: "03-udev-naming.html",              title: "udev & Persistent Naming",             zh: "udev 與持久化命名" },
+            { id: "04-drivers-modules-firmware", num: "04", file: "04-drivers-modules-firmware.html", title: "Drivers, Modules & Firmware",          zh: "驅動、模組與韌體" },
+            { id: "05-buses-enumeration",        num: "05", file: "05-buses-enumeration.html",        title: "Buses & Enumeration",                  zh: "匯流排與列舉" },
+            { id: "06-serial-tty",               num: "06", file: "06-serial-tty.html",               title: "Serial & the TTY Layer",               zh: "串列與 TTY 層" },
+            { id: "07-interrupts-dma-mmio",      num: "07", file: "07-interrupts-dma-mmio.html",      title: "Interrupts, DMA & MMIO",               zh: "中斷、DMA 與 MMIO" },
+            { id: "08-multiplexing-epoll",       num: "08", file: "08-multiplexing-epoll.html",       title: "Multiplexing: poll, epoll & io_uring", zh: "I/O 多工：poll、epoll 與 io_uring" },
+            { id: "09-networking-io",            num: "09", file: "09-networking-io.html",            title: "Networking I/O: NIC to Socket",        zh: "網路 I/O：從網卡到 socket" },
+            { id: "10-can-socketcan",            num: "10", file: "10-can-socketcan.html",            title: "CAN & SocketCAN",                      zh: "CAN 與 SocketCAN" },
+            { id: "11-realtime-robust-io",       num: "11", file: "11-realtime-robust-io.html",       title: "Real-Time & Robust I/O",               zh: "即時與穩健 I/O" },
+            { id: "12-capstone-robot-io",        num: "12", file: "12-capstone-robot-io.html",        title: "Capstone: A Robot's I/O Architecture", zh: "結業專題：機器人的 I/O 架構" },
+            { id: "glossary",                    num: "G",  file: "glossary.html",                    title: "Glossary (EN/中)",                     zh: "術語表" }
+          ]
+        }
+      }
     }
   };
 
@@ -238,13 +263,14 @@
   function injectLangToggle() {
     const bar = $(".topbar");
     if (!bar || $("#lang-toggle")) return;
-    const btn = el("button", "lang-toggle", t.toggle);
+    let cur = lang;                                  // live language — the hub toggles in place, so this must update
+    const btn = el("button", "lang-toggle", T[cur].toggle);
     btn.id = "lang-toggle";
     btn.setAttribute("aria-label", "Switch language");
     btn.addEventListener("click", () => {
-      const nextLang = lang === "zh" ? "en" : "zh";
+      const nextLang = cur === "zh" ? "en" : "zh";
       setPref(nextLang);
-      if (onHub) { applyI18nVisibility(nextLang); renderHub(nextLang); btn.textContent = T[nextLang].toggle; }
+      if (onHub) { cur = nextLang; applyI18nVisibility(nextLang); renderHub(nextLang); btn.textContent = T[nextLang].toggle; }
       else { location.href = siblingURL(); }
     });
     const anchor = bar.querySelector(".track-pill") || bar.querySelector(".spacer");
