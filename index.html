@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Study — Embedded · ML/DL · PID</title>
+<link rel="stylesheet" href="assets/styles.css">
+</head>
+<body data-page="hub">
+<div id="read-progress"></div>
+
+<header class="topbar">
+  <a class="brand" href="index.html"><span class="dot" style="background:#a371f7;box-shadow:0 0 12px #a371f7"></span> <span class="lang-en">Study</span><span class="lang-zh">學習</span></a>
+  <span class="spacer"></span>
+  <span class="track-pill" style="--accent:#a371f7;--accent-2:#c8a6ff"><span class="lang-en">Offline · iPad-ready</span><span class="lang-zh">離線 · 適合 iPad</span></span>
+</header>
+
+<main class="hub">
+
+  <section class="hub-hero">
+    <h1><span class="lang-en">Self-Study <span class="accent">Courses</span></span><span class="lang-zh">自學<span class="accent">課程</span></span></h1>
+    <p>
+      <span class="lang-en">Three complete, hands-on courses — from embedded firmware to deep learning to control theory. Every concept taught the same way: intuition → math → code → real case → an interactive you run right here. 100% offline, dark, and tuned for the iPad.</span>
+      <span class="lang-zh">三套完整的實作課程 — 從嵌入式韌體、深度學習到控制理論。每個概念都用同一套方法講：直覺 → 數學 → 程式碼 → 真實案例 → 你可以當場操作的互動元件。100% 離線、深色主題，並為 iPad 最佳化。</span>
+    </p>
+  </section>
+
+  <section class="track-grid">
+
+    <a class="track-card embedded" data-course="embedded" href="embedded-mastery/Arduino/01-intro.html">
+      <div class="tc-top">
+        <div class="tc-logo">🔌</div>
+        <div>
+          <h2><span class="lang-en">Embedded Mastery</span><span class="lang-zh">嵌入式精通</span></h2>
+          <div class="tc-sub"><span class="lang-en">Arduino (AVR) &amp; STM32 (ARM) · 19 chapters · beginner → master</span><span class="lang-zh">Arduino (AVR) 與 STM32 (ARM) · 19 章 · 初學 → 精通</span></div>
+        </div>
+      </div>
+      <p><span class="lang-en">Blink your first LED, then architect real-time control systems. GPIO &amp; Ohm's law, the ADC, PWM, timers &amp; interrupts, the three serial buses, DMA, FreeRTOS, and a closed-loop PID motor-control capstone.</span><span class="lang-zh">從點亮第一顆 LED，到設計即時控制系統。GPIO 與歐姆定律、ADC、PWM、計時器與中斷、三種串列匯流排、DMA、FreeRTOS，最後是閉迴路 PID 馬達控制結業專題。</span></p>
+      <div class="tc-chapters">
+        <span>Arduino × 9</span><span>STM32 × 10</span><span>GPIO</span><span>PWM</span><span>Timers/IRQ</span><span>I²C·SPI</span><span>DMA</span><span>RTOS</span><span>PID</span>
+      </div>
+      <div class="tc-progress"><i></i></div>
+      <div class="tc-progress-label">0 / 19 chapters complete</div>
+    </a>
+
+    <a class="track-card mldl" data-course="mldl" href="ml-dl-curriculum/00-what-is-ml.html">
+      <div class="tc-top">
+        <div class="tc-logo">🧠</div>
+        <div>
+          <h2><span class="lang-en">Machine Learning &amp; Deep Learning</span><span class="lang-zh">機器學習與深度學習</span></h2>
+          <div class="tc-sub"><span class="lang-en">22 lessons + appendix · NumPy &amp; PyTorch</span><span class="lang-zh">22 課 + 附錄 · NumPy 與 PyTorch</span></div>
+        </div>
+      </div>
+      <p><span class="lang-en">A beginner → master path: the math toolbox, linear/logistic regression, gradient descent, trees &amp; SVMs, k-means &amp; PCA, neural nets &amp; backprop, CNNs, RNNs, Transformers, generative models, RL, and MLOps — with live interactive demos.</span><span class="lang-zh">初學 → 精通的路徑：數學工具箱、線性／邏輯迴歸、梯度下降、決策樹與 SVM、k-平均與 PCA、神經網路與反向傳播、CNN、RNN、Transformer、生成模型、強化學習與 MLOps — 附即時互動示範。</span></p>
+      <div class="tc-chapters">
+        <span>Gradient descent</span><span>k-Means/PCA</span><span>Backprop</span><span>CNNs</span><span>Attention</span><span>RL</span>
+      </div>
+      <div class="tc-progress"><i></i></div>
+      <div class="tc-progress-label">0 / 24 chapters complete</div>
+    </a>
+
+    <a class="track-card pid" data-course="pid" href="pid/01-plant.html">
+      <div class="tc-top">
+        <div class="tc-logo">🧭</div>
+        <div>
+          <h2><span class="lang-en">PID Control for a USV</span><span class="lang-zh">USV 的 PID 控制</span></h2>
+          <div class="tc-sub"><span class="lang-en">8 chapters + a live heading-hold simulator</span><span class="lang-zh">8 章 + 即時航向保持模擬器</span></div>
+        </div>
+      </div>
+      <p><span class="lang-en">Learn PID by tuning a real boat. P/I/D term by term, integral windup, derivative kick &amp; noise, the classic angle-wrap bug, and field tuning — every "case" driven live in a Nomoto heading-hold simulator you control with sliders.</span><span class="lang-zh">透過整定一艘真實的船來學 PID。逐項拆解 P/I/D、積分飽和、微分衝擊與雜訊、經典的角度纏繞 bug，以及實地整定 — 每個「案例」都在你用滑桿操控的 Nomoto 航向保持模擬器中即時呈現。</span></p>
+      <div class="tc-chapters">
+        <span>P · I · D</span><span>Anti-windup</span><span>Derivative kick</span><span>Angle wrap</span><span>Live sim</span><span>ROS 2</span>
+      </div>
+      <div class="tc-progress"><i></i></div>
+      <div class="tc-progress-label">0 / 9 chapters complete</div>
+    </a>
+
+  </section>
+
+  <section class="hub-features">
+    <div class="f"><div class="fi">📡</div><h3><span class="lang-en">100% offline</span><span class="lang-zh">100% 離線</span></h3><p><span class="lang-en">KaTeX, Mermaid &amp; syntax highlighting are bundled locally. No internet needed.</span><span class="lang-zh">KaTeX、Mermaid 與語法高亮都在本機。完全不需要網路。</span></p></div>
+    <div class="f"><div class="fi">🧪</div><h3><span class="lang-en">Interactive</span><span class="lang-zh">可互動</span></h3><p><span class="lang-en">Live canvas simulators, quizzes, numeric checks &amp; reveal-able coding challenges.</span><span class="lang-zh">即時畫布模擬器、測驗、數值檢查與可展開的程式挑戰。</span></p></div>
+    <div class="f"><div class="fi">∑</div><h3><span class="lang-en">Math + real code</span><span class="lang-zh">數學 + 真實程式</span></h3><p><span class="lang-en">Proper derivations beside real, correct code you'll actually use.</span><span class="lang-zh">完整推導，搭配你真的會用到的正確程式碼。</span></p></div>
+    <div class="f"><div class="fi">🌏</div><h3><span class="lang-en">Bilingual</span><span class="lang-zh">雙語</span></h3><p><span class="lang-en">Every page in English and Traditional Chinese — switch anytime with the toggle.</span><span class="lang-zh">每一頁都有英文與繁體中文 — 用切換鈕隨時切換。</span></p></div>
+    <div class="f"><div class="fi">📈</div><h3><span class="lang-en">Progress tracking</span><span class="lang-zh">進度追蹤</span></h3><p><span class="lang-en">Completed chapters are remembered on this device and shown on these bars.</span><span class="lang-zh">完成的章節會記在這台裝置上，並顯示在這些進度條。</span></p></div>
+    <div class="f"><div class="fi">🌙</div><h3><span class="lang-en">iPad-friendly</span><span class="lang-zh">適合 iPad</span></h3><p><span class="lang-en">A calm dark theme, big readable type, and a touch-tuned slide-over menu.</span><span class="lang-zh">沉穩的深色主題、易讀的大字級，以及為觸控設計的側滑選單。</span></p></div>
+  </section>
+
+  <p style="text-align:center;color:var(--fg-faint);font-size:13px;margin-top:50px;">
+    <span class="lang-en">Tip: tap a course to begin. Use the EN/繁中 button to switch language; your progress lives only in this browser.</span>
+    <span class="lang-zh">提示：點一張課程卡片即可開始。用 EN/繁中 按鈕切換語言；你的進度只存在這個瀏覽器裡。</span>
+  </p>
+
+</main>
+
+<script src="assets/app.js"></script>
+</body>
+</html>

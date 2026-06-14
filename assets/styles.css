@@ -474,3 +474,44 @@ details.ex-acc .acc-body { padding: 4px 14px 14px; border-top: 1px solid var(--b
 
 /* respect reduced motion */
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
+
+/* =========================================================== ADDED: study =====
+   Shared additions for the unified site: language toggle, 3-course hub,
+   per-course accents, and the toggle/select sim controls.
+   ============================================================================ */
+
+/* per-course accents for chapter pages (embedded uses track-arduino/stm32) */
+body.course-pid  { --accent:#3fb950; --accent-2:#56d364; }
+body.course-mldl { --accent:#a371f7; --accent-2:#c8a6ff; }
+
+/* language toggle (injected by app.js into .topbar) */
+.lang-toggle {
+  font: 600 13px var(--mono); padding: 5px 12px; border-radius: 999px; cursor: pointer;
+  background: var(--panel); color: var(--accent-2);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  transition: filter .15s, border-color .15s;
+}
+.lang-toggle:hover { filter: brightness(1.15); border-color: var(--accent); }
+
+/* the master hub: 3 courses, responsive */
+.track-grid { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.track-card.embedded { --accent:#33b1ff; --accent-2:#6cc4ff; }
+.track-card.mldl     { --accent:#a371f7; --accent-2:#c8a6ff; }
+.track-card.pid      { --accent:#3fb950; --accent-2:#56d364; }
+.track-card.embedded:hover { border-color:#33b1ff; }
+.track-card.mldl:hover     { border-color:#a371f7; }
+.track-card.pid:hover      { border-color:#3fb950; }
+.track-card.embedded .tc-logo { background: color-mix(in srgb,#33b1ff 22%, transparent); }
+.track-card.mldl .tc-logo     { background: color-mix(in srgb,#a371f7 22%, transparent); }
+.track-card.pid .tc-logo      { background: color-mix(in srgb,#3fb950 22%, transparent); }
+.hub-hero h1 .accent { background: linear-gradient(90deg,#33b1ff,#a371f7,#3fb950); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; }
+
+/* sim controls: toggle (checkbox) + select, alongside the existing range sliders */
+.sim .controls label.toggle { flex-direction: row; align-items: center; gap: 8px; min-width: 0; cursor: pointer; }
+.sim .controls label.toggle input[type=checkbox] { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; }
+.sim .controls select {
+  font: 13px var(--sans); padding: 6px 8px; border-radius: 7px;
+  background: var(--bg-soft); color: var(--fg-strong); border: 1px solid var(--border);
+}
+.sim .legend { display:flex; flex-wrap:wrap; gap:14px; margin-top:10px; font:12.5px var(--sans); color:var(--fg-muted); }
+.sim .legend i { display:inline-block; width:14px; height:3px; border-radius:2px; margin-right:6px; vertical-align:middle; }

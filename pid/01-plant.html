@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>The Plant &amp; Open Loop — PID Control for a USV</title>
+<link rel="stylesheet" href="../assets/katex/katex.min.css">
+<link rel="stylesheet" href="../assets/vendor/atom-one-dark.min.css">
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body class="course-pid" data-course="pid" data-track="main" data-chapter="01-plant">
+<div id="read-progress"></div>
+<header class="topbar">
+  <button class="menu-btn" id="menu-btn" aria-label="Open chapter menu">☰</button>
+  <a class="brand" href="../index.html"><span class="dot"></span> PID&nbsp;·&nbsp;USV</a>
+  <span class="spacer"></span>
+  <span class="track-pill">PID · Ch 01</span>
+  <span class="done-chip" id="done-chip">In progress</span>
+</header>
+<div class="layout">
+  <nav class="sidebar" id="sidebar"></nav>
+  <div class="sb-backdrop" id="sb-backdrop"></div>
+  <main class="main">
+    <article class="content">
+
+      <section class="chapter-hero">
+        <div class="eyebrow">PID Course · Chapter 01 · Foundations</div>
+        <h1>The Plant &amp; Open Loop: the boat you're about to tame</h1>
+        <p>Before a single gain, you need a correct mental model of <em>what</em> you're steering. We build the boat from its physics, watch it drift with no controller, then write down the exact control law you'll spend the rest of the course tuning.</p>
+        <div class="meta"><span>⏱ ~30 min</span><span>🧠 Nomoto model</span><span>⚡ Live sim</span><span>∑ Discrete PID</span></div>
+      </section>
+
+      <!-- ============================================================ §1 -->
+      <h2 id="the-boat"><span class="sec-no">1</span>The boat: one model, used in every case</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>build the picture first</small></div>
+      <p>Our "plant" — control-speak for the thing being controlled — is an unmanned surface vessel (USV) holding a compass heading. You don't command heading directly; you command a <strong>rudder angle</strong> $\delta$. The rudder makes the hull <em>turn</em> at some yaw rate $r$, and heading $\psi$ is whatever that turning accumulates to. That one sentence is the source of every difficulty to come.</p>
+
+      <div class="callout intuition">
+        <div class="c-title"><span class="ico">💡</span> The one-sentence model</div>
+        <p>The rudder sets a <strong>turning rate</strong>, not a heading. Heading is the running total of turning — so the boat always has momentum heading <em>into</em> wherever you point it.</p>
+      </div>
+
+      <p>We use the simplest model that still behaves like a real boat: the <strong>first-order Nomoto model</strong>. It says the yaw rate lags the rudder through a single time constant, and heading is the integral of yaw rate.</p>
+
+      <div class="mermaid">
+flowchart LR
+    D["rudder δ"] -->|"gain K, lag T"| R["yaw rate r"]
+    R -->|"∫ dt"| P["heading ψ"]
+    W["current / wind"] --> R
+</div>
+
+      <div class="layer"><span class="step">②</span> Math <small>derive it</small></div>
+      <p>The Nomoto equation and the heading integral are just two coupled first-order ODEs:</p>
+      <div class="math-box">$$ T\,\dot r + r = K\,(\delta + d), \qquad \dot\psi = r $$</div>
+      <p>where $K$ is the steady turning gain (yaw rate per unit rudder), $T$ is the time constant (how sluggishly the hull responds), and $d$ is a constant disturbance — current or wind — that acts just like a stuck offset on the rudder. Read the steady state: set $\dot r = 0$ and the boat turns at $r_\infty = K(\delta+d)$ forever. There is <em>no</em> heading that makes $\dot\psi = 0$ unless $r = 0$, i.e. unless total rudder-plus-disturbance is zero.</p>
+
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Thing</th><th>Value</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td>$K$</td><td>0.6 (rad/s)/rad</td><td>10° rudder → ~6 °/s steady turn</td></tr>
+          <tr><td>$T$</td><td>2.5 s</td><td>how long the hull takes to wind up to that rate</td></tr>
+          <tr><td>rudder stop</td><td>±35°</td><td>actuator saturation</td></tr>
+          <tr><td>servo slew</td><td>25 °/s</td><td>the rudder can't jump (matters in Ch 07)</td></tr>
+          <tr><td>current $d$</td><td>≡ 4° stuck rudder</td><td>constant push on the bow</td></tr>
+          <tr><td>loop rate</td><td>20 Hz ($dt=0.05$ s)</td><td>typical hobby-USV control rate</td></tr>
+        </tbody>
+      </table></div>
+
+      <!-- ============================================================ §2 -->
+      <h2 id="open-loop"><span class="sec-no">2</span>Open loop: what the boat does on its own</h2>
+
+      <div class="layer"><span class="step">①</span> Intuition <small>hands off the wheel</small></div>
+      <p>Hold the rudder at a fixed angle, take your hands off, and watch. There's no controller here — just the plant. Drag the slider and read the two panels: heading on top, rudder on the bottom.</p>
+
+      <div class="sim">
+        <div class="sim-title"><span>🧭</span> Open-loop heading (fixed rudder, no controller)</div>
+        <canvas id="sim-openloop"></canvas>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> What to notice</div>
+        <p>Yaw rate doesn't jump to its final value — it <em>climbs</em> there, reaching ~63% at $t=T=2.5$ s (that's what a first-order lag does). And heading <strong>never settles</strong>: it ramps forever, because heading is the integral of a non-zero turning rate. Set the rudder to 0° and it finally stops — but then you can't steer anywhere.</p>
+      </div>
+
+      <div class="layer"><span class="step">④</span> Real case <small>why this matters</small></div>
+      <p>This is every vehicle that steers by rate: boats, quadcopter yaw, car heading, a tank turret. You can never "set heading" open-loop; you'd have to time the rudder perfectly and undo it perfectly. The instant there's a disturbance, you're off. That's why we close the loop.</p>
+
+      <!-- ============================================================ §3 -->
+      <h2 id="two-facts"><span class="sec-no">3</span>The two facts that cause everything</h2>
+      <p>Keep these in your head — every later chapter is a fight against them:</p>
+      <ol>
+        <li><strong>The rudder controls rate, not heading.</strong> You command turning; heading accumulates. So the boat carries momentum <em>into</em> the target.</li>
+        <li><strong>The response lags.</strong> Whatever the rudder does now, the hull keeps doing the old thing for a couple of seconds ($T=2.5$ s).</li>
+      </ol>
+      <div class="callout warn">
+        <div class="c-title"><span class="ico">⚠️</span> Lag + accumulation = overshoot</div>
+        <p>Momentum into the setpoint plus a delayed response is the universal recipe for overshoot and ringing. A good controller doesn't remove these facts — it <em>anticipates</em> them.</p>
+      </div>
+
+      <!-- ============================================================ §4 -->
+      <h2 id="control-law"><span class="sec-no">4</span>The control law you'll implement</h2>
+      <div class="layer"><span class="step">②</span> Math <small>the discrete PID</small></div>
+      <p>Continuous PID is $u(t) = k_p e + k_i\!\int e\,dt + k_d \dfrac{de}{dt}$, with error $e = \psi_\text{set} - \psi$. We run it on a microcontroller every $dt$, so we discretize: the integral becomes a running sum, the derivative a finite difference.</p>
+      <div class="math-box">$$ u_n = k_p e_n + k_i \underbrace{\textstyle\sum_k e_k\,dt}_{\text{integral}} + k_d \underbrace{\frac{e_n - e_{n-1}}{dt}}_{\text{derivative}}, \qquad u \leftarrow \mathrm{clamp}(u,\,-\delta_\max,\,+\delta_\max) $$</div>
+
+      <div class="codeblock">
+        <div class="code-head">control step (per dt) <span class="lang">pseudocode</span></div>
+<pre><code class="language-python">error      = wrap(setpoint - heading)        # rad, ALWAYS wrapped (Ch 07)
+integral  += error * dt                       # rad·s, persists across calls
+derivative = (error - prev_error) / dt        # rad/s
+
+u = kp*error + ki*integral + kd*derivative    # rad of rudder
+u = clamp(u, -RUDDER_MAX, +RUDDER_MAX)
+prev_error = error
+</code></pre>
+      </div>
+
+      <p>The three gains have <em>units</em>, and reading them physically makes tuning far less mystical:</p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Gain</th><th>Units</th><th>Reads as</th></tr></thead>
+        <tbody>
+          <tr><td>$k_p$</td><td>rad rudder / rad error</td><td>"how much rudder per degree I'm off"</td></tr>
+          <tr><td>$k_i$</td><td>rad rudder / (rad·s)</td><td>"how hard I lean on a <em>persistent</em> error"</td></tr>
+          <tr><td>$k_d$</td><td>rad rudder / (rad/s)</td><td>"how much rudder per degree-per-second of swing"</td></tr>
+        </tbody>
+      </table></div>
+
+      <!-- ============================================================ §5 -->
+      <h2 id="by-hand"><span class="sec-no">5</span>One timestep by hand</h2>
+      <p>Mid-maneuver snapshot, gains $k_p=2,\ k_i=0.2,\ k_d=3$: heading 60°, setpoint 90°, previous error 31°, integral so far 0.80 rad·s.</p>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Step</th><th>Computation</th><th>Result</th></tr></thead>
+        <tbody>
+          <tr><td>error</td><td>wrap(90°−60°)=30°</td><td>0.5236 rad</td></tr>
+          <tr><td>P</td><td>2 × 0.5236</td><td><strong>+1.047 rad</strong> (60°)</td></tr>
+          <tr><td>integral</td><td>0.80 + 0.5236×0.05</td><td>0.8262 rad·s</td></tr>
+          <tr><td>I</td><td>0.2 × 0.8262</td><td><strong>+0.165 rad</strong> (9.5°)</td></tr>
+          <tr><td>derivative</td><td>(0.5236 − 0.5411)/0.05</td><td>−0.349 rad/s</td></tr>
+          <tr><td>D</td><td>3 × (−0.349)</td><td><strong>−1.047 rad</strong> (−60°)</td></tr>
+          <tr><td>sum</td><td>1.047 + 0.165 − 1.047</td><td>0.165 rad = <strong>9.5°</strong></td></tr>
+        </tbody>
+      </table></div>
+      <div class="callout math">
+        <div class="c-title"><span class="ico">∑</span> Read the result again</div>
+        <p>The boat is still 30° from the setpoint, yet P and D <em>exactly cancel</em> and the controller nearly coasts. The bow is already swinging in at 20 °/s — pushing harder would just overshoot harder. <strong>That cancellation is damping.</strong> P alone would have commanded 60°, clamped to 35°, full speed into the overshoot.</p>
+      </div>
+
+      <!-- ============================================================ §6 -->
+      <h2 id="the-class"><span class="sec-no">6</span>The PID, in code</h2>
+      <div class="layer"><span class="step">③</span> Code <small>read every line</small></div>
+      <p>Here is the controller as a small, reusable class — the same shape you'd drop into a ROS 2 node. The state (<code>integral</code>, <code>prev_error</code>) is what makes it a controller and not a formula: it remembers.</p>
+      <div class="codeblock">
+        <div class="code-head">pid_controller.py <span class="lang">Python</span></div>
+<pre><code class="language-python">class PID:
+    def __init__(self, kp, ki, kd, output_limits=(-1.0, 1.0)):
+        self.kp, self.ki, self.kd = kp, ki, kd
+        self.out_min, self.out_max = output_limits
+        self.integral = 0.0
+        self.prev_error = None          # None = no previous sample yet
+
+    def reset(self):
+        """Call when the controller is re-engaged after being off."""
+        self.integral = 0.0
+        self.prev_error = None
+
+    def update(self, error, dt):
+        """One control step. error is already angle-wrapped (rad)."""
+        p = self.kp * error
+        self.integral += error * dt
+        i = self.ki * self.integral
+        d = 0.0 if self.prev_error is None else self.kd * (error - self.prev_error) / dt
+        self.prev_error = error
+        u = p + i + d
+        return max(self.out_min, min(self.out_max, u))   # clamp
+</code></pre>
+      </div>
+      <div class="callout tip">
+        <div class="c-title"><span class="ico">🛠️</span> Two design choices live inside <code>update()</code></div>
+        <p>This version is the honest skeleton. <strong>Anti-windup</strong> (Ch 05) and <strong>derivative-on-measurement</strong> (Ch 06) are decisions you'll add here. We'll meet the bugs that motivate each one before we fix them.</p>
+      </div>
+
+      <!-- ============================================================ §7 -->
+      <h2 id="your-turn"><span class="sec-no">7</span>Your turn</h2>
+
+      <div class="exercise" data-ex="quiz" data-id="pid01-why-ramp">
+        <div class="ex-head"><span class="badge">Q1</span> Conceptual check</div>
+        <div class="ex-q">In the open-loop sim, why does heading ramp forever instead of settling at some angle?</div>
+        <ul class="ex-options">
+          <li data-correct="false">The model is unstable — any rudder makes it blow up.</li>
+          <li data-correct="true">Heading is the integral of a non-zero yaw rate, so it accumulates without bound.</li>
+          <li data-correct="false">The disturbance keeps growing over time.</li>
+          <li data-correct="false">The rudder slew limit prevents it from stopping.</li>
+        </ul>
+        <div class="ex-explain">A fixed rudder gives a fixed steady yaw rate $r_\infty = K\delta$. Heading $\psi = \int r\,dt$ then climbs linearly forever. Only $r = 0$ (zero net rudder) stops it — which is why you need feedback to <em>hold</em> a heading.</div>
+      </div>
+
+      <div class="exercise" data-ex="numeric" data-id="pid01-steady-rate" data-answer="6.0" data-tol="0.2">
+        <div class="ex-head"><span class="badge">Q2</span> Compute it</div>
+        <div class="ex-q">With $K = 0.6$ (rad/s)/rad and a steady rudder of $10° = 0.1745$ rad, what is the steady-state yaw rate in <strong>degrees per second</strong>? (Hint: $r_\infty = K\delta$, then convert.)</div>
+        <input class="ex-input" type="number" step="any" placeholder="value"><span class="ex-unit">°/s</span>
+        <button class="ex-check">Check</button>
+        <div class="ex-explain">$r_\infty = 0.6 \times 0.1745 = 0.1047$ rad/s $= 6.0$ °/s. The hull reaches ~63% of this (3.8 °/s) after $T = 2.5$ s and ~95% after $3T$.</div>
+      </div>
+
+      <div class="exercise" data-ex="reveal" data-id="pid01-discretize">
+        <div class="ex-head"><span class="badge">Q3</span> Derivation — discretize the integral term</div>
+        <div class="ex-q">The continuous I term is $k_i\int_0^t e(\tau)\,d\tau$. Show how it becomes the running sum <code>integral += error*dt</code> in code, and say what variable must persist between calls.</div>
+        <details class="ex-acc"><summary>Hint</summary><div class="acc-body">A definite integral over $[0,t]$ is the area under $e(\tau)$. Approximate that area with rectangles of width $dt$ and height $e_k$.</div></details>
+        <details class="ex-acc"><summary>Show one solution</summary><div class="acc-body">
+          <p>Rectangle (left-Riemann) approximation: $\int_0^{t_n} e\,d\tau \approx \sum_{k=0}^{n} e_k\,dt$. Each step adds one rectangle $e_n\,dt$ to the previous total, which is exactly <code>integral += error*dt</code>. The <strong>accumulator <code>self.integral</code> must persist</strong> across <code>update()</code> calls — it <em>is</em> the controller's memory of how long the error has lingered. Reset it (<code>reset()</code>) whenever the controller is re-engaged, or a stale sum from minutes ago becomes a windup bug.</p>
+        </div></details>
+      </div>
+
+      <div class="callout key">
+        <div class="c-title"><span class="ico">🔑</span> Chapter recap</div>
+        <p>The boat is a first-order Nomoto plant: rudder → (lagged) yaw rate → (integrated) heading, plus a constant current. Open-loop it ramps forever — you must close the loop. The discrete PID law sums P, I, D and clamps to the rudder limits; its state (<code>integral</code>, <code>prev_error</code>) is its memory. Next: turn on just the P term and meet the spring.</p>
+      </div>
+
+      <nav class="chap-nav" id="chap-nav"></nav>
+    </article>
+  </main>
+</div>
+<button id="to-top" aria-label="Back to top">↑</button>
+<script src="../assets/vendor/highlight.min.js"></script>
+<script src="../assets/katex/katex.min.js"></script>
+<script src="../assets/katex/contrib/auto-render.min.js"></script>
+<script src="../assets/vendor/mermaid.min.js"></script>
+<script src="../assets/app.js"></script>
+<script src="../assets/pid-sim.js"></script>
+<script>EM.pidSim("sim-openloop", EM.pidPresets.openLoop());</script>
+</body>
+</html>
